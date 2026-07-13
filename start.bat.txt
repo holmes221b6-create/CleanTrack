@@ -1,0 +1,5 @@
+@echo off
+cd /d C:\project\backendfile
+call venv\Scripts\activate
+python app.py
+pause
