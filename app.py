@@ -22,7 +22,7 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 # Explicitly trust both localhost and 127.0.0.1 variants of your dashboard
-CORS(app, resources={r"/*": {"origins": ["http://localhost:8080", "http://127.0.0.1:8080"]}}, supports_credentials=True)
+CORS(app)
 jwt = JWTManager(app)
 
 @app.after_request
