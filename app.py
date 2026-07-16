@@ -30,7 +30,7 @@ def after_request(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Private-Network"] = "true"
+    response.headers["Access-Control-Allow-Private-Network"] = "true"  
     return response
 
 @app.before_request
@@ -472,6 +472,27 @@ def create_log():
                  (lid, task_id, uid, zone_id, before_photo, after_photo, ai_score, ai_feedback, notes))
     conn.execute("UPDATE tasks SET status='completed', completed_at=CURRENT_TIMESTAMP, assigned_to=? WHERE id=? AND status!='completed'", (uid, task_id))
     conn.execute("UPDATE zones SET status='cleaned', last_cleaned_at=CURRENT_TIMESTAMP WHERE id=?", (zone_id,))
+    lid = str(uuid.uuid4())
+
+conn.execute("""
+INSERT INTO cleaning_logs
+(id, task_id, user_id, zone_id,
+ before_photo, after_photo,
+ ai_cleanliness_score, ai_feedback,
+ notes, logged_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+""",
+(
+    lid,
+    tid,
+    uid,
+    task["zone_id"],
+    None,
+    None,
+    None,
+    None,
+    d.get("notes")
+)
     conn.commit(); conn.close()
     return jsonify(id=lid, ai_cleanliness_score=ai_score, ai_feedback=ai_feedback), 201
 
