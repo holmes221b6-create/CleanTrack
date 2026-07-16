@@ -474,25 +474,6 @@ def create_log():
     conn.execute("UPDATE zones SET status='cleaned', last_cleaned_at=CURRENT_TIMESTAMP WHERE id=?", (zone_id,))
     lid = str(uuid.uuid4())
 
-conn.execute("""
-INSERT INTO cleaning_logs
-(id, task_id, user_id, zone_id,
- before_photo, after_photo,
- ai_cleanliness_score, ai_feedback,
- notes, logged_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-""",
-(
-    lid,
-    tid,
-    uid,
-    task["zone_id"],
-    None,
-    None,
-    None,
-    None,
-    d.get("notes")
-)
     conn.commit(); conn.close()
     return jsonify(id=lid, ai_cleanliness_score=ai_score, ai_feedback=ai_feedback), 201
 
