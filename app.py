@@ -26,7 +26,11 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 # Explicitly trust both localhost and 127.0.0.1 variants of your dashboard
-CORS(app)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    supports_credentials=True
+)
 jwt = JWTManager(app)
 
 @app.after_request
@@ -35,6 +39,7 @@ def after_request(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Private-Network"] = "true"  
+    response.headers["Access-Control-Allow-Origin"] = "*"
     response
 
 @app.before_request
