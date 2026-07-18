@@ -13,6 +13,10 @@ from flask_jwt_extended import (
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from database import get_db, init_db
+from io import BytesIO
+from flask import send_file
+from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
 
 load_dotenv()
 
@@ -31,7 +35,7 @@ def after_request(response):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Private-Network"] = "true"  
-    return response
+    response
 
 @app.before_request
 def handle_options():
@@ -662,6 +666,54 @@ def analytics_kpis():
     conn.close()
     return jsonify(compliance_7d=compliance(7), compliance_30d=compliance(30),
                    avg_duration_30d=round(avg_dur) if avg_dur else None, predictive_warnings=warnings)
+
+@app.route("/api/reports/pdf")
+@jwt_required()
+def export_pdf():
+
+    conn = get_db()
+
+    total = conn.execute(
+        "SELECT COUNT(*) as c FROM tasks"
+    ).fetchone()["c"]
+
+    completed = conn.execute(
+        "SELECT COUNT(*) as c FROM tasks WHERE status='completed'"
+    ).fetchone()["c"]
+
+    missed = conn.execute(
+        "SELECT COUNT(*) as c FROM tasks WHERE status='missed'"
+    ).fetchone()["c"]
+
+    conn.close()
+
+    compliance = round(
+        (completed / total) * 100, 1
+    ) if total else 0
+
+    buffer = BytesIO()
+
+    doc = SimpleDocTemplate(buffer)
+    styles = getSampleStyleSheet()
+
+    content = [
+        Paragraph("CleanTrack Report", styles["Title"]),
+        Paragraph(f"Total Tasks: {total}", styles["Normal"]),
+        Paragraph(f"Completed Tasks: {completed}", styles["Normal"]),
+        Paragraph(f"Missed Tasks: {missed}", styles["Normal"]),
+        Paragraph(f"Compliance: {compliance}%", styles["Normal"]),
+    ]
+
+    doc.build(content)
+
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name="cleantrack_report.pdf",
+        mimetype="application/pdf"
+    )
 
 # ─── uploads ─────────────────────────────────────────────────────────────────
 
