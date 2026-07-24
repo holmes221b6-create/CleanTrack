@@ -482,40 +482,61 @@ def overdue_tasks():
     conn.close()
     return jsonify(rows)
 # ─── cleaning logs ────────────────────────────────────────────────────────────
-
 @app.route("/api/logs", methods=["POST"])
 @jwt_required()
 def create_log():
     uid = get_jwt_identity()
-    task_id  = request.form.get("task_id")
-    zone_id  = request.form.get("zone_id")
-    notes    = request.form.get("notes")
+    task_id = request.form.get("task_id")
+    zone_id = request.form.get("zone_id")
+    notes = request.form.get("notes")
+
     if not task_id or not zone_id:
         return jsonify(error="task_id and zone_id required"), 400
 
     before_photo = after_photo = None
+
     for field in ("before_photo", "after_photo"):
         f = request.files.get(field)
         if f:
             fname = str(uuid.uuid4()) + os.path.splitext(f.filename)[1]
             f.save(os.path.join(UPLOAD_FOLDER, fname))
-            if field == "before_photo": before_photo = fname
-            else: after_photo = fname
+
+            if field == "before_photo":
+                before_photo = fname
+            else:
+                after_photo = fname
 
     ai_score, ai_feedback = (None, None)
+
     if after_photo:
         ai_score, ai_feedback = simulate_ai_score()
 
     lid = str(uuid.uuid4())
     conn = get_db()
-    conn.execute("INSERT INTO cleaning_logs VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                 (lid, task_id, uid, zone_id, before_photo, after_photo, ai_score, ai_feedback, notes))
-    conn.execute("UPDATE tasks SET status='completed', completed_at=CURRENT_TIMESTAMP, assigned_to=? WHERE id=? AND status!='completed'", (uid, task_id))
-    conn.execute("UPDATE zones SET status='cleaned', last_cleaned_at=CURRENT_TIMESTAMP WHERE id=?", (zone_id,))
-    lid = str(uuid.uuid4())
 
-    conn.commit(); conn.close()
-    return jsonify(id=lid, ai_cleanliness_score=ai_score, ai_feedback=ai_feedback), 201
+    conn.execute(
+        "INSERT INTO cleaning_logs VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        (lid, task_id, uid, zone_id, before_photo, after_photo, ai_score, ai_feedback, notes)
+    )
+
+    conn.execute(
+        "UPDATE tasks SET status='pending-approval', assigned_to=? WHERE id=?",
+        (uid, task_id)
+    )
+
+    conn.execute(
+        "UPDATE zones SET status='pending' WHERE id=?",
+        (zone_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(
+        id=lid,
+        ai_cleanliness_score=ai_score,
+        ai_feedback=ai_feedback
+    ), 201
 
 @app.route("/api/logs", methods=["GET"])
 @jwt_required()
