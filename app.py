@@ -338,6 +338,17 @@ def deactivate_user(uid):
 @jwt_required()
 def get_tasks():
     args = request.args
+    uid = get_jwt_identity()
+
+    conn = get_db()
+
+    user = conn.execute(
+        "SELECT role FROM users WHERE id=?",
+        (uid,)
+    ).fetchone()
+
+    role = user["role"]
+
     q = """
         SELECT t.*, z.name zone_name, z.floor, l.name location_name, u.name staff_name
         FROM tasks t
@@ -346,18 +357,40 @@ def get_tasks():
         LEFT JOIN users u ON t.assigned_to=u.id
         WHERE 1=1
     """
+
     params = []
-    if args.get("zone_id"):       q += " AND t.zone_id=?";       params.append(args["zone_id"])
-    if args.get("assigned_to"):   q += " AND t.assigned_to=?";   params.append(args["assigned_to"])
-    if args.get("status"):        q += " AND t.status=?";         params.append(args["status"])
-    if args.get("location_id"):   q += " AND z.location_id=?";   params.append(args["location_id"])
-    if args.get("date"):          q += " AND DATE(t.scheduled_at)=DATE(?)"; params.append(args["date"])
+
+    if args.get("zone_id"):
+        q += " AND t.zone_id=?"
+        params.append(args["zone_id"])
+
+    if args.get("assigned_to"):
+        q += " AND t.assigned_to=?"
+        params.append(args["assigned_to"])
+
+    if args.get("status"):
+        q += " AND t.status=?"
+        params.append(args["status"])
+
+    if args.get("location_id"):
+        q += " AND z.location_id=?"
+        params.append(args["location_id"])
+
+    if args.get("date"):
+        q += " AND DATE(t.scheduled_at)=DATE(?)"
+        params.append(args["date"])
+
+    # Staff can only see their own tasks
+    if role == "staff":
+        q += " AND t.assigned_to=?"
+        params.append(uid)
+
     q += " ORDER BY t.scheduled_at DESC LIMIT 200"
-    conn = get_db()
+
     rows = rows_to_list(conn.execute(q, params).fetchall())
     conn.close()
-    return jsonify(rows)
 
+    return jsonify(rows)
 @app.route("/api/tasks/my")
 @jwt_required()
 def my_tasks():
@@ -448,7 +481,6 @@ def overdue_tasks():
     """).fetchall())
     conn.close()
     return jsonify(rows)
-
 # ─── cleaning logs ────────────────────────────────────────────────────────────
 
 @app.route("/api/logs", methods=["POST"])
