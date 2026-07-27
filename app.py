@@ -557,6 +557,17 @@ def get_logs():
     conn.close()
     return jsonify(rows)
 
+@app.route("/api/tasks/<tid>/approve", methods=["PUT"])
+@jwt_required()
+def approve_task(tid):
+    pass
+
+
+@app.route("/api/tasks/<tid>/reject", methods=["PUT"])
+@jwt_required()
+def reject_task(tid):
+    pass
+
 # ─── alerts ────────────────────────────────────────────────────────────────────
 
 @app.route("/api/alerts", methods=["GET"])
