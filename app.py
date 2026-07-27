@@ -560,13 +560,33 @@ def get_logs():
 @app.route("/api/tasks/<tid>/approve", methods=["PUT"])
 @jwt_required()
 def approve_task(tid):
-    pass
+    conn = get_db()
+
+    conn.execute(
+        "UPDATE tasks SET status='completed' WHERE id=?",
+        (tid,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(message="Task approved")
 
 
 @app.route("/api/tasks/<tid>/reject", methods=["PUT"])
 @jwt_required()
 def reject_task(tid):
-    pass
+    conn = get_db()
+
+    conn.execute(
+        "UPDATE tasks SET status='rejected' WHERE id=?",
+        (tid,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(message="Task rejected")
 
 # ─── alerts ────────────────────────────────────────────────────────────────────
 
