@@ -4,7 +4,9 @@ from functools import wraps
 
 import bcrypt
 import qrcode
-from flask import Flask, request, jsonify, send_from_directory
+import resend
+
+from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token,
@@ -14,11 +16,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from database import get_db, init_db
 from io import BytesIO
-from flask import send_file
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 
-load_dotenv()
+load_dotenv("back.env")
+resend.api_key = os.getenv("RESEND_API_KEY")
 
 app = Flask(__name__, static_folder="../frontend", static_url_path="")
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET", "dev_secret_change_me")
