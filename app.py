@@ -12,15 +12,21 @@ from flask_jwt_extended import (
     JWTManager, create_access_token,
     jwt_required, get_jwt_identity, get_jwt
 )
+import smtplib
+from email.message import EmailMessage
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from database import get_db, init_db
 from io import BytesIO
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
-
 load_dotenv("back.env")
 resend.api_key = os.getenv("RESEND_API_KEY")
+
+GMAIL_SENDER = os.getenv("GMAIL_SENDER")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+SMTP_HOST = "smtp.gmail.com"
+SMTP_PORT = 587
 
 app = Flask(__name__, static_folder="../frontend", static_url_path="")
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET", "dev_secret_change_me")
@@ -35,6 +41,48 @@ CORS(
 )
 jwt = JWTManager(app)
 
+def send_gmail(to_email, subject, body):
+    try:
+        msg = EmailMessage()
+        msg["From"] = GMAIL_SENDER
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.set_content(body)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+            server.send_message(msg)
+
+        print(f"Email sent successfully to {to_email}")
+        return True
+
+    except Exception as e:
+        print(f"Email failed: {e}")
+        return False
+    
+@app.route("/api/send-email", methods=["POST"])
+@jwt_required()
+def send_email_route():
+    data = request.get_json() or {}
+
+    to_email = data.get("to", "").strip()
+    subject = data.get("subject", "").strip()
+    message = data.get("message", "").strip()
+
+    if not to_email or not subject or not message:
+        return jsonify(error="To, subject, and message are required"), 400
+
+    success = send_gmail(to_email, subject, message)
+
+    if not success:
+        return jsonify(error="Failed to send email"), 500
+
+    return jsonify(
+        success=True,
+        message="Email sent successfully"
+    ), 200
+    
 @app.after_request
 def after_request(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -54,6 +102,7 @@ def handle_options():
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
