@@ -91,7 +91,7 @@ def send_email_route():
     
 @app.after_request
 def after_request(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Origin"] = "https://cleantrack-frontend-ry0o.onrender.com"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Private-Network"] = "true"
@@ -101,7 +101,7 @@ def after_request(response):
 def handle_options():
     if request.method == "OPTIONS":
         res = jsonify({})
-        res.headers["Access-Control-Allow-Origin"] = "*"
+        res.headers["Access-Control-Allow-Origin"] = "https://cleantrack-frontend-ry0o.onrender.com"
         res.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
         res.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
         return res, 200
