@@ -67,6 +67,8 @@ def send_gmail(to_email, subject, body):
         print(f"Email failed: {e}")
         return False
     
+    print("SEND EMAIL FUNCTION LOADED")
+    
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
 def send_email_route():
