@@ -49,18 +49,16 @@ jwt = JWTManager(app)
 
 def send_gmail(to_email, subject, body):
     try:
-        msg = EmailMessage()
-        msg["From"] = GMAIL_SENDER
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.set_content(body)
+        params = {
+            "from": "onboarding@resend.dev",
+            "to": [to_email],
+            "subject": subject,
+            "html": body.replace("\n", "<br>")
+        }
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
+        email = resend.Emails.send(params)
 
-        print(f"Email sent successfully to {to_email}")
+        print(f"Email sent successfully to {to_email}: {email}")
         return True
 
     except Exception as e:
@@ -198,7 +196,6 @@ def me():
     ).fetchone())
     conn.close()
     return jsonify(user)
-
 # ─── locations ────────────────────────────────────────────────────────────────
 
 @app.route("/api/locations", methods=["GET"])
