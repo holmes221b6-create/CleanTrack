@@ -1,4 +1,7 @@
 import os, uuid, random, io, base64
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -49,16 +52,41 @@ jwt = JWTManager(app)
 
 def send_gmail(to_email, subject, body):
     try:
-        params = {
-            "from": "onboarding@resend.dev",
-            "to": [to_email],
-            "subject": subject,
-            "html": body.replace("\n", "<br>")
-        }
+        token_json = os.getenv("GMAIL_TOKEN_JSON")
 
-        email = resend.Emails.send(params)
+        if token_json:
+            import json
+            creds = Credentials.from_authorized_user_info(
+                json.loads(token_json),
+                SCOPES
+            )
+        else:
+            creds = Credentials.from_authorized_user_file(
+                "token.json",
+                SCOPES
+            )
 
-        print(f"Email sent successfully to {to_email}: {email}")
+        service = build(
+            "gmail",
+            "v1",
+            credentials=creds
+        )
+
+        message = EmailMessage()
+        message["To"] = to_email
+        message["Subject"] = subject
+        message.set_content(body)
+
+        encoded_message = base64.urlsafe_b64encode(
+            message.as_bytes()
+        ).decode()
+
+        service.users().messages().send(
+            userId="me",
+            body={"raw": encoded_message}
+        ).execute()
+
+        print(f"Email sent successfully to {to_email}")
         return True
 
     except Exception as e:
