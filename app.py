@@ -434,7 +434,7 @@ def get_tasks():
     role = user["role"]
 
     q = """
-        SELECT t.*, z.name zone_name, z.floor, l.name location_name, u.name staff_name
+        SELECT t.*, z.name zone_name, z.floor, l.name location_name, u.name staff_name, u.email staff_email
         FROM tasks t
         LEFT JOIN zones z ON t.zone_id=z.id
         LEFT JOIN locations l ON z.location_id=l.id
@@ -627,8 +627,11 @@ def create_log():
 def get_logs():
     args = request.args
     q = """
-        SELECT cl.*, u.name staff_name, z.name zone_name
-        FROM cleaning_logs cl LEFT JOIN users u ON cl.user_id=u.id LEFT JOIN zones z ON cl.zone_id=z.id
+        SELECT cl.*, u.name staff_name, u.email staff_email, z.name zone_name
+FROM cleaning_logs cl
+LEFT JOIN tasks t ON cl.task_id=t.id
+LEFT JOIN users u ON t.assigned_to=u.id
+LEFT JOIN zones z ON cl.zone_id=z.id
         WHERE 1=1
     """
     params = []
