@@ -969,8 +969,10 @@ scheduler.add_job(check_overdue, "interval", minutes=15)
 
 # ─── run ──────────────────────────────────────────────────────────────────────
 
+
+init_db()
+
 if __name__ == "__main__":
-    init_db()
     from seed import seed
     seed()
     scheduler.start()
