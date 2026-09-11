@@ -209,8 +209,21 @@ def register():
         return jsonify(error="Email already registered"), 409
     uid = str(uuid.uuid4())
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                 (uid, name, email, data.get("phone"), hashed, data.get("role","staff"), data.get("location_id"), 1))
+    conn.execute("""
+    INSERT INTO users
+    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""", (
+    uid,
+    name,
+    email,
+    data.get("notification_email"),
+    data.get("phone"),
+    hashed,
+    data.get("role", "staff"),
+    data.get("location_id"),
+    1
+))
     conn.commit(); conn.close()
     return jsonify(id=uid), 201
 
@@ -371,7 +384,7 @@ def assign_zone(zid):
 def get_users():
     role = request.args.get("role")
     loc  = request.args.get("location_id")
-    q = "SELECT id,name,email,phone,role,location_id,is_active,created_at FROM users WHERE 1=1"
+    q = "SELECT id,name,email,notification_email,phone,role,location_id,is_active,created_at FROM users WHERE 1=1"
     params = []
     if role: q += " AND role=?"; params.append(role)
     if loc:  q += " AND location_id=?"; params.append(loc)
@@ -393,8 +406,21 @@ def create_user():
         return jsonify(error="Email exists"), 409
     uid = str(uuid.uuid4())
     hashed = bcrypt.hashpw(d["password"].encode(), bcrypt.gensalt()).decode()
-    conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-                 (uid, d["name"], d["email"], d.get("phone"), hashed, d.get("role","staff"), d.get("location_id"), 1))
+    conn.execute("""
+    INSERT INTO users
+    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+""", (
+    uid,
+    d["name"],
+    d["email"],
+    d.get("notification_email"),
+    d.get("phone"),
+    hashed,
+    d.get("role", "staff"),
+    d.get("location_id"),
+    1
+))
     conn.commit(); conn.close()
     return jsonify(id=uid), 201
 
@@ -403,8 +429,8 @@ def create_user():
 def update_user(uid):
     d = request.get_json() or {}
     conn = get_db()
-    conn.execute("UPDATE users SET name=COALESCE(?,name), phone=COALESCE(?,phone), role=COALESCE(?,role), location_id=COALESCE(?,location_id), is_active=COALESCE(?,is_active) WHERE id=?",
-                 (d.get("name"),d.get("phone"),d.get("role"),d.get("location_id"),d.get("is_active"),uid))
+    conn.execute("UPDATE users SET name=COALESCE(?,name), notification_email=COALESCE(?,notification_email), phone=COALESCE(?,phone), role=COALESCE(?,role), location_id=COALESCE(?,location_id), is_active=COALESCE(?,is_active) WHERE id=?",
+             (d.get("name"), d.get("notification_email"), d.get("phone"), d.get("role"), d.get("location_id"), d.get("is_active"), uid))
     conn.commit(); conn.close()
     return jsonify(message="Updated")
 
