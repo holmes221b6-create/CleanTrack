@@ -91,6 +91,13 @@ def init_db():
             is_read INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
-    """)
+       """)
+
+    # Add notification_email to existing databases that don't have it yet
+    try:
+        c.execute("ALTER TABLE users ADD COLUMN notification_email TEXT")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
