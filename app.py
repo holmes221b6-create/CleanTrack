@@ -653,7 +653,7 @@ def create_log():
 def get_logs():
     args = request.args
     q = """
-        SELECT cl.*, u.name staff_name, u.email staff_email, z.name zone_name
+        SELECT cl.*, u.name staff_name, u.notification_email staff_email, z.name zone_name
 FROM cleaning_logs cl
 LEFT JOIN tasks t ON cl.task_id=t.id
 LEFT JOIN users u ON t.assigned_to=u.id
