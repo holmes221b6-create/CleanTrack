@@ -424,23 +424,52 @@ def create_user():
     conn.commit(); conn.close()
     return jsonify(id=uid), 201
 
+#staff user details
+
 @app.route("/api/users/<uid>", methods=["PUT"])
 @jwt_required()
 def update_user(uid):
     d = request.get_json() or {}
-    conn = get_db()
-    conn.execute("UPDATE users SET name=COALESCE(?,name), notification_email=COALESCE(?,notification_email), phone=COALESCE(?,phone), role=COALESCE(?,role), location_id=COALESCE(?,location_id), is_active=COALESCE(?,is_active) WHERE id=?",
-             (d.get("name"), d.get("notification_email"), d.get("phone"), d.get("role"), d.get("location_id"), d.get("is_active"), uid))
-    conn.commit(); conn.close()
-    return jsonify(message="Updated")
 
-@app.route("/api/users/<uid>", methods=["DELETE"])
-@jwt_required()
-def deactivate_user(uid):
     conn = get_db()
-    conn.execute("UPDATE users SET is_active=0 WHERE id=?", (uid,))
-    conn.commit(); conn.close()
-    return jsonify(message="Deactivated")
+
+    # Prevent duplicate email addresses
+    if d.get("email"):
+        existing = conn.execute(
+            "SELECT id FROM users WHERE email=? AND id!=?",
+            (d["email"].strip(), uid)
+        ).fetchone()
+
+        if existing:
+            conn.close()
+            return jsonify(error="Email already in use"), 409
+
+    conn.execute("""
+        UPDATE users
+        SET
+            name = COALESCE(?, name),
+            email = COALESCE(?, email),
+            notification_email = COALESCE(?, notification_email),
+            phone = COALESCE(?, phone),
+            role = COALESCE(?, role),
+            location_id = COALESCE(?, location_id),
+            is_active = COALESCE(?, is_active)
+        WHERE id=?
+    """, (
+        d.get("name"),
+        d.get("email"),
+        d.get("notification_email"),
+        d.get("phone"),
+        d.get("role"),
+        d.get("location_id"),
+        d.get("is_active"),
+        uid
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(message="Updated")
 
 # ─── tasks ────────────────────────────────────────────────────────────────────
 
