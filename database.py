@@ -23,7 +23,7 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS zones (
-            id TEXT PRIMARY KEY,
+
             location_id TEXT NOT NULL,
             name TEXT NOT NULL,
             floor TEXT,
