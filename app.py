@@ -3020,11 +3020,14 @@ def analytics_kpis():
             ORDER BY missed_count DESC
         """, params).fetchall())
 
+        compliance_7d = compliance(7)
+    compliance_30d = compliance(30)
+
     conn.close()
 
     return jsonify(
-        compliance_7d=compliance(7),
-        compliance_30d=compliance(30),
+        compliance_7d=compliance_7d,
+        compliance_30d=compliance_30d,
         avg_duration_30d=round(avg_dur) if avg_dur else None,
         predictive_warnings=warnings
     )
