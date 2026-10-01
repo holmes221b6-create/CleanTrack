@@ -35,6 +35,7 @@ app = Flask(__name__, static_folder="../frontend", static_url_path="")
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET", "dev_secret_change_me")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=12)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
+jwt = JWTManager(app)
 
 # Explicitly trust both localhost and 127.0.0.1 variants of your dashboard
 CORS(
