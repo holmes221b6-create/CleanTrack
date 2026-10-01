@@ -46,8 +46,6 @@ CORS(
     ],
     supports_credentials=True
 )
-jwt = JWTManager(app)
-
 def send_gmail(to_email, subject, body):
     try:
         token_json = os.getenv("GMAIL_TOKEN_JSON")
