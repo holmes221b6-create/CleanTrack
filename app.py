@@ -146,6 +146,277 @@ def row_to_dict(row):
 def rows_to_list(rows):
     return [dict(r) for r in rows]
 
+# ============================================================
+# CLEANTRACK IDENTITY & AUTHORIZATION CONTEXT
+# ============================================================
+
+def get_current_user():
+    """
+    Return the complete database record for the currently
+    authenticated user.
+    """
+    user_id = get_jwt_identity()
+
+    if not user_id:
+        return None
+
+    conn = get_db()
+
+    user = conn.execute(
+        """
+        SELECT
+            u.*,
+            o.name AS organization_name,
+            o.organization_code
+        FROM users u
+        LEFT JOIN organizations o
+            ON o.id = u.organization_id
+        WHERE u.id = ?
+        """,
+        (user_id,)
+    ).fetchone()
+
+    conn.close()
+
+    return row_to_dict(user)
+
+
+def get_current_user_id():
+    """
+    Return the authenticated user's ID.
+    """
+    return get_jwt_identity()
+
+
+def get_current_org_id():
+    """
+    Return the organization ID of the authenticated user.
+    """
+    user = get_current_user()
+
+    if not user:
+        return None
+
+    return user.get("organization_id")
+
+
+def get_current_role():
+    """
+    Return the authenticated user's role.
+    """
+    user = get_current_user()
+
+    if not user:
+        return None
+
+    return user.get("role")
+
+def get_current_team_ids():
+    """
+    Return all team IDs associated with the current user.
+
+    Supervisors:
+        team_supervisors
+
+    Employees:
+        team_members
+
+    Admins:
+        empty list because admins have organization-wide scope.
+    """
+    user = get_current_user()
+
+    if not user:
+        return []
+
+    role = user.get("role")
+    user_id = user.get("id")
+
+    conn = get_db()
+
+    if role == "supervisor":
+        rows = conn.execute(
+            """
+            SELECT team_id
+            FROM team_supervisors
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
+    elif role == "employee":
+        rows = conn.execute(
+            """
+            SELECT team_id
+            FROM team_members
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
+    else:
+        rows = []
+
+    conn.close()
+
+    return [row["team_id"] for row in rows]
+
+def user_belongs_to_organization(user_id, organization_id):
+    """
+    Check whether a user belongs to an organization.
+    """
+    if not user_id or not organization_id:
+        return False
+
+    conn = get_db()
+
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM users
+        WHERE id = ?
+          AND organization_id = ?
+        """,
+        (user_id, organization_id)
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+def zone_belongs_to_organization(zone_id, organization_id):
+    """
+    Check whether a zone belongs to the current organization.
+
+    Zones currently inherit organization ownership through
+    their location.
+    """
+    if not zone_id or not organization_id:
+        return False
+
+    conn = get_db()
+
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM zones z
+        JOIN locations l
+            ON l.id = z.location_id
+        WHERE z.id = ?
+          AND l.organization_id = ?
+        """,
+        (zone_id, organization_id)
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+def zone_belongs_to_user_team(zone_id, user_id):
+    """
+    Check whether a zone is assigned to at least one team
+    belonging to the specified user.
+
+    This is the team-level authorization boundary for
+    supervisors and employees.
+    """
+    if not zone_id or not user_id:
+        return False
+
+    conn = get_db()
+
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM team_zones tz
+        JOIN team_supervisors ts
+            ON ts.team_id = tz.team_id
+        WHERE tz.zone_id = ?
+          AND ts.user_id = ?
+
+        UNION
+
+        SELECT 1
+        FROM team_zones tz
+        JOIN team_members tm
+            ON tm.team_id = tz.team_id
+        WHERE tz.zone_id = ?
+          AND tm.user_id = ?
+        LIMIT 1
+        """,
+        (zone_id, user_id, zone_id, user_id)
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+
+def user_belongs_to_team(user_id, team_id):
+    """
+    Check whether a user belongs to a specific team.
+
+    Works for both supervisors and employees.
+    """
+    if not user_id or not team_id:
+        return False
+
+    conn = get_db()
+
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM team_supervisors
+        WHERE user_id = ?
+          AND team_id = ?
+
+        UNION
+
+        SELECT 1
+        FROM team_members
+        WHERE user_id = ?
+          AND team_id = ?
+
+        LIMIT 1
+        """,
+        (user_id, team_id, user_id, team_id)
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+def require_account_status(user):
+    """
+    Verify that the account is active.
+
+    Pending, rejected and suspended accounts must not be
+    allowed to operate inside the application.
+    """
+    if not user:
+        return False
+
+    return user.get("account_status") == "active"
+
+
+def organization_scope_required():
+    """
+    Return the current organization ID.
+
+    This helper exists so every future organization-scoped
+    route has one consistent source of truth.
+    """
+    user = get_current_user()
+
+    if not user:
+        return None
+
+    return user.get("organization_id")
+
 def require_roles(*roles):
     def decorator(fn):
         @wraps(fn)
@@ -176,1859 +447,5089 @@ def simulate_ai_score():
     return score, feedback
 
 # ─── auth ────────────────────────────────────────────────────────────────────
-
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
-    email = data.get("email", "").strip()
+
+    email = data.get("email", "").strip().lower()
     password = data.get("password", "")
+
     if not email or not password:
         return jsonify(error="Email and password required"), 400
-    conn = get_db()
-    user = row_to_dict(conn.execute(
-        "SELECT * FROM users WHERE email=? AND is_active=1", (email,)
-    ).fetchone())
-    conn.close()
-    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
-        return jsonify(error="Invalid credentials"), 401
-    token = create_access_token(
-        identity=user["id"],
-        additional_claims={"role": user["role"], "name": user["name"], "email": user["email"], "location_id": user.get("location_id")}
-    )
-    return jsonify(token=token, user={k: user[k] for k in ("id","name","email","role","location_id")})
 
-@app.route("/api/auth/register", methods=["POST"])
-def register():
-    data = request.get_json() or {}
-    name, email, password = data.get("name"), data.get("email"), data.get("password")
-    if not name or not email or not password:
-        return jsonify(error="name, email, password required"), 400
     conn = get_db()
-    if conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
-        conn.close()
-        return jsonify(error="Email already registered"), 409
-    uid = str(uuid.uuid4())
-    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    conn.execute("""
-    INSERT INTO users
-    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-""", (
-    uid,
-    name,
-    email,
-    data.get("notification_email"),
-    data.get("phone"),
-    hashed,
-    data.get("role", "staff"),
-    data.get("location_id"),
-    1
-))
-    conn.commit(); conn.close()
-    return jsonify(id=uid), 201
+
+    user = row_to_dict(conn.execute(
+        """
+        SELECT
+            u.*,
+            o.name AS organization_name,
+            o.organization_code
+        FROM users u
+        LEFT JOIN organizations o
+            ON o.id = u.organization_id
+        WHERE LOWER(u.email) = ?
+        """,
+        (email,)
+    ).fetchone())
+
+    conn.close()
+
+    # Do not reveal whether the email exists.
+    if not user:
+        return jsonify(error="Invalid credentials"), 401
+
+    # Account status is now the primary account-state check.
+    if user.get("account_status") != "active":
+        status = user.get("account_status") or "pending"
+
+        if status == "pending":
+            return jsonify(
+                error="Your account is awaiting approval."
+            ), 403
+
+        if status == "rejected":
+            return jsonify(
+                error="Your account request was rejected."
+            ), 403
+
+        if status == "suspended":
+            return jsonify(
+                error="Your account has been suspended."
+            ), 403
+
+        return jsonify(
+            error="Your account is not active."
+        ), 403
+
+    # Keep the old is_active flag as an additional safety check
+    # during the transition.
+    if not user.get("is_active"):
+        return jsonify(error="Your account is not active."), 403
+
+    if not user.get("password_hash"):
+        return jsonify(error="Invalid credentials"), 401
+
+    try:
+        password_valid = bcrypt.checkpw(
+            password.encode(),
+            user["password_hash"].encode()
+        )
+    except (ValueError, TypeError):
+        password_valid = False
+
+    if not password_valid:
+        return jsonify(error="Invalid credentials"), 401
+
+    # Get team scope for the JWT.
+    user_id = user["id"]
+    role = user["role"]
+
+    conn = get_db()
+
+    if role == "supervisor":
+        team_rows = conn.execute(
+     """
+     SELECT team_id
+     FROM team_supervisors
+     WHERE user_id = ?
+     """,
+     (user_id,)
+ ).fetchall()
+    elif role == "employee":
+        team_rows = conn.execute(
+            """
+            SELECT team_id
+            FROM team_members
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
+    else:
+        team_rows = []
+
+    conn.close()
+
+    team_ids = [row["team_id"] for row in team_rows]
+
+    # JWT contains identity + authorization context.
+    token = create_access_token(
+        identity=user_id,
+        additional_claims={
+            "user_id": user_id,
+            "organization_id": user.get("organization_id"),
+            "role": role,
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "location_id": user.get("location_id"),
+            "team_ids": team_ids
+        }
+    )
+
+    return jsonify(
+        token=token,
+        user={
+            "id": user.get("id"),
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "location_id": user.get("location_id"),
+            "organization_id": user.get("organization_id"),
+            "organization_name": user.get("organization_name"),
+            "organization_code": user.get("organization_code"),
+            "account_status": user.get("account_status"),
+            "team_ids": team_ids
+        }
+    )
+
 
 @app.route("/api/auth/me")
 @jwt_required()
 def me():
-    uid = get_jwt_identity()
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    team_ids = get_current_team_ids()
+
+    return jsonify({
+        "id": user.get("id"),
+        "name": user.get("name"),
+        "email": user.get("email"),
+        "phone": user.get("phone"),
+        "role": user.get("role"),
+        "location_id": user.get("location_id"),
+        "organization_id": user.get("organization_id"),
+        "organization_name": user.get("organization_name"),
+        "organization_code": user.get("organization_code"),
+        "account_status": user.get("account_status"),
+        "employee_id": user.get("employee_id"),
+        "notification_email": user.get("notification_email"),
+        "team_ids": team_ids,
+        "created_at": user.get("created_at")
+    })
+@app.route("/api/auth/register", methods=["POST"])
+def register():
+    """
+    Unified registration endpoint.
+
+    Admin:
+        Creates a new organization and an active admin account.
+
+    Supervisor / Employee:
+        Joins an existing organization using organization_code
+        and creates a pending account request.
+    """
+
+    data = request.get_json() or {}
+
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    phone = (data.get("phone") or "").strip() or None
+    notification_email = (
+        (data.get("notification_email") or "").strip().lower()
+        or None
+    )
+
+    role = (data.get("role") or "").strip().lower()
+
+    if not name or not email or not password or not role:
+        return jsonify(
+            error="name, email, password and role are required"
+        ), 400
+
+    if role not in ("admin", "supervisor", "employee"):
+        return jsonify(
+            error="Invalid role. Choose admin, supervisor or employee."
+        ), 400
+
+    if len(password) < 8:
+        return jsonify(
+            error="Password must be at least 8 characters."
+        ), 400
+
+    # ---------------------------------------------------------
+    # COMMON EMAIL CHECK
+    # ---------------------------------------------------------
+
     conn = get_db()
-    user = row_to_dict(conn.execute(
-        "SELECT id,name,email,phone,role,location_id,created_at FROM users WHERE id=?", (uid,)
-    ).fetchone())
-    conn.close()
-    return jsonify(user)
-# ─── locations ────────────────────────────────────────────────────────────────
 
-@app.route("/api/locations", methods=["GET"])
-@jwt_required()
-def get_locations():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    existing_user = conn.execute(
+        """
+        SELECT id
+        FROM users
+        WHERE LOWER(email) = ?
+        """,
+        (email,)
+    ).fetchone()
 
-    conn = get_db()
+    if existing_user:
+        conn.close()
+        return jsonify(
+            error="Email is already registered."
+        ), 409
 
-    # Admin can see all locations
+    existing_request = conn.execute(
+        """
+        SELECT id
+        FROM account_requests
+        WHERE LOWER(email) = ?
+          AND status = 'pending'
+        """,
+        (email,)
+    ).fetchone()
+
+    if existing_request:
+        conn.close()
+        return jsonify(
+            error="A pending account request already exists for this email."
+        ), 409
+
+    # ---------------------------------------------------------
+    # PASSWORD HASH
+    # ---------------------------------------------------------
+
+    password_hash = bcrypt.hashpw(
+        password.encode(),
+        bcrypt.gensalt()
+    ).decode()
+
+    # =========================================================
+    # ADMIN REGISTRATION
+    # =========================================================
+
     if role == "admin":
-        rows = rows_to_list(conn.execute("""
-            SELECT *
-            FROM locations
-            ORDER BY name
-        """).fetchall())
 
-    # Supervisor can only see their own location
-    elif role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        organization_name = (
+            data.get("organization_name") or ""
+        ).strip()
 
-        if not supervisor or not supervisor["location_id"]:
+        if not organization_name:
             conn.close()
-            return jsonify([])
+            return jsonify(
+                error="organization_name is required for admin registration."
+            ), 400
 
-        rows = rows_to_list(conn.execute("""
-            SELECT *
-            FROM locations
-            WHERE id=?
-            ORDER BY name
-        """, (supervisor["location_id"],)).fetchall())
+        organization_email = (
+            (data.get("organization_email") or "").strip().lower()
+            or email
+        )
 
-    # Staff can only see their own location
-    else:
-        staff = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        organization_phone = (
+            (data.get("organization_phone") or "").strip()
+            or phone
+        )
 
-        if not staff or not staff["location_id"]:
+        organization_address = (
+            (data.get("organization_address") or "").strip()
+            or None
+        )
+
+        organization_city = (
+            (data.get("organization_city") or "").strip()
+            or None
+        )
+
+        organization_country = (
+            (data.get("organization_country") or "").strip()
+            or None
+        )
+
+        # Generate a unique organization code.
+        for _ in range(20):
+            organization_code = (
+                "CT-"
+                + uuid.uuid4().hex[:8].upper()
+            )
+
+            exists = conn.execute(
+                """
+                SELECT id
+                FROM organizations
+                WHERE organization_code = ?
+                """,
+                (organization_code,)
+            ).fetchone()
+
+            if not exists:
+                break
+        else:
             conn.close()
-            return jsonify([])
+            return jsonify(
+                error="Could not generate a unique organization code."
+            ), 500
 
-        rows = rows_to_list(conn.execute("""
-            SELECT *
-            FROM locations
-            WHERE id=?
-            ORDER BY name
-        """, (staff["location_id"],)).fetchall())
+        organization_id = str(uuid.uuid4())
+        user_id = str(uuid.uuid4())
+
+        try:
+            conn.execute("BEGIN")
+
+            # Create organization.
+            conn.execute(
+                """
+                INSERT INTO organizations (
+                    id,
+                    name,
+                    email,
+                    phone,
+                    address,
+                    city,
+                    country,
+                    organization_code
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    organization_id,
+                    organization_name,
+                    organization_email,
+                    organization_phone,
+                    organization_address,
+                    organization_city,
+                    organization_country,
+                    organization_code
+                )
+            )
+
+            # Create active administrator.
+            conn.execute(
+                """
+                INSERT INTO users (
+                    id,
+                    name,
+                    email,
+                    notification_email,
+                    phone,
+                    password_hash,
+                    role,
+                    location_id,
+                    is_active,
+                    organization_id,
+                    account_status,
+                    approved_by,
+                    approved_at,
+                    employee_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                """,
+                (
+                    user_id,
+                    name,
+                    email,
+                    notification_email,
+                    phone,
+                    password_hash,
+                    "admin",
+                    None,
+                    1,
+                    organization_id,
+                    "active",
+                    user_id,
+                    None
+                )
+            )
+
+            conn.commit()
+
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+
+        conn.close()
+
+        # Create login token immediately.
+        token = create_access_token(
+            identity=user_id,
+            additional_claims={
+                "user_id": user_id,
+                "organization_id": organization_id,
+                "role": "admin",
+                "name": name,
+                "email": email,
+                "location_id": None,
+                "team_ids": []
+            }
+        )
+
+        return jsonify(
+            message="Admin account created successfully.",
+            token=token,
+            organization={
+                "id": organization_id,
+                "name": organization_name,
+                "organization_code": organization_code
+            },
+            user={
+                "id": user_id,
+                "name": name,
+                "email": email,
+                "role": "admin",
+                "organization_id": organization_id,
+                "organization_name": organization_name,
+                "organization_code": organization_code,
+                "account_status": "active",
+                "team_ids": []
+            }
+        ), 201
+
+    # =========================================================
+    # SUPERVISOR / EMPLOYEE JOIN REQUEST
+    # =========================================================
+
+    organization_code = (
+        data.get("organization_code") or ""
+    ).strip().upper()
+
+    if not organization_code:
+        conn.close()
+        return jsonify(
+            error="organization_code is required."
+        ), 400
+
+    organization = conn.execute(
+        """
+        SELECT *
+        FROM organizations
+        WHERE UPPER(organization_code) = ?
+        """,
+        (organization_code,)
+    ).fetchone()
+
+    if not organization:
+        conn.close()
+        return jsonify(
+            error="Invalid organization code."
+        ), 404
+
+    organization = row_to_dict(organization)
+    organization_id = organization["id"]
+
+    requested_team_id = (
+        data.get("requested_team_id") or ""
+    ).strip() or None
+
+    employee_id = (
+        (data.get("employee_id") or "").strip()
+        or None
+    )
+
+       # ---------------------------------------------------------
+    # TEAM VALIDATION
+    # ---------------------------------------------------------
+    if requested_team_id:
+
+        team = conn.execute(
+            """
+            SELECT id, name
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                requested_team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not team:
+            conn.close()
+            return jsonify(
+                error="Requested team does not exist in this organization."
+            ), 400
+    # Employee ID must be unique inside the organization.
+    if employee_id:
+
+        existing_employee_id = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE organization_id = ?
+              AND employee_id = ?
+            """,
+            (
+                organization_id,
+                employee_id
+            )
+        ).fetchone()
+
+        if existing_employee_id:
+            conn.close()
+            return jsonify(
+                error="Employee ID is already in use."
+            ), 409
+
+        existing_request_employee_id = conn.execute(
+            """
+            SELECT id
+            FROM account_requests
+            WHERE organization_id = ?
+              AND employee_id = ?
+              AND status = 'pending'
+            """,
+            (
+                organization_id,
+                employee_id
+            )
+        ).fetchone()
+
+        if existing_request_employee_id:
+            conn.close()
+            return jsonify(
+                error="A pending request already exists for this employee ID."
+            ), 409
+
+    request_id = str(uuid.uuid4())
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO account_requests (
+                id,
+                organization_id,
+                name,
+                email,
+                phone,
+                notification_email,
+                password_hash,
+                requested_role,
+                employee_id,
+                requested_team_id,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+            """,
+            (
+                request_id,
+                organization_id,
+                name,
+                email,
+                phone,
+                notification_email,
+                password_hash,
+                role,
+                employee_id,
+                requested_team_id
+            )
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+    conn.close()
+
+    return jsonify(
+        message="Account request submitted successfully.",
+        status="pending",
+        request_id=request_id,
+        organization={
+            "id": organization_id,
+            "name": organization["name"],
+            "organization_code": organization["organization_code"]
+        },
+        role=role
+    ), 201
+
+
+# ============================================================
+# ADMIN ACCOUNT REQUEST MANAGEMENT
+# ============================================================
+
+@app.route("/api/admin/account-requests", methods=["GET"])
+@jwt_required()
+@require_roles("admin")
+def get_account_requests():
+    """
+    Return account requests belonging only to the current
+    administrator's organization.
+    """
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    organization_id = admin.get("organization_id")
+
+    if not organization_id:
+        return jsonify(error="Administrator has no organization"), 400
+
+    status = (request.args.get("status") or "").strip().lower()
+
+    conn = get_db()
+
+    query = """
+        SELECT
+            ar.id,
+            ar.organization_id,
+            ar.name,
+            ar.email,
+            ar.phone,
+            ar.notification_email,
+            ar.requested_role,
+            ar.employee_id,
+            ar.requested_team_id,
+            t.name AS requested_team_name,
+            ar.status,
+            ar.reviewed_by,
+            ar.reviewed_at,
+            ar.rejection_reason,
+            ar.created_at
+        FROM account_requests ar
+        LEFT JOIN teams t
+            ON t.id = ar.requested_team_id
+        WHERE ar.organization_id = ?
+    """
+
+    params = [organization_id]
+
+    if status:
+        if status not in (
+            "pending",
+            "approved",
+            "rejected"
+        ):
+            conn.close()
+            return jsonify(error="Invalid request status"), 400
+
+        query += " AND ar.status = ?"
+        params.append(status)
+
+    query += " ORDER BY ar.created_at DESC"
+
+    rows = rows_to_list(
+        conn.execute(query, params).fetchall()
+    )
 
     conn.close()
 
     return jsonify(rows)
+
+@app.route(
+    "/api/admin/account-requests/<request_id>/approve",
+    methods=["POST"]
+)
+@jwt_required()
+@require_roles("admin")
+def approve_account_request(request_id):
+    """
+    Approve a pending supervisor/employee registration request.
+
+    The administrator may optionally provide a team_id in the
+    approval request. If supplied, that team overrides the
+    team originally requested by the applicant.
+    """
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    organization_id = admin.get("organization_id")
+    admin_id = admin.get("id")
+
+    if not organization_id:
+        return jsonify(error="Administrator has no organization"), 400
+
+    # ---------------------------------------------------------
+    # Optional admin-selected team
+    # ---------------------------------------------------------
+
+    data = request.get_json() or {}
+    selected_team_id = data.get("team_id")
+
+    if selected_team_id:
+        selected_team_id = str(selected_team_id).strip() or None
+
+    conn = get_db()
+
+    try:
+        # -----------------------------------------------------
+        # Find request inside admin's organization
+        # -----------------------------------------------------
+
+        request_row = conn.execute(
+            """
+            SELECT *
+            FROM account_requests
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                request_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not request_row:
+            conn.close()
+            return jsonify(error="Account request not found"), 404
+
+        account_request = row_to_dict(request_row)
+
+        if account_request["status"] != "pending":
+            conn.close()
+            return jsonify(
+                error="This account request has already been processed."
+            ), 409
+
+        requested_role = account_request["requested_role"]
+
+        if requested_role not in (
+            "supervisor",
+            "employee"
+        ):
+            conn.close()
+            return jsonify(
+                error="Invalid requested role."
+            ), 400
+
+        # -----------------------------------------------------
+        # Determine final team
+        #
+        # Admin-selected team takes priority.
+        # Otherwise use the applicant's requested team.
+        # -----------------------------------------------------
+
+        effective_team_id = (
+            selected_team_id
+            if selected_team_id
+            else account_request["requested_team_id"]
+        )
+
+        # -----------------------------------------------------
+        # Validate final team
+        # -----------------------------------------------------
+
+        if effective_team_id:
+
+            team = conn.execute(
+                """
+                SELECT id
+                FROM teams
+                WHERE id = ?
+                  AND organization_id = ?
+                """,
+                (
+                    effective_team_id,
+                    organization_id
+                )
+            ).fetchone()
+
+            if not team:
+                conn.close()
+                return jsonify(
+                    error="Selected team does not exist in this organization."
+                ), 400
+
+        # -----------------------------------------------------
+        # Prevent duplicate email
+        # -----------------------------------------------------
+
+        existing_user = conn.execute(
+            """
+            SELECT id
+            FROM users
+            WHERE LOWER(email) = ?
+            """,
+            (
+                account_request["email"].lower(),
+            )
+        ).fetchone()
+
+        if existing_user:
+            conn.close()
+            return jsonify(
+                error="A user with this email already exists."
+            ), 409
+
+        # -----------------------------------------------------
+        # Prevent duplicate employee ID
+        # -----------------------------------------------------
+
+        employee_id = account_request["employee_id"]
+
+        if employee_id:
+
+            existing_employee = conn.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE organization_id = ?
+                  AND employee_id = ?
+                """,
+                (
+                    organization_id,
+                    employee_id
+                )
+            ).fetchone()
+
+            if existing_employee:
+                conn.close()
+                return jsonify(
+                    error="Employee ID is already in use."
+                ), 409
+
+        # -----------------------------------------------------
+        # Create user
+        # -----------------------------------------------------
+
+        user_id = str(uuid.uuid4())
+
+        conn.execute("BEGIN")
+
+        conn.execute(
+            """
+            INSERT INTO users (
+                id,
+                name,
+                email,
+                notification_email,
+                phone,
+                password_hash,
+                role,
+                location_id,
+                is_active,
+                organization_id,
+                account_status,
+                approved_by,
+                approved_at,
+                employee_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """,
+            (
+                user_id,
+                account_request["name"],
+                account_request["email"],
+                account_request["notification_email"],
+                account_request["phone"],
+                account_request["password_hash"],
+                requested_role,
+                None,
+                1,
+                organization_id,
+                "active",
+                admin_id,
+                employee_id
+            )
+        )
+
+        # -----------------------------------------------------
+        # Assign final team
+        # -----------------------------------------------------
+
+        if effective_team_id:
+
+            relationship_id = str(uuid.uuid4())
+
+            if requested_role == "supervisor":
+
+                conn.execute(
+                    """
+                    INSERT INTO team_supervisors (
+                        id,
+                        team_id,
+                        user_id
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        relationship_id,
+                        effective_team_id,
+                        user_id
+                    )
+                )
+
+            elif requested_role == "employee":
+
+                conn.execute(
+                    """
+                    INSERT INTO team_members (
+                        id,
+                        team_id,
+                        user_id
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        relationship_id,
+                        effective_team_id,
+                        user_id
+                    )
+                )
+
+        # -----------------------------------------------------
+        # Mark request approved
+        # -----------------------------------------------------
+
+        conn.execute(
+            """
+            UPDATE account_requests
+            SET status = 'approved',
+                reviewed_by = ?,
+                reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                admin_id,
+                request_id,
+                organization_id
+            )
+        )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+    conn.close()
+
+    return jsonify(
+        message="Account request approved successfully.",
+        user={
+            "id": user_id,
+            "name": account_request["name"],
+            "email": account_request["email"],
+            "role": requested_role,
+            "organization_id": organization_id,
+            "account_status": "active",
+            "team_id": effective_team_id
+        }
+    ), 201
+@app.route(
+    "/api/admin/account-requests/<request_id>/reject",
+    methods=["POST"]
+)
+@jwt_required()
+@require_roles("admin")
+def reject_account_request(request_id):
+    """
+    Reject a pending account request belonging to the
+    current administrator's organization.
+    """
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    organization_id = admin.get("organization_id")
+    admin_id = admin.get("id")
+
+    if not organization_id:
+        return jsonify(error="Administrator has no organization"), 400
+
+    data = request.get_json() or {}
+
+    rejection_reason = (
+        data.get("reason") or ""
+    ).strip() or None
+
+    conn = get_db()
+
+    request_row = conn.execute(
+        """
+        SELECT id, status
+        FROM account_requests
+        WHERE id = ?
+          AND organization_id = ?
+        """,
+        (
+            request_id,
+            organization_id
+        )
+    ).fetchone()
+
+    if not request_row:
+        conn.close()
+        return jsonify(error="Account request not found"), 404
+
+    if request_row["status"] != "pending":
+        conn.close()
+        return jsonify(
+            error="This account request has already been processed."
+        ), 409
+
+    conn.execute(
+        """
+        UPDATE account_requests
+        SET status = 'rejected',
+            reviewed_by = ?,
+            reviewed_at = CURRENT_TIMESTAMP,
+            rejection_reason = ?
+        WHERE id = ?
+          AND organization_id = ?
+        """,
+        (
+            admin_id,
+            rejection_reason,
+            request_id,
+            organization_id
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify(
+        message="Account request rejected successfully."
+    )
+
+# ============================================================
+# TEAM MANAGEMENT
+# ============================================================
+
+@app.route("/api/teams", methods=["GET"])
+@jwt_required()
+def get_teams():
+    """
+    Return teams visible to the current user.
+
+    Admin:
+        All teams in their organization.
+
+    Supervisor:
+        Teams they supervise.
+
+    Employee:
+        Teams they belong to.
+    """
+
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    organization_id = user.get("organization_id")
+    user_id = user.get("id")
+    role = user.get("role")
+
+    if not organization_id:
+        return jsonify(error="User has no organization"), 400
+
+    conn = get_db()
+
+    if role == "admin":
+
+        rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.name,
+                    t.description,
+                    t.organization_id,
+                    t.created_at,
+                    COUNT(DISTINCT tm.user_id) AS member_count,
+                    COUNT(DISTINCT ts.user_id) AS supervisor_count
+                FROM teams t
+                LEFT JOIN team_members tm
+                    ON tm.team_id = t.id
+                LEFT JOIN team_supervisors ts
+                    ON ts.team_id = t.id
+                WHERE t.organization_id = ?
+                GROUP BY t.id
+                ORDER BY t.name
+                """,
+                (organization_id,)
+            ).fetchall()
+        )
+
+    elif role == "supervisor":
+
+        rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.name,
+                    t.description,
+                    t.organization_id,
+                    t.created_at,
+                    COUNT(DISTINCT tm.user_id) AS member_count,
+                    COUNT(DISTINCT ts.user_id) AS supervisor_count
+                FROM teams t
+                JOIN team_supervisors ts_current
+                    ON ts_current.team_id = t.id
+                   AND ts_current.user_id = ?
+                LEFT JOIN team_members tm
+                    ON tm.team_id = t.id
+                LEFT JOIN team_supervisors ts
+                    ON ts.team_id = t.id
+                WHERE t.organization_id = ?
+                GROUP BY t.id
+                ORDER BY t.name
+                """,
+                (
+                    user_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+    elif role == "employee":
+
+        rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.name,
+                    t.description,
+                    t.organization_id,
+                    t.created_at,
+                    COUNT(DISTINCT tm.user_id) AS member_count,
+                    COUNT(DISTINCT ts.user_id) AS supervisor_count
+                FROM teams t
+                JOIN team_members tm_current
+                    ON tm_current.team_id = t.id
+                   AND tm_current.user_id = ?
+                LEFT JOIN team_members tm
+                    ON tm.team_id = t.id
+                LEFT JOIN team_supervisors ts
+                    ON ts.team_id = t.id
+                WHERE t.organization_id = ?
+                GROUP BY t.id
+                ORDER BY t.name
+                """,
+                (
+                    user_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+    else:
+        conn.close()
+        return jsonify(error="Invalid role"), 403
+
+    conn.close()
+
+    return jsonify(rows)
+
+
+@app.route("/api/teams", methods=["POST"])
+@jwt_required()
+@require_roles("admin", "supervisor")
+def create_team():
+    """
+    Create a team inside the current user's organization.
+
+    Admin:
+        Can create any team in their organization.
+
+    Supervisor:
+        Can create a team in their organization.
+        The creating supervisor is automatically assigned
+        as a supervisor of the new team.
+    """
+
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    organization_id = user.get("organization_id")
+    user_id = user.get("id")
+    role = user.get("role")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization"
+        ), 400
+
+    data = request.get_json() or {}
+
+    name = (data.get("name") or "").strip()
+    description = (
+        (data.get("description") or "").strip()
+        or None
+    )
+
+    if not name:
+        return jsonify(
+            error="Team name is required."
+        ), 400
+
+    conn = get_db()
+
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM teams
+        WHERE organization_id = ?
+          AND LOWER(name) = LOWER(?)
+        """,
+        (
+            organization_id,
+            name
+        )
+    ).fetchone()
+
+    if existing:
+        conn.close()
+        return jsonify(
+            error="A team with this name already exists."
+        ), 409
+
+    team_id = str(uuid.uuid4())
+
+    try:
+        conn.execute("BEGIN")
+
+        conn.execute(
+            """
+            INSERT INTO teams (
+                id,
+                organization_id,
+                name,
+                description
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                team_id,
+                organization_id,
+                name,
+                description
+            )
+        )
+
+        # A supervisor who creates a team automatically
+        # becomes a supervisor of that team.
+        if role == "supervisor":
+
+            relationship_id = str(uuid.uuid4())
+
+            conn.execute(
+                """
+                INSERT INTO team_supervisors (
+                    id,
+                    team_id,
+                    user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    relationship_id,
+                    team_id,
+                    user_id
+                )
+            )
+
+        conn.commit()
+
+    except Exception:
+        conn.rollback()
+        conn.close()
+        raise
+
+    conn.close()
+
+    return jsonify(
+        message="Team created successfully.",
+        team={
+            "id": team_id,
+            "name": name,
+            "description": description,
+            "organization_id": organization_id
+        }
+    ), 201
+# ─── locations ────────────────────────────────────────────────────────────────
+@app.route("/api/locations", methods=["GET"])
+@jwt_required()
+def get_locations():
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
+    conn = get_db()
+
+    try:
+        if role == "admin":
+            rows = conn.execute("""
+                SELECT *
+                FROM locations
+                WHERE organization_id = ?
+                ORDER BY name
+            """, (organization_id,)).fetchall()
+
+        elif role in ("supervisor", "employee"):
+            if not team_ids:
+                return jsonify([])
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            rows = conn.execute(f"""
+                SELECT DISTINCT l.*
+                FROM locations l
+                JOIN team_locations tl
+                    ON tl.location_id = l.id
+                JOIN teams t
+                    ON t.id = tl.team_id
+                WHERE l.organization_id = ?
+                  AND t.organization_id = ?
+                  AND tl.team_id IN ({placeholders})
+                ORDER BY l.name
+            """, (
+                organization_id,
+                organization_id,
+                *team_ids
+            )).fetchall()
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        return jsonify(rows_to_list(rows))
+
+    finally:
+        conn.close()
 #create-locations**************************************************************
 @app.route("/api/locations", methods=["POST"])
 @jwt_required()
-@require_roles("admin")
 def create_location():
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if role not in ("admin", "supervisor"):
+        return jsonify(error="Only admins and supervisors can create locations"), 403
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
     d = request.get_json() or {}
 
     if not d.get("name"):
         return jsonify(error="name required"), 400
 
-    lid = str(uuid.uuid4())
+    team_id = d.get("team_id")
 
     conn = get_db()
 
-    conn.execute(
-        "INSERT INTO locations VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (
-            lid,
+    try:
+        # -------------------------------------------------
+        # Validate team assignment
+        # -------------------------------------------------
+        if team_id:
+            team = conn.execute("""
+                SELECT id
+                FROM teams
+                WHERE id = ?
+                  AND organization_id = ?
+            """, (team_id, organization_id)).fetchone()
+
+            if not team:
+                return jsonify(error="Invalid team for this organization"), 400
+
+            # Supervisor can only assign locations to their own teams
+            if role == "supervisor" and team_id not in team_ids:
+                return jsonify(
+                    error="You can only assign locations to your own team"
+                ), 403
+
+        # -------------------------------------------------
+        # Create location
+        # -------------------------------------------------
+        location_id = str(uuid.uuid4())
+
+        conn.execute("""
+            INSERT INTO locations (
+                id,
+                name,
+                address,
+                city,
+                country,
+                organization_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            location_id,
             d["name"],
             d.get("address"),
             d.get("city"),
-            d.get("country")
-        )
-    )
+            d.get("country"),
+            organization_id
+        ))
 
-    conn.commit()
-    conn.close()
+        # -------------------------------------------------
+        # Associate location with team
+        # -------------------------------------------------
+        if team_id:
+            conn.execute("""
+                INSERT INTO team_locations (
+                    team_id,
+                    location_id
+                )
+                VALUES (?, ?)
+            """, (team_id, location_id))
 
-    return jsonify(id=lid), 201
+        conn.commit()
+
+        return jsonify({
+            "id": location_id,
+            "name": d["name"],
+            "organization_id": organization_id,
+            "team_id": team_id
+        }), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
 #update-locations**************************************************************
 @app.route("/api/locations/<lid>", methods=["PUT"])
 @jwt_required()
-@require_roles("admin", "supervisor")
 def update_location(lid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if role not in ("admin", "supervisor"):
+        return jsonify(
+            error="Only admins and supervisors can update locations"
+        ), 403
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
     d = request.get_json() or {}
 
     conn = get_db()
 
-    location = conn.execute("""
-        SELECT id
-        FROM locations
-        WHERE id=?
-    """, (lid,)).fetchone()
+    try:
+        # -------------------------------------------------
+        # Find location inside the user's organization
+        # -------------------------------------------------
+        location = conn.execute("""
+            SELECT id
+            FROM locations
+            WHERE id = ?
+              AND organization_id = ?
+        """, (lid, organization_id)).fetchone()
 
-    if not location:
-        conn.close()
-        return jsonify(error="Location not found"), 404
+        if not location:
+            return jsonify(error="Location not found"), 404
 
-    # Supervisor can only update their assigned location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        # -------------------------------------------------
+        # Supervisor can only update team locations
+        # -------------------------------------------------
+        if role == "supervisor":
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or supervisor["location_id"] != lid
-        ):
-            conn.close()
-            return jsonify(error="You can only update your location"), 403
+            placeholders = ",".join("?" for _ in team_ids)
 
-    conn.execute(
-        """UPDATE locations
-           SET name=COALESCE(?,name),
-               address=COALESCE(?,address),
-               city=COALESCE(?,city),
-               country=COALESCE(?,country)
-           WHERE id=?""",
-        (
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_locations
+                WHERE location_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                lid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only update locations assigned to your team"
+                ), 403
+
+        # -------------------------------------------------
+        # Update location
+        # -------------------------------------------------
+        conn.execute("""
+            UPDATE locations
+            SET name = COALESCE(?, name),
+                address = COALESCE(?, address),
+                city = COALESCE(?, city),
+                country = COALESCE(?, country)
+            WHERE id = ?
+              AND organization_id = ?
+        """, (
             d.get("name"),
             d.get("address"),
             d.get("city"),
             d.get("country"),
-            lid
-        )
-    )
+            lid,
+            organization_id
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    return jsonify(message="Updated")
+        return jsonify(message="Updated")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
 #delete-locations**************************************************************
 @app.route("/api/locations/<lid>", methods=["DELETE"])
 @jwt_required()
-@require_roles("admin")
 def delete_location(lid):
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if role not in ("admin", "supervisor"):
+        return jsonify(
+            error="Only admins and supervisors can delete locations"
+        ), 403
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
     conn = get_db()
 
-    location = conn.execute("""
-        SELECT id
-        FROM locations
-        WHERE id=?
-    """, (lid,)).fetchone()
+    try:
+        # -------------------------------------------------
+        # Find location inside user's organization
+        # -------------------------------------------------
+        location = conn.execute("""
+            SELECT id
+            FROM locations
+            WHERE id = ?
+              AND organization_id = ?
+        """, (lid, organization_id)).fetchone()
 
-    if not location:
+        if not location:
+            return jsonify(error="Location not found"), 404
+
+        # -------------------------------------------------
+        # Supervisor can only delete team locations
+        # -------------------------------------------------
+        if role == "supervisor":
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_locations
+                WHERE location_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                lid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only delete locations assigned to your team"
+                ), 403
+
+        # -------------------------------------------------
+        # Delete location
+        # team_locations will cascade-delete its
+        # location associations because of the FK.
+        # -------------------------------------------------
+        conn.execute("""
+            DELETE FROM locations
+            WHERE id = ?
+              AND organization_id = ?
+        """, (lid, organization_id))
+
+        conn.commit()
+
+        return jsonify(message="Deleted")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
         conn.close()
-        return jsonify(error="Location not found"), 404
-
-    conn.execute(
-        "DELETE FROM locations WHERE id=?",
-        (lid,)
-    )
-
-    conn.commit()
-    conn.close()
-
-    return jsonify(message="Deleted")
 # ─── zones ────────────────────────────────────────────────────────────────────
+# ─── zones ────────────────────────────────────────────────────────────────────
+
 @app.route("/api/zones", methods=["GET"])
 @jwt_required()
 def get_zones():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    team_ids = get_current_team_ids()
     requested_loc = request.args.get("location_id")
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
 
     conn = get_db()
 
-    # ---------------------------------------------------------
-    # Admin — all zones, optional location filter
-    # ---------------------------------------------------------
-    if role == "admin":
+    try:
+        base_select = """
+            SELECT
+                z.*,
+                l.name AS location_name,
 
-        q = """
-            SELECT z.*, l.name location_name,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.status='pending') pending_tasks,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.is_overdue=1) overdue_tasks
+                (
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.zone_id = z.id
+                      AND t.status = 'pending'
+                ) AS pending_tasks,
+
+                (
+                    SELECT COUNT(*)
+                    FROM tasks t
+                    WHERE t.zone_id = z.id
+                      AND t.is_overdue = 1
+                ) AS overdue_tasks
+
             FROM zones z
-            LEFT JOIN locations l ON z.location_id=l.id
+            JOIN locations l
+                ON l.id = z.location_id
         """
 
-        if requested_loc:
-            q += " WHERE z.location_id=? ORDER BY z.name"
-            params = (requested_loc,)
+        # ---------------------------------------------------------
+        # ADMIN
+        # All zones belonging to the admin's organization.
+        # ---------------------------------------------------------
+        if role == "admin":
+
+            query = base_select + """
+                WHERE l.organization_id = ?
+            """
+
+            params = [organization_id]
+
+            if requested_loc:
+                query += """
+                    AND z.location_id = ?
+                """
+                params.append(requested_loc)
+
+            query += " ORDER BY z.name"
+
+        # ---------------------------------------------------------
+        # SUPERVISOR
+        # Only zones belonging to locations assigned to
+        # the supervisor's team(s).
+        # ---------------------------------------------------------
+        elif role == "supervisor":
+
+            if not team_ids:
+                return jsonify([])
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            query = base_select + f"""
+                JOIN team_locations tl
+                    ON tl.location_id = z.location_id
+
+                WHERE l.organization_id = ?
+                  AND tl.team_id IN ({placeholders})
+            """
+
+            params = [organization_id, *team_ids]
+
+            if requested_loc:
+                query += """
+                    AND z.location_id = ?
+                """
+                params.append(requested_loc)
+
+            query += """
+                GROUP BY z.id
+                ORDER BY z.name
+            """
+
+        # ---------------------------------------------------------
+        # EMPLOYEE
+        # Only zones explicitly assigned to the employee.
+        # ---------------------------------------------------------
+        elif role == "employee":
+
+            query = base_select + """
+                JOIN staff_zones sz
+                    ON sz.zone_id = z.id
+                   AND sz.user_id = ?
+
+                WHERE l.organization_id = ?
+                ORDER BY z.name
+            """
+
+            params = [
+                user.get("id"),
+                organization_id
+            ]
+
         else:
-            q += " ORDER BY z.name"
-            params = ()
+            return jsonify(error="Invalid role"), 403
 
-    # ---------------------------------------------------------
-    # Supervisor — zones in their own location
-    # ---------------------------------------------------------
-    elif role == "supervisor":
+        rows = conn.execute(query, params).fetchall()
 
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        return jsonify(rows_to_list(rows))
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+    finally:
+        conn.close()
 
-        q = """
-            SELECT z.*, l.name location_name,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.status='pending') pending_tasks,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.is_overdue=1) overdue_tasks
-            FROM zones z
-            LEFT JOIN locations l ON z.location_id=l.id
-            WHERE z.location_id=?
-            ORDER BY z.name
-        """
 
-        params = (supervisor["location_id"],)
-
-    # ---------------------------------------------------------
-    # Staff — only zones explicitly assigned to them
-    # ---------------------------------------------------------
-    else:
-
-        q = """
-            SELECT z.*, l.name location_name,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.status='pending') pending_tasks,
-              (SELECT COUNT(*)
-               FROM tasks t
-               WHERE t.zone_id=z.id
-                 AND t.is_overdue=1) overdue_tasks
-            FROM zones z
-            JOIN staff_zones sz
-              ON sz.zone_id=z.id
-             AND sz.user_id=?
-            LEFT JOIN locations l ON z.location_id=l.id
-            ORDER BY z.name
-        """
-
-        params = (uid,)
-
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
-
-    conn.close()
-
-    return jsonify(rows)
-#get-zones-zid&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 @app.route("/api/zones/<zid>", methods=["GET"])
 @jwt_required()
 def get_zone(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    user_id = user.get("id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
 
     conn = get_db()
 
-    row = conn.execute("""
-        SELECT
-            z.*,
-            l.name location_name
-        FROM zones z
-        LEFT JOIN locations l
-            ON z.location_id=l.id
-        WHERE z.id=?
-    """, (zid,)).fetchone()
+    try:
+        zone = conn.execute("""
+            SELECT
+                z.*,
+                l.name AS location_name,
+                l.organization_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (zid, organization_id)).fetchone()
 
-    if not row:
+        if not zone:
+            return jsonify(error="Zone not found"), 404
+
+        # ---------------------------------------------------------
+        # ADMIN
+        # ---------------------------------------------------------
+        if role == "admin":
+            return jsonify(row_to_dict(zone))
+
+        # ---------------------------------------------------------
+        # SUPERVISOR
+        # Zone must belong to one of supervisor's team locations.
+        # ---------------------------------------------------------
+        if role == "supervisor":
+
+            if not team_ids:
+                return jsonify(error="Access denied"), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_locations
+                WHERE location_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zone["location_id"],
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(error="Access denied"), 403
+
+            return jsonify(row_to_dict(zone))
+
+        # ---------------------------------------------------------
+        # EMPLOYEE
+        # Employee must have explicit zone assignment.
+        # ---------------------------------------------------------
+        if role == "employee":
+
+            assigned = conn.execute("""
+                SELECT 1
+                FROM staff_zones
+                WHERE user_id = ?
+                  AND zone_id = ?
+            """, (user_id, zid)).fetchone()
+
+            if not assigned:
+                return jsonify(error="Access denied"), 403
+
+            return jsonify(row_to_dict(zone))
+
+        return jsonify(error="Invalid role"), 403
+
+    finally:
         conn.close()
-        return jsonify(error="Not found"), 404
 
-    # ---------------------------------------------------------
-    # Admin can view any zone
-    # ---------------------------------------------------------
 
-    if role == "admin":
-        result = row_to_dict(row)
-        conn.close()
-        return jsonify(result)
-
-    # ---------------------------------------------------------
-    # Supervisor can view zones in their location
-    # ---------------------------------------------------------
-
-    if role == "supervisor":
-
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or row["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="Access denied"), 403
-
-    # ---------------------------------------------------------
-    # Staff can only view assigned zones
-    # ---------------------------------------------------------
-
-    else:
-
-        assigned = conn.execute("""
-            SELECT 1
-            FROM staff_zones
-            WHERE user_id=?
-              AND zone_id=?
-        """, (uid, zid)).fetchone()
-
-        if not assigned:
-            conn.close()
-            return jsonify(error="Access denied"), 403
-
-    result = row_to_dict(row)
-
-    conn.close()
-
-    return jsonify(result)
-#create_zones___________________________________________________________________
 @app.route("/api/zones", methods=["POST"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def create_zone():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
     d = request.get_json() or {}
 
     if not d.get("location_id") or not d.get("name"):
-        return jsonify(error="location_id and name required"), 400
+        return jsonify(
+            error="location_id and name required"
+        ), 400
 
     conn = get_db()
 
-    # Verify the location exists
-    location = conn.execute("""
-        SELECT id
-        FROM locations
-        WHERE id=?
-    """, (d["location_id"],)).fetchone()
-
-    if not location:
-        conn.close()
-        return jsonify(error="Location not found"), 404
-
-    # Supervisor can only create zones in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or d["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="You can only create zones in your location"), 403
-
-    zid = str(uuid.uuid4())
-
-    qr = gen_qr_b64(
-        f'{{"zoneId":"{zid}","name":"{d["name"]}"}}'
-    )
-
-    conn.execute(
-        "INSERT INTO zones VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (
-            zid,
+    try:
+        # ---------------------------------------------------------
+        # Location must belong to current organization.
+        # ---------------------------------------------------------
+        location = conn.execute("""
+            SELECT
+                id,
+                organization_id
+            FROM locations
+            WHERE id = ?
+              AND organization_id = ?
+        """, (
             d["location_id"],
-            d["name"],
-            d.get("floor"),
-            d.get("type", "bathroom"),
-            qr,
-            d.get("cleaning_interval_minutes", 60),
-            "pending",
-            None
+            organization_id
+        )).fetchone()
+
+        if not location:
+            return jsonify(error="Location not found"), 404
+
+        # ---------------------------------------------------------
+        # Supervisor can only create zones in locations
+        # assigned to their own team(s).
+        # ---------------------------------------------------------
+        if role == "supervisor":
+
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_locations
+                WHERE location_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                d["location_id"],
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only create zones in locations assigned to your team"
+                ), 403
+
+        zid = str(uuid.uuid4())
+
+        qr = gen_qr_b64(
+            f'{{"zoneId":"{zid}","name":"{d["name"]}"}}'
         )
-    )
 
-    conn.commit()
-    conn.close()
+        conn.execute(
+            """
+            INSERT INTO zones VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                CURRENT_TIMESTAMP
+            )
+            """,
+            (
+                zid,
+                d["location_id"],
+                d["name"],
+                d.get("floor"),
+                d.get("type", "bathroom"),
+                qr,
+                d.get("cleaning_interval_minutes", 60),
+                "pending",
+                None
+            )
+        )
 
-    return jsonify(
-        id=zid,
-        qr_code=qr
-    ), 201
-#update_zones_____________________________________________________________________
+        # ---------------------------------------------------------
+        # Every zone created in a team location becomes visible
+        # to that team through team_zones.
+        #
+        # For admin-created zones, associate the zone with every
+        # team already assigned to that location.
+        # ---------------------------------------------------------
+        team_rows = conn.execute("""
+            SELECT team_id
+            FROM team_locations
+            WHERE location_id = ?
+        """, (d["location_id"],)).fetchall()
+
+        for team_row in team_rows:
+            conn.execute("""
+                INSERT OR IGNORE INTO team_zones (
+                    team_id,
+                    zone_id
+                )
+                VALUES (?, ?)
+            """, (
+                team_row["team_id"],
+                zid
+            ))
+
+        conn.commit()
+
+        return jsonify(
+            id=zid,
+            qr_code=qr
+        ), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+
+
 @app.route("/api/zones/<zid>", methods=["PUT"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def update_zone(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
     d = request.get_json() or {}
 
     conn = get_db()
 
-    zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
-    """, (zid,)).fetchone()
+    try:
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
+            zid,
+            organization_id
+        )).fetchone()
 
-    if not zone:
-        conn.close()
-        return jsonify(error="Zone not found"), 404
+        if not zone:
+            return jsonify(error="Zone not found"), 404
 
-    # Supervisor can only update zones in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        # ---------------------------------------------------------
+        # Supervisor authorization.
+        # ---------------------------------------------------------
+        if role == "supervisor":
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="You can only update zones in your location"), 403
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
 
-    conn.execute(
-        """UPDATE zones
-           SET name=COALESCE(?,name),
-               floor=COALESCE(?,floor),
-               type=COALESCE(?,type),
-               cleaning_interval_minutes=COALESCE(?,cleaning_interval_minutes),
-               status=COALESCE(?,status)
-           WHERE id=?""",
-        (
-            d.get("name"),
-            d.get("floor"),
-            d.get("type"),
-            d.get("cleaning_interval_minutes"),
-            d.get("status"),
-            zid
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only update zones assigned to your team"
+                ), 403
+
+        # ---------------------------------------------------------
+        # Prevent changing zone to a location outside the
+        # permitted organization/team scope.
+        # ---------------------------------------------------------
+        new_location_id = d.get("location_id")
+
+        if new_location_id:
+
+            new_location = conn.execute("""
+                SELECT id
+                FROM locations
+                WHERE id = ?
+                  AND organization_id = ?
+            """, (
+                new_location_id,
+                organization_id
+            )).fetchone()
+
+            if not new_location:
+                return jsonify(
+                    error="Invalid location for this organization"
+                ), 400
+
+            if role == "supervisor":
+
+                allowed_location = conn.execute(f"""
+                    SELECT 1
+                    FROM team_locations
+                    WHERE location_id = ?
+                      AND team_id IN ({placeholders})
+                    LIMIT 1
+                """, (
+                    new_location_id,
+                    *team_ids
+                )).fetchone()
+
+                if not allowed_location:
+                    return jsonify(
+                        error="You can only move zones to locations assigned to your team"
+                    ), 403
+
+        conn.execute(
+            """
+            UPDATE zones
+            SET
+                location_id = COALESCE(?, location_id),
+                name = COALESCE(?, name),
+                floor = COALESCE(?, floor),
+                type = COALESCE(?, type),
+                cleaning_interval_minutes =
+                    COALESCE(?, cleaning_interval_minutes),
+                status = COALESCE(?, status)
+            WHERE id = ?
+            """,
+            (
+                d.get("location_id"),
+                d.get("name"),
+                d.get("floor"),
+                d.get("type"),
+                d.get("cleaning_interval_minutes"),
+                d.get("status"),
+                zid
+            )
         )
-    )
 
-    conn.commit()
-    conn.close()
+        # ---------------------------------------------------------
+        # Rebuild team-zone associations when the location changes.
+        # ---------------------------------------------------------
+        if new_location_id:
 
-    return jsonify(message="Updated")
-#delete_zones______________________________________________________________________
+            conn.execute("""
+                DELETE FROM team_zones
+                WHERE zone_id = ?
+            """, (zid,))
+
+            team_rows = conn.execute("""
+                SELECT team_id
+                FROM team_locations
+                WHERE location_id = ?
+            """, (new_location_id,)).fetchall()
+
+            for team_row in team_rows:
+                conn.execute("""
+                    INSERT OR IGNORE INTO team_zones (
+                        team_id,
+                        zone_id
+                    )
+                    VALUES (?, ?)
+                """, (
+                    team_row["team_id"],
+                    zid
+                ))
+
+        conn.commit()
+
+        return jsonify(message="Updated")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+
+
 @app.route("/api/zones/<zid>", methods=["DELETE"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def delete_zone(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
 
     conn = get_db()
 
-    zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
-    """, (zid,)).fetchone()
+    try:
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
+            zid,
+            organization_id
+        )).fetchone()
 
-    if not zone:
+        if not zone:
+            return jsonify(error="Zone not found"), 404
+
+        if role == "supervisor":
+
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only delete zones assigned to your team"
+                ), 403
+
+        conn.execute("""
+            DELETE FROM team_zones
+            WHERE zone_id = ?
+        """, (zid,))
+
+        conn.execute("""
+            DELETE FROM staff_zones
+            WHERE zone_id = ?
+        """, (zid,))
+
+        conn.execute("""
+            DELETE FROM zones
+            WHERE id = ?
+        """, (zid,))
+
+        conn.commit()
+
+        return jsonify(message="Deleted")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
         conn.close()
-        return jsonify(error="Zone not found"), 404
 
-    # Supervisor can only delete zones in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="You can only delete zones in your location"), 403
-
-    conn.execute(
-        "DELETE FROM zones WHERE id=?",
-        (zid,)
-    )
-
-    conn.commit()
-    conn.close()
-
-    return jsonify(message="Deleted")
-#get-api zones-zid-qr&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 @app.route("/api/zones/<zid>/qr")
 @jwt_required()
 def zone_qr(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    user_id = user.get("id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
 
     conn = get_db()
 
-    zone = conn.execute("""
-        SELECT id, location_id, qr_code
-        FROM zones
-        WHERE id=?
-    """, (zid,)).fetchone()
+    try:
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id,
+                z.qr_code
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
+            zid,
+            organization_id
+        )).fetchone()
 
-    if not zone:
+        if not zone:
+            return jsonify(error="Zone not found"), 404
+
+        if role == "admin":
+            pass
+
+        elif role == "supervisor":
+
+            if not team_ids:
+                return jsonify(error="Access denied"), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(error="Access denied"), 403
+
+        elif role == "employee":
+
+            assigned = conn.execute("""
+                SELECT 1
+                FROM staff_zones
+                WHERE user_id = ?
+                  AND zone_id = ?
+            """, (
+                user_id,
+                zid
+            )).fetchone()
+
+            if not assigned:
+                return jsonify(error="Access denied"), 403
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        return jsonify(
+            qr_code=zone["qr_code"]
+        )
+
+    finally:
         conn.close()
-        return jsonify(error="Not found"), 404
 
-    # ---------------------------------------------------------
-    # Admin can access any zone QR
-    # ---------------------------------------------------------
 
-    if role == "admin":
-        pass
-
-    # ---------------------------------------------------------
-    # Supervisor can access QR for their location
-    # ---------------------------------------------------------
-
-    elif role == "supervisor":
-
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="Access denied"), 403
-
-    # ---------------------------------------------------------
-    # Staff can access QR only for assigned zones
-    # ---------------------------------------------------------
-
-    else:
-
-        assigned = conn.execute("""
-            SELECT 1
-            FROM staff_zones
-            WHERE user_id=?
-              AND zone_id=?
-        """, (uid, zid)).fetchone()
-
-        if not assigned:
-            conn.close()
-            return jsonify(error="Access denied"), 403
-
-    qr_code = zone["qr_code"]
-
-    conn.close()
-
-    return jsonify(qr_code=qr_code)
-#get-ap zones-zid-staff&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 @app.route("/api/zones/<zid>/staff")
 @jwt_required()
 def zone_staff(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    user_id = user.get("id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
 
     conn = get_db()
 
-    zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
-    """, (zid,)).fetchone()
+    try:
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
+            zid,
+            organization_id
+        )).fetchone()
 
-    if not zone:
-        conn.close()
-        return jsonify(error="Zone not found"), 404
+        if not zone:
+            return jsonify(error="Zone not found"), 404
 
-    # ---------------------------------------------------------
-    # Admin can view staff for any zone
-    # ---------------------------------------------------------
+        # ---------------------------------------------------------
+        # EMPLOYEE
+        # Only their own assignment is returned.
+        # ---------------------------------------------------------
+        if role == "employee":
 
-    if role == "admin":
-        pass
+            assigned = conn.execute("""
+                SELECT 1
+                FROM staff_zones
+                WHERE user_id = ?
+                  AND zone_id = ?
+            """, (
+                user_id,
+                zid
+            )).fetchone()
 
-    # ---------------------------------------------------------
-    # Supervisor can view staff for zones in their location
-    # ---------------------------------------------------------
+            if not assigned:
+                return jsonify(error="Access denied"), 403
 
-    elif role == "supervisor":
+            rows = conn.execute("""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.phone,
+                    sz.shift,
+                    sz.assigned_at
+                FROM staff_zones sz
+                JOIN users u
+                    ON u.id = sz.user_id
+                WHERE sz.zone_id = ?
+                  AND sz.user_id = ?
+                  AND u.organization_id = ?
+            """, (
+                zid,
+                user_id,
+                organization_id
+            )).fetchall()
 
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+            return jsonify(rows_to_list(rows))
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="Access denied"), 403
+        # ---------------------------------------------------------
+        # ADMIN
+        # ---------------------------------------------------------
+        if role == "admin":
+            pass
 
-    # ---------------------------------------------------------
-    # Staff can only view their own assignment
-    # ---------------------------------------------------------
+        # ---------------------------------------------------------
+        # SUPERVISOR
+        # Must control the zone through team_zones.
+        # ---------------------------------------------------------
+        elif role == "supervisor":
 
-    else:
+            if not team_ids:
+                return jsonify(error="Access denied"), 403
 
-        assigned = conn.execute("""
-            SELECT 1
-            FROM staff_zones
-            WHERE user_id=?
-              AND zone_id=?
-        """, (uid, zid)).fetchone()
+            placeholders = ",".join("?" for _ in team_ids)
 
-        if not assigned:
-            conn.close()
-            return jsonify(error="Access denied"), 403
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zid,
+                *team_ids
+            )).fetchone()
 
-        # Staff should not receive the entire staff directory
-        rows = rows_to_list(conn.execute("""
+            if not allowed:
+                return jsonify(error="Access denied"), 403
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        rows = conn.execute("""
             SELECT
                 u.id,
                 u.name,
+                u.email,
+                u.phone,
                 sz.shift,
                 sz.assigned_at
             FROM staff_zones sz
             JOIN users u
-                ON sz.user_id=u.id
-            WHERE sz.zone_id=?
-              AND sz.user_id=?
-        """, (zid, uid)).fetchall())
+                ON u.id = sz.user_id
+            WHERE sz.zone_id = ?
+              AND u.organization_id = ?
+              AND u.role = 'employee'
+            ORDER BY u.name
+        """, (
+            zid,
+            organization_id
+        )).fetchall()
 
+        # ---------------------------------------------------------
+        # Supervisor should only see employees belonging to one
+        # of the supervisor's teams.
+        # ---------------------------------------------------------
+        if role == "supervisor":
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            rows = conn.execute(f"""
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.phone,
+                    sz.shift,
+                    sz.assigned_at
+                FROM staff_zones sz
+                JOIN users u
+                    ON u.id = sz.user_id
+                JOIN team_members tm
+                    ON tm.user_id = u.id
+                WHERE sz.zone_id = ?
+                  AND u.organization_id = ?
+                  AND u.role = 'employee'
+                  AND tm.team_id IN ({placeholders})
+                ORDER BY u.name
+            """, (
+                zid,
+                organization_id,
+                *team_ids
+            )).fetchall()
+
+        return jsonify(rows_to_list(rows))
+
+    finally:
         conn.close()
-        return jsonify(rows)
 
-    # ---------------------------------------------------------
-    # Admin / Supervisor
-    # ---------------------------------------------------------
 
-    rows = rows_to_list(conn.execute("""
-        SELECT
-            u.id,
-            u.name,
-            u.email,
-            u.phone,
-            sz.shift,
-            sz.assigned_at
-        FROM staff_zones sz
-        JOIN users u
-            ON sz.user_id=u.id
-        WHERE sz.zone_id=?
-        ORDER BY u.name
-    """, (zid,)).fetchall())
-
-    conn.close()
-
-    return jsonify(rows)
-#assign_zone task___________________________________________________________________
 @app.route("/api/zones/<zid>/assign", methods=["POST"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def assign_zone(zid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
     d = request.get_json() or {}
 
     if not d.get("user_id"):
         return jsonify(error="user_id required"), 400
 
+    target_user_id = d["user_id"]
+
     conn = get_db()
 
-    # Verify the zone exists
-    zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
-    """, (zid,)).fetchone()
-
-    if not zone:
-        conn.close()
-        return jsonify(error="Zone not found"), 404
-
-    # Verify the user exists
-    user = conn.execute("""
-        SELECT id, role, location_id
-        FROM users
-        WHERE id=?
-    """, (d["user_id"],)).fetchone()
-
-    if not user:
-        conn.close()
-        return jsonify(error="User not found"), 404
-
-    # Only staff can be assigned to zones
-    if user["role"] != "staff":
-        conn.close()
-        return jsonify(error="Only staff can be assigned to zones"), 400
-
-    # Staff and zone must belong to the same location
-    if user["location_id"] != zone["location_id"]:
-        conn.close()
-        return jsonify(error="Staff and zone must belong to the same location"), 400
-
-    # Supervisor can only assign zones in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="You can only manage zones in your location"), 403
-
-    conn.execute(
-        "DELETE FROM staff_zones WHERE user_id=? AND zone_id=?",
-        (d["user_id"], zid)
-    )
-
-    conn.execute(
-        "INSERT INTO staff_zones VALUES (?,?,?,?,CURRENT_TIMESTAMP)",
-        (
-            str(uuid.uuid4()),
-            d["user_id"],
+    try:
+        # ---------------------------------------------------------
+        # Zone must belong to current organization.
+        # ---------------------------------------------------------
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
             zid,
-            d.get("shift", "morning")
+            organization_id
+        )).fetchone()
+
+        if not zone:
+            return jsonify(error="Zone not found"), 404
+
+        # ---------------------------------------------------------
+        # Supervisor must control this zone through their team.
+        # ---------------------------------------------------------
+        if role == "supervisor":
+
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed_zone = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zid,
+                *team_ids
+            )).fetchone()
+
+            if not allowed_zone:
+                return jsonify(
+                    error="You can only manage zones assigned to your team"
+                ), 403
+
+        # ---------------------------------------------------------
+        # Target must be an employee in the same organization.
+        # ---------------------------------------------------------
+        target = conn.execute("""
+            SELECT
+                id,
+                role,
+                organization_id
+            FROM users
+            WHERE id = ?
+              AND organization_id = ?
+              AND account_status = 'active'
+              AND is_active = 1
+        """, (
+            target_user_id,
+            organization_id
+        )).fetchone()
+
+        if not target:
+            return jsonify(
+                error="Employee not found in your organization"
+            ), 404
+
+        if target["role"] != "employee":
+            return jsonify(
+                error="Only employees can be assigned to zones"
+            ), 400
+
+        # ---------------------------------------------------------
+        # Target employee must belong to a team that controls
+        # this zone.
+        # ---------------------------------------------------------
+        zone_team_rows = conn.execute("""
+            SELECT team_id
+            FROM team_zones
+            WHERE zone_id = ?
+        """, (zid,)).fetchall()
+
+        zone_team_ids = [
+            row["team_id"]
+            for row in zone_team_rows
+        ]
+
+        if not zone_team_ids:
+            return jsonify(
+                error="Zone is not assigned to any team"
+            ), 400
+
+        team_placeholders = ",".join(
+            "?" for _ in zone_team_ids
         )
-    )
 
-    conn.commit()
-    conn.close()
+        employee_team = conn.execute(f"""
+            SELECT 1
+            FROM team_members
+            WHERE user_id = ?
+              AND team_id IN ({team_placeholders})
+            LIMIT 1
+        """, (
+            target_user_id,
+            *zone_team_ids
+        )).fetchone()
 
-    return jsonify(message="Assigned"), 201
+        if not employee_team:
+            return jsonify(
+                error="Employee does not belong to a team assigned to this zone"
+            ), 400
 
+        # ---------------------------------------------------------
+        # Supervisor cannot assign an employee outside their own
+        # team scope.
+        # ---------------------------------------------------------
+        if role == "supervisor":
+
+            supervisor_team_placeholders = ",".join(
+                "?" for _ in team_ids
+            )
+
+            allowed_employee = conn.execute(f"""
+                SELECT 1
+                FROM team_members
+                WHERE user_id = ?
+                  AND team_id IN ({supervisor_team_placeholders})
+                LIMIT 1
+            """, (
+                target_user_id,
+                *team_ids
+            )).fetchone()
+
+            if not allowed_employee:
+                return jsonify(
+                    error="You can only assign employees from your team"
+                ), 403
+
+        # ---------------------------------------------------------
+        # Replace existing assignment.
+        # ---------------------------------------------------------
+        conn.execute("""
+            DELETE FROM staff_zones
+            WHERE user_id = ?
+              AND zone_id = ?
+        """, (
+            target_user_id,
+            zid
+        ))
+
+        conn.execute(
+            """
+            INSERT INTO staff_zones (
+                id,
+                user_id,
+                zone_id,
+                shift,
+                assigned_at
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                str(uuid.uuid4()),
+                target_user_id,
+                zid,
+                d.get("shift", "morning")
+            )
+        )
+
+        conn.commit()
+
+        return jsonify(message="Assigned"), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
 # ─── users ────────────────────────────────────────────────────────────────────
+
+def user_in_supervisor_scope(conn, supervisor_id, target_user_id):
+    """
+    Return True when target_user_id belongs to a team supervised
+    by supervisor_id.
+    """
+
+    row = conn.execute("""
+        SELECT 1
+        FROM team_supervisors ts
+        JOIN team_members tm
+            ON ts.team_id = tm.team_id
+        WHERE ts.user_id = ?
+          AND tm.user_id = ?
+
+        UNION
+
+        SELECT 1
+        FROM team_supervisors ts
+        JOIN team_supervisors target_ts
+            ON ts.team_id = target_ts.team_id
+        WHERE ts.user_id = ?
+          AND target_ts.user_id = ?
+
+        LIMIT 1
+    """, (
+        supervisor_id,
+        target_user_id,
+        supervisor_id,
+        target_user_id
+    )).fetchone()
+
+    return bool(row)
+
 
 @app.route("/api/users", methods=["GET"])
 @jwt_required()
 def get_users():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
 
-    conn = get_db()
+    if not user:
+        return jsonify(error="User not found"), 404
 
-    # Staff should not access the user directory
-    if role == "staff":
-        conn.close()
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
+    if role == "employee":
         return jsonify(error="Access denied"), 403
 
-    q = """
-        SELECT id, name, email, notification_email, phone,
-               role, location_id, is_active, created_at
-        FROM users
-        WHERE 1=1
-    """
+    conn = get_db()
 
-    params = []
+    try:
+        requested_role = (
+            request.args.get("role") or ""
+        ).strip().lower()
 
-    # Supervisor can only see staff in their own location
-    if role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        if requested_role and requested_role not in (
+            "admin",
+            "supervisor",
+            "employee"
+        ):
+            return jsonify(error="Invalid role"), 400
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+        if role == "admin":
 
-        q += " AND location_id=? AND role='staff'"
-        params.append(supervisor["location_id"])
+            query = """
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.notification_email,
+                    u.phone,
+                    u.role,
+                    u.location_id,
+                    u.is_active,
+                    u.account_status,
+                    u.employee_id,
+                    u.organization_id,
+                    u.created_at
+                FROM users u
+                WHERE u.organization_id = ?
+            """
 
-    # Optional filters
-    requested_role = request.args.get("role")
-    requested_location = request.args.get("location_id")
+            params = [organization_id]
 
-    if requested_role and role == "admin":
-        q += " AND role=?"
-        params.append(requested_role)
+            if requested_role:
+                query += " AND u.role = ?"
+                params.append(requested_role)
 
-    if requested_location and role == "admin":
-        q += " AND location_id=?"
-        params.append(requested_location)
+        elif role == "supervisor":
 
-    q += " ORDER BY name"
+            team_ids = get_current_team_ids()
 
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
+            if not team_ids:
+                return jsonify([])
 
-    conn.close()
+            placeholders = ",".join("?" for _ in team_ids)
 
-    return jsonify(rows)
-#create*users##################################################################
+            query = f"""
+                SELECT DISTINCT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.notification_email,
+                    u.phone,
+                    u.role,
+                    u.location_id,
+                    u.is_active,
+                    u.account_status,
+                    u.employee_id,
+                    u.organization_id,
+                    u.created_at
+                FROM users u
+                WHERE u.organization_id = ?
+                  AND (
+                      u.id IN (
+                          SELECT tm.user_id
+                          FROM team_members tm
+                          WHERE tm.team_id IN ({placeholders})
+                      )
+                      OR
+                      u.id IN (
+                          SELECT ts.user_id
+                          FROM team_supervisors ts
+                          WHERE ts.team_id IN ({placeholders})
+                      )
+                  )
+            """
+
+            params = [
+                organization_id,
+                *team_ids,
+                *team_ids
+            ]
+
+            if requested_role:
+                query += " AND u.role = ?"
+                params.append(requested_role)
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        query += " ORDER BY u.name"
+
+        rows = rows_to_list(
+            conn.execute(query, params).fetchall()
+        )
+
+        return jsonify(rows)
+
+    finally:
+        conn.close()
+
+
 @app.route("/api/users", methods=["POST"])
 @jwt_required()
-@require_roles("admin")
+@require_roles("admin", "supervisor")
 def create_user():
-    d = request.get_json() or {}
-    if not d.get("name") or not d.get("email") or not d.get("password"):
-        return jsonify(error="name, email, password required"), 400
-    conn = get_db()
-    if conn.execute("SELECT id FROM users WHERE email=?", (d["email"],)).fetchone():
-        conn.close()
-        return jsonify(error="Email exists"), 409
-    uid = str(uuid.uuid4())
-    hashed = bcrypt.hashpw(d["password"].encode(), bcrypt.gensalt()).decode()
-    conn.execute("""
-    INSERT INTO users
-    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-""", (
-    uid,
-    d["name"],
-    d["email"],
-    d.get("notification_email"),
-    d.get("phone"),
-    hashed,
-    "staff",
-    d.get("location_id"),
-    1
-))
-    conn.commit(); conn.close()
-    return jsonify(id=uid), 201
+    creator = get_current_user()
 
-#staff user details
-#update*users##################################################################
-@app.route("/api/users/<uid>", methods=["PUT"])
-@jwt_required()
-@require_roles("admin")
-def update_user(uid):
+    if not creator:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(creator):
+        return jsonify(
+            error="Account is not active.",
+            account_status=creator.get("account_status")
+        ), 403
+
+    creator_role = creator.get("role")
+    organization_id = creator.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
     d = request.get_json() or {}
 
+    name = (d.get("name") or "").strip()
+    email = (d.get("email") or "").strip().lower()
+    password = d.get("password") or ""
+    requested_role = (d.get("role") or "employee").strip().lower()
+    team_id = d.get("team_id")
+    employee_id = (d.get("employee_id") or "").strip() or None
+
+    if not name or not email or not password:
+        return jsonify(
+            error="name, email, password required"
+        ), 400
+
+    if len(password) < 8:
+        return jsonify(
+            error="Password must be at least 8 characters"
+        ), 400
+
+    if requested_role not in ("supervisor", "employee"):
+        return jsonify(
+            error="Only supervisor or employee accounts can be created here"
+        ), 400
+
+    # Supervisor can create employees only.
+    if creator_role == "supervisor" and requested_role != "employee":
+        return jsonify(
+            error="Supervisors can only create employee accounts"
+        ), 403
+
     conn = get_db()
 
-    # Prevent duplicate email addresses
-    if d.get("email"):
+    try:
         existing = conn.execute(
-            "SELECT id FROM users WHERE email=? AND id!=?",
-            (d["email"].strip(), uid)
+            """
+            SELECT id
+            FROM users
+            WHERE LOWER(email) = ?
+            """,
+            (email,)
         ).fetchone()
 
         if existing:
-            conn.close()
-            return jsonify(error="Email already in use"), 409
+            return jsonify(
+                error="Email already exists"
+            ), 409
 
-    conn.execute("""
-        UPDATE users
-        SET
-            name = COALESCE(?, name),
-            email = COALESCE(?, email),
-            notification_email = COALESCE(?, notification_email),
-            phone = COALESCE(?, phone),
-            role = COALESCE(?, role),
-            location_id = COALESCE(?, location_id),
-            is_active = COALESCE(?, is_active)
-        WHERE id=?
-    """, (
-        d.get("name"),
-        d.get("email"),
-        d.get("notification_email"),
-        d.get("phone"),
-        d.get("role"),
-        d.get("location_id"),
-        d.get("is_active"),
-        uid
-    ))
+        if employee_id:
 
-    conn.commit()
-    conn.close()
+            existing_employee = conn.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE organization_id = ?
+                  AND employee_id = ?
+                """,
+                (
+                    organization_id,
+                    employee_id
+                )
+            ).fetchone()
 
-    return jsonify(message="Updated")
+            if existing_employee:
+                return jsonify(
+                    error="Employee ID is already in use"
+                ), 409
 
-# ─── tasks ────────────────────────────────────────────────────────────────────
-@app.route("/api/tasks", methods=["GET"])
+        # Team is mandatory for supervisor/employee management.
+        if not team_id:
+            return jsonify(
+                error="team_id is required"
+            ), 400
+
+        team = conn.execute(
+            """
+            SELECT id
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not team:
+            return jsonify(
+                error="Team does not exist in your organization"
+            ), 400
+
+        # Supervisor may only add employees to a team they supervise.
+        if creator_role == "supervisor":
+
+            supervised = conn.execute(
+                """
+                SELECT 1
+                FROM team_supervisors
+                WHERE team_id = ?
+                  AND user_id = ?
+                """,
+                (
+                    team_id,
+                    creator.get("id")
+                )
+            ).fetchone()
+
+            if not supervised:
+                return jsonify(
+                    error="You can only add employees to your own teams"
+                ), 403
+
+        user_id = str(uuid.uuid4())
+
+        password_hash = bcrypt.hashpw(
+            password.encode(),
+            bcrypt.gensalt()
+        ).decode()
+
+        conn.execute("BEGIN")
+
+        conn.execute(
+            """
+            INSERT INTO users (
+                id,
+                name,
+                email,
+                notification_email,
+                phone,
+                password_hash,
+                role,
+                location_id,
+                is_active,
+                organization_id,
+                account_status,
+                employee_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                name,
+                email,
+                d.get("notification_email"),
+                d.get("phone"),
+                password_hash,
+                requested_role,
+                None,
+                1,
+                organization_id,
+                "active",
+                employee_id
+            )
+        )
+
+        relationship_id = str(uuid.uuid4())
+
+        if requested_role == "employee":
+
+            conn.execute(
+                """
+                INSERT INTO team_members (
+                    id,
+                    team_id,
+                    user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    relationship_id,
+                    team_id,
+                    user_id
+                )
+            )
+
+        elif requested_role == "supervisor":
+
+            conn.execute(
+                """
+                INSERT INTO team_supervisors (
+                    id,
+                    team_id,
+                    user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    relationship_id,
+                    team_id,
+                    user_id
+                )
+            )
+
+        conn.commit()
+
+        return jsonify(
+            id=user_id,
+            name=name,
+            email=email,
+            role=requested_role,
+            organization_id=organization_id,
+            team_id=team_id
+        ), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+
+
+@app.route("/api/users/<uid>", methods=["PUT"])
 @jwt_required()
-def get_tasks():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
-    args = request.args
+@require_roles("admin", "supervisor")
+def update_user(uid):
+    editor = get_current_user()
+
+    if not editor:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(editor):
+        return jsonify(
+            error="Account is not active.",
+            account_status=editor.get("account_status")
+        ), 403
+
+    editor_role = editor.get("role")
+    organization_id = editor.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
 
     conn = get_db()
 
-    q = """
+    try:
+        target = conn.execute(
+            """
+            SELECT *
+            FROM users
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                uid,
+                organization_id
+            )
+        ).fetchone()
+
+        if not target:
+            return jsonify(
+                error="User not found"
+            ), 404
+
+        target = row_to_dict(target)
+
+        # Supervisors may only manage users in their own teams.
+        if editor_role == "supervisor":
+
+            if not user_in_supervisor_scope(
+                conn,
+                editor.get("id"),
+                uid
+            ):
+                return jsonify(
+                    error="You can only manage users in your own teams"
+                ), 403
+
+            # Supervisors cannot modify role.
+            if "role" in request.get_json(silent=True) or {}:
+                return jsonify(
+                    error="Supervisors cannot change user roles"
+                ), 403
+
+            # Supervisors cannot modify account activation.
+            if "is_active" in request.get_json(silent=True) or {}:
+                return jsonify(
+                    error="Supervisors cannot change account activation"
+                ), 403
+
+        d = request.get_json() or {}
+
+        # Prevent duplicate email.
+        if d.get("email"):
+
+            email = d["email"].strip().lower()
+
+            existing = conn.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE LOWER(email) = ?
+                  AND id != ?
+                """,
+                (
+                    email,
+                    uid
+                )
+            ).fetchone()
+
+            if existing:
+                return jsonify(
+                    error="Email already in use"
+                ), 409
+
+        # Role changes are admin-only.
+        new_role = d.get("role")
+
+        if new_role is not None:
+
+            new_role = str(new_role).strip().lower()
+
+            if new_role not in (
+                "admin",
+                "supervisor",
+                "employee"
+            ):
+                return jsonify(
+                    error="Invalid role"
+                ), 400
+
+        # Employee ID uniqueness.
+        new_employee_id = d.get("employee_id")
+
+        if new_employee_id:
+
+            existing_employee = conn.execute(
+                """
+                SELECT id
+                FROM users
+                WHERE organization_id = ?
+                  AND employee_id = ?
+                  AND id != ?
+                """,
+                (
+                    organization_id,
+                    new_employee_id,
+                    uid
+                )
+            ).fetchone()
+
+            if existing_employee:
+                return jsonify(
+                    error="Employee ID is already in use"
+                ), 409
+
+        # Basic user fields.
+        conn.execute(
+            """
+            UPDATE users
+            SET
+                name = COALESCE(?, name),
+                email = COALESCE(?, email),
+                notification_email = COALESCE(?, notification_email),
+                phone = COALESCE(?, phone),
+                role = COALESCE(?, role),
+                employee_id = COALESCE(?, employee_id),
+                is_active = COALESCE(?, is_active)
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                d.get("name"),
+                d.get("email", "").strip().lower()
+                if d.get("email")
+                else None,
+                d.get("notification_email"),
+                d.get("phone"),
+                new_role if editor_role == "admin" else None,
+                new_employee_id,
+                d.get("is_active")
+                if editor_role == "admin"
+                else None,
+                uid,
+                organization_id
+            )
+        )
+
+        # Optional team reassignment.
+        if "team_id" in d:
+
+            new_team_id = d.get("team_id")
+
+            if not new_team_id:
+                return jsonify(
+                    error="team_id cannot be empty"
+                ), 400
+
+            team = conn.execute(
+                """
+                SELECT id
+                FROM teams
+                WHERE id = ?
+                  AND organization_id = ?
+                """,
+                (
+                    new_team_id,
+                    organization_id
+                )
+            ).fetchone()
+
+            if not team:
+                return jsonify(
+                    error="Team does not exist in your organization"
+                ), 400
+
+            effective_role = (
+                new_role
+                if editor_role == "admin" and new_role
+                else target["role"]
+            )
+
+            if editor_role == "supervisor":
+
+                supervised = conn.execute(
+                    """
+                    SELECT 1
+                    FROM team_supervisors
+                    WHERE team_id = ?
+                      AND user_id = ?
+                    """,
+                    (
+                        new_team_id,
+                        editor.get("id")
+                    )
+                ).fetchone()
+
+                if not supervised:
+                    return jsonify(
+                        error="You can only assign users to your own teams"
+                    ), 403
+
+            # Remove existing team relationships.
+            conn.execute(
+                """
+                DELETE FROM team_members
+                WHERE user_id = ?
+                """,
+                (uid,)
+            )
+
+            conn.execute(
+                """
+                DELETE FROM team_supervisors
+                WHERE user_id = ?
+                """,
+                (uid,)
+            )
+
+            relationship_id = str(uuid.uuid4())
+
+            if effective_role == "employee":
+
+                conn.execute(
+                    """
+                    INSERT INTO team_members (
+                        id,
+                        team_id,
+                        user_id
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        relationship_id,
+                        new_team_id,
+                        uid
+                    )
+                )
+
+            elif effective_role == "supervisor":
+
+                conn.execute(
+                    """
+                    INSERT INTO team_supervisors (
+                        id,
+                        team_id,
+                        user_id
+                    )
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        relationship_id,
+                        new_team_id,
+                        uid
+                    )
+                )
+
+        conn.commit()
+
+        return jsonify(
+            message="Updated"
+        )
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+# ─── tasks ────────────────────────────────────────────────────────────────────
+
+def task_scope_allowed(conn, task_id, user):
+    """
+    Returns the task row when the current user is allowed to access it.
+    Returns None when the task does not exist or is outside the user's scope.
+    """
+
+    if not user:
+        return None
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    user_id = user.get("id")
+
+    if not organization_id:
+        return None
+
+    task = conn.execute("""
         SELECT
             t.*,
-            z.name zone_name,
+            z.name AS zone_name,
             z.floor,
-            l.name location_name,
-            u.name staff_name,
-            u.email staff_email
+            z.location_id,
+            l.name AS location_name,
+            l.organization_id AS location_organization_id,
+            u.name AS staff_name,
+            u.email AS staff_email
         FROM tasks t
-        LEFT JOIN zones z
-            ON t.zone_id=z.id
-        LEFT JOIN locations l
-            ON z.location_id=l.id
+        JOIN zones z
+            ON z.id = t.zone_id
+        JOIN locations l
+            ON l.id = z.location_id
         LEFT JOIN users u
-            ON t.assigned_to=u.id
-        WHERE 1=1
-    """
+            ON u.id = t.assigned_to
+        WHERE t.id = ?
+          AND l.organization_id = ?
+    """, (task_id, organization_id)).fetchone()
 
-    params = []
+    if not task:
+        return None
 
-    # ---------------------------------------------------------
-    # STAFF — only their own tasks
-    # ---------------------------------------------------------
+    if role == "admin":
+        return task
 
-    if role == "staff":
+    if role == "supervisor":
+        team_ids = get_current_team_ids()
 
-        q += " AND t.assigned_to=?"
-        params.append(uid)
+        if not team_ids:
+            return None
 
-    # ---------------------------------------------------------
-    # SUPERVISOR — only tasks in their location
-    # ---------------------------------------------------------
+        placeholders = ",".join("?" for _ in team_ids)
 
-    elif role == "supervisor":
+        allowed = conn.execute(f"""
+            SELECT 1
+            FROM team_zones tz
+            WHERE tz.zone_id = ?
+              AND tz.team_id IN ({placeholders})
+            LIMIT 1
+        """, (
+            task["zone_id"],
+            *team_ids
+        )).fetchone()
 
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        return task if allowed else None
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+    if role == "employee":
+        if task["assigned_to"] != user_id:
+            return None
 
-        q += " AND z.location_id=?"
-        params.append(supervisor["location_id"])
+        return task
 
-    # ---------------------------------------------------------
-    # Optional filters
-    # ---------------------------------------------------------
+    return None
 
-    if args.get("zone_id"):
-        q += " AND t.zone_id=?"
-        params.append(args["zone_id"])
 
-    if args.get("assigned_to"):
+@app.route("/api/tasks", methods=["GET"])
+@jwt_required()
+def get_tasks():
+    user = get_current_user()
 
-        # Staff cannot override their own scope
-        if role == "staff":
-            if args["assigned_to"] != uid:
-                conn.close()
-                return jsonify(error="Access denied"), 403
+    if not user:
+        return jsonify(error="User not found"), 404
 
-        q += " AND t.assigned_to=?"
-        params.append(args["assigned_to"])
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
 
-    if args.get("status"):
-        q += " AND t.status=?"
-        params.append(args["status"])
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    args = request.args
 
-    # Only Admin can explicitly filter another location
-    if args.get("location_id"):
+    if not organization_id:
+        return jsonify(error="User has no organization assigned"), 403
+
+    conn = get_db()
+
+    try:
+        q = """
+            SELECT
+                t.*,
+                z.name AS zone_name,
+                z.floor,
+                l.name AS location_name,
+                u.name AS staff_name,
+                u.email AS staff_email
+            FROM tasks t
+            JOIN zones z
+                ON t.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            LEFT JOIN users u
+                ON t.assigned_to = u.id
+            WHERE l.organization_id = ?
+        """
+
+        params = [organization_id]
+
+        # ---------------------------------------------------------
+        # ADMIN — every task in their organization
+        # ---------------------------------------------------------
 
         if role == "admin":
-            q += " AND z.location_id=?"
-            params.append(args["location_id"])
+            pass
+
+        # ---------------------------------------------------------
+        # SUPERVISOR — only tasks belonging to their team zones
+        # ---------------------------------------------------------
 
         elif role == "supervisor":
-            # Supervisor is already restricted to own location.
-            # Reject attempts to request another location.
-            supervisor_location = conn.execute("""
-                SELECT location_id
-                FROM users
-                WHERE id=?
-            """, (uid,)).fetchone()["location_id"]
 
-            if args["location_id"] != supervisor_location:
-                conn.close()
+            team_ids = get_current_team_ids()
+
+            if not team_ids:
+                return jsonify([])
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            q += f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    WHERE tz.zone_id = t.zone_id
+                      AND tz.team_id IN ({placeholders})
+                )
+            """
+
+            params.extend(team_ids)
+
+        # ---------------------------------------------------------
+        # EMPLOYEE — only their assigned tasks
+        # ---------------------------------------------------------
+
+        elif role == "employee":
+
+            q += " AND t.assigned_to = ?"
+            params.append(user["id"])
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        # ---------------------------------------------------------
+        # OPTIONAL ZONE FILTER
+        # ---------------------------------------------------------
+
+        if args.get("zone_id"):
+
+            zone_id = args["zone_id"]
+
+            if role == "employee":
+
+                # Employee may only request one of their own zones.
+                allowed = conn.execute("""
+                    SELECT 1
+                    FROM tasks t
+                    JOIN zones z
+                        ON z.id = t.zone_id
+                    JOIN locations l
+                        ON l.id = z.location_id
+                    WHERE t.zone_id = ?
+                      AND t.assigned_to = ?
+                      AND l.organization_id = ?
+                    LIMIT 1
+                """, (
+                    zone_id,
+                    user["id"],
+                    organization_id
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            elif role == "supervisor":
+
+                team_ids = get_current_team_ids()
+
+                if not team_ids:
+                    return jsonify(error="Access denied"), 403
+
+                placeholders = ",".join("?" for _ in team_ids)
+
+                allowed = conn.execute(f"""
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN zones z
+                        ON z.id = tz.zone_id
+                    JOIN locations l
+                        ON l.id = z.location_id
+                    WHERE tz.zone_id = ?
+                      AND tz.team_id IN ({placeholders})
+                      AND l.organization_id = ?
+                    LIMIT 1
+                """, (
+                    zone_id,
+                    *team_ids,
+                    organization_id
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            else:
+                allowed = conn.execute("""
+                    SELECT 1
+                    FROM zones z
+                    JOIN locations l
+                        ON l.id = z.location_id
+                    WHERE z.id = ?
+                      AND l.organization_id = ?
+                """, (
+                    zone_id,
+                    organization_id
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            q += " AND t.zone_id = ?"
+            params.append(zone_id)
+
+        # ---------------------------------------------------------
+        # ASSIGNED USER FILTER
+        # ---------------------------------------------------------
+
+        if args.get("assigned_to"):
+
+            requested_user = args["assigned_to"]
+
+            if role == "employee" and requested_user != user["id"]:
                 return jsonify(error="Access denied"), 403
 
-    if args.get("date"):
-        q += " AND DATE(t.scheduled_at)=DATE(?)"
-        params.append(args["date"])
+            if role == "supervisor":
 
-    q += """
-        ORDER BY t.scheduled_at DESC
-        LIMIT 200
-    """
+                team_ids = get_current_team_ids()
 
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
+                if not team_ids:
+                    return jsonify(error="Access denied"), 403
 
-    conn.close()
+                placeholders = ",".join("?" for _ in team_ids)
 
-    return jsonify(rows)
-#create_task-------------------------------------------------------------------
+                allowed = conn.execute(f"""
+                    SELECT 1
+                    FROM team_members tm
+                    WHERE tm.user_id = ?
+                      AND tm.team_id IN ({placeholders})
+                    LIMIT 1
+                """, (
+                    requested_user,
+                    *team_ids
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            elif role == "admin":
+
+                allowed = conn.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE id = ?
+                      AND organization_id = ?
+                      AND role = 'employee'
+                """, (
+                    requested_user,
+                    organization_id
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            q += " AND t.assigned_to = ?"
+            params.append(requested_user)
+
+        # ---------------------------------------------------------
+        # STATUS FILTER
+        # ---------------------------------------------------------
+
+        if args.get("status"):
+            q += " AND t.status = ?"
+            params.append(args["status"])
+
+        # ---------------------------------------------------------
+        # LOCATION FILTER
+        # ---------------------------------------------------------
+
+        if args.get("location_id"):
+
+            location_id = args["location_id"]
+
+            location = conn.execute("""
+                SELECT id
+                FROM locations
+                WHERE id = ?
+                  AND organization_id = ?
+            """, (
+                location_id,
+                organization_id
+            )).fetchone()
+
+            if not location:
+                return jsonify(error="Access denied"), 403
+
+            if role == "supervisor":
+
+                team_ids = get_current_team_ids()
+
+                if not team_ids:
+                    return jsonify(error="Access denied"), 403
+
+                placeholders = ",".join("?" for _ in team_ids)
+
+                allowed = conn.execute(f"""
+                    SELECT 1
+                    FROM team_locations tl
+                    WHERE tl.location_id = ?
+                      AND tl.team_id IN ({placeholders})
+                    LIMIT 1
+                """, (
+                    location_id,
+                    *team_ids
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            elif role == "employee":
+
+                allowed = conn.execute("""
+                    SELECT 1
+                    FROM team_locations tl
+                    JOIN team_members tm
+                        ON tm.team_id = tl.team_id
+                    WHERE tl.location_id = ?
+                      AND tm.user_id = ?
+                    LIMIT 1
+                """, (
+                    location_id,
+                    user["id"]
+                )).fetchone()
+
+                if not allowed:
+                    return jsonify(error="Access denied"), 403
+
+            q += " AND z.location_id = ?"
+            params.append(location_id)
+
+        # ---------------------------------------------------------
+        # DATE FILTER
+        # ---------------------------------------------------------
+
+        if args.get("date"):
+            q += " AND DATE(t.scheduled_at) = DATE(?)"
+            params.append(args["date"])
+
+        q += """
+            ORDER BY t.scheduled_at DESC
+            LIMIT 200
+        """
+
+        rows = conn.execute(q, params).fetchall()
+
+        return jsonify(rows_to_list(rows))
+
+    finally:
+        conn.close()
+
+
+# ─── create task ──────────────────────────────────────────────────────────────
 
 @app.route("/api/tasks", methods=["POST"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def create_task():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+
     d = request.get_json() or {}
 
     if not d.get("zone_id") or not d.get("scheduled_at"):
-        return jsonify(error="zone_id and scheduled_at required"), 400
+        return jsonify(
+            error="zone_id and scheduled_at required"
+        ), 400
 
     conn = get_db()
 
-    # Verify the zone exists and get its location
-    zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
-    """, (d["zone_id"],)).fetchone()
+    try:
 
-    if not zone:
-        conn.close()
-        return jsonify(error="Zone not found"), 404
+        # ---------------------------------------------------------
+        # VERIFY ZONE + ORGANIZATION
+        # ---------------------------------------------------------
 
-    # Supervisor can only create tasks in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        zone = conn.execute("""
+            SELECT
+                z.id,
+                z.location_id,
+                l.organization_id
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE z.id = ?
+              AND l.organization_id = ?
+        """, (
+            d["zone_id"],
+            organization_id
+        )).fetchone()
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or zone["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="You can only create tasks in your location"), 403
+        if not zone:
+            return jsonify(error="Zone not found"), 404
 
-    # If a staff member is assigned, verify that the user exists
-    # and belongs to the same location as the zone
-    assigned_to = d.get("assigned_to")
+        # ---------------------------------------------------------
+        # SUPERVISOR — zone must belong to supervisor's team
+        # ---------------------------------------------------------
 
-    if assigned_to:
-        assigned_user = conn.execute("""
-            SELECT id, role, location_id
-            FROM users
-            WHERE id=?
-        """, (assigned_to,)).fetchone()
+        if role == "supervisor":
 
-        if not assigned_user:
-            conn.close()
-            return jsonify(error="Assigned user not found"), 404
+            team_ids = get_current_team_ids()
 
-        if assigned_user["role"] != "staff":
-            conn.close()
-            return jsonify(error="Tasks can only be assigned to staff"), 400
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
 
-        if assigned_user["location_id"] != zone["location_id"]:
-            conn.close()
-            return jsonify(error="Staff and zone must belong to the same location"), 400
+            placeholders = ",".join("?" for _ in team_ids)
 
-    tid = str(uuid.uuid4())
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones
+                WHERE zone_id = ?
+                  AND team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                d["zone_id"],
+                *team_ids
+            )).fetchone()
 
-    conn.execute(
-        "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (
+            if not allowed:
+                return jsonify(
+                    error="You can only create tasks in your team's zones"
+                ), 403
+
+        # ---------------------------------------------------------
+        # ASSIGNMENT
+        # ---------------------------------------------------------
+
+        assigned_to = d.get("assigned_to")
+
+        if assigned_to:
+
+            assigned_user = conn.execute("""
+                SELECT
+                    id,
+                    role,
+                    organization_id,
+                    account_status
+                FROM users
+                WHERE id = ?
+            """, (assigned_to,)).fetchone()
+
+            if not assigned_user:
+                return jsonify(
+                    error="Assigned employee not found"
+                ), 404
+
+            if assigned_user["role"] != "employee":
+                return jsonify(
+                    error="Tasks can only be assigned to employees"
+                ), 400
+
+            if assigned_user["organization_id"] != organization_id:
+                return jsonify(
+                    error="Employee belongs to another organization"
+                ), 403
+
+            if assigned_user["account_status"] != "active":
+                return jsonify(
+                    error="Employee account is not active"
+                ), 400
+
+            # Employee must belong to a team that controls this zone.
+            allowed_team = conn.execute("""
+                SELECT 1
+                FROM team_members tm
+                JOIN team_zones tz
+                    ON tz.team_id = tm.team_id
+                WHERE tm.user_id = ?
+                  AND tz.zone_id = ?
+                LIMIT 1
+            """, (
+                assigned_to,
+                d["zone_id"]
+            )).fetchone()
+
+            if not allowed_team:
+                return jsonify(
+                    error="Employee is not assigned to this zone's team"
+                ), 400
+
+            # Supervisor can only assign their own team members.
+            if role == "supervisor":
+
+                supervisor_team_ids = get_current_team_ids()
+
+                if not any(
+                    conn.execute("""
+                        SELECT 1
+                        FROM team_members
+                        WHERE team_id = ?
+                          AND user_id = ?
+                    """, (
+                        team_id,
+                        assigned_to
+                    )).fetchone()
+                    for team_id in supervisor_team_ids
+                ):
+                    return jsonify(
+                        error="You can only assign employees from your team"
+                    ), 403
+
+        tid = str(uuid.uuid4())
+
+        conn.execute("""
+            INSERT INTO tasks (
+                id,
+                zone_id,
+                assigned_to,
+                status,
+                scheduled_at,
+                started_at,
+                completed_at,
+                duration_minutes,
+                notes,
+                is_overdue,
+                overdue_count,
+                created_at
+            )
+            VALUES (
+                ?, ?, ?, 'pending', ?, NULL, NULL,
+                NULL, NULL, 0, 0, CURRENT_TIMESTAMP
+            )
+        """, (
             tid,
             d["zone_id"],
             assigned_to,
-            "pending",
-            d["scheduled_at"],
-            None,
-            None,
-            None,
-            None,
-            0,
-            0
-        )
-    )
+            d["scheduled_at"]
+        ))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    return jsonify(id=tid), 201
-#start_task-----------------------------------------------------
+        return jsonify(
+            id=tid,
+            message="Task created"
+        ), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+
+
+# ─── start task ───────────────────────────────────────────────────────────────
+
 @app.route("/api/tasks/<tid>/start", methods=["PUT"])
 @jwt_required()
 def start_task(tid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
 
     conn = get_db()
 
-    task = row_to_dict(
-        conn.execute("""
-            SELECT
-                t.*,
-                z.location_id
-            FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE t.id=?
-        """, (tid,)).fetchone()
-    )
+    try:
 
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
+        task = task_scope_allowed(conn, tid, user)
 
-    # Only pending tasks can be started
-    if task["status"] != "pending":
-        conn.close()
-        return jsonify(
-            error="Only pending tasks can be started"
-        ), 400
+        if not task:
+            return jsonify(error="Access denied"), 403
 
-    # Staff can only start tasks assigned to themselves
-    if role == "staff" and task["assigned_to"] != uid:
-        conn.close()
-        return jsonify(
-            error="You can only start tasks assigned to you"
-        ), 403
-
-    # Supervisor can only start tasks in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
+        if task["status"] != "pending":
             return jsonify(
-                error="You can only start tasks in your location"
+                error="Only pending tasks can be started"
+            ), 400
+
+        # Admin can manage any task in own organization.
+        # Supervisor can manage only their team tasks.
+        # Employee can only start their own task.
+        if role == "employee" and task["assigned_to"] != user["id"]:
+            return jsonify(
+                error="You can only start tasks assigned to you"
             ), 403
 
-    conn.execute(
-        """UPDATE tasks
-           SET status='in-progress',
-               started_at=CURRENT_TIMESTAMP
-           WHERE id=?""",
-        (tid,)
-    )
+        conn.execute("""
+            UPDATE tasks
+            SET status = 'in-progress',
+                started_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (tid,))
 
-    conn.execute(
-        "UPDATE zones SET status='in-progress' WHERE id=?",
-        (task["zone_id"],)
-    )
+        conn.execute("""
+            UPDATE zones
+            SET status = 'in-progress'
+            WHERE id = ?
+        """, (task["zone_id"],))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    return jsonify(message="Started")
-#complete_task------------------------------------------------------------
+        return jsonify(message="Started")
+
+    finally:
+        conn.close()
+
+
+# ─── complete task ────────────────────────────────────────────────────────────
+
 @app.route("/api/tasks/<tid>/complete", methods=["PUT"])
 @jwt_required()
 def complete_task(tid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
     d = request.get_json() or {}
 
     conn = get_db()
 
-    task = row_to_dict(
-        conn.execute("""
-            SELECT
-                t.*,
-                z.location_id
-            FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE t.id=?
-        """, (tid,)).fetchone()
-    )
+    try:
 
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
+        task = task_scope_allowed(conn, tid, user)
 
-    # Only in-progress tasks can be completed
-    if task["status"] != "in-progress":
-        conn.close()
-        return jsonify(
-            error="Only in-progress tasks can be completed"
-        ), 400
+        if not task:
+            return jsonify(error="Access denied"), 403
 
-    # Staff can only complete tasks assigned to themselves
-    if role == "staff" and task["assigned_to"] != uid:
-        conn.close()
-        return jsonify(
-            error="You can only complete tasks assigned to you"
-        ), 403
-
-    # Supervisor can only complete tasks in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
+        if task["status"] != "in-progress":
             return jsonify(
-                error="You can only complete tasks in your location"
+                error="Only in-progress tasks can be completed"
+            ), 400
+
+        if role == "employee" and task["assigned_to"] != user["id"]:
+            return jsonify(
+                error="You can only complete tasks assigned to you"
             ), 403
 
-    duration = None
+        duration = None
 
-    if task["started_at"]:
-        try:
-            start = datetime.fromisoformat(task["started_at"])
-            duration = round(
-                (datetime.now() - start).total_seconds() / 60,
-                1
-            )
-        except:
-            pass
+        if task["started_at"]:
+            try:
+                start = datetime.fromisoformat(task["started_at"])
+                duration = round(
+                    (datetime.now() - start).total_seconds() / 60,
+                    1
+                )
+            except Exception:
+                duration = None
 
-    conn.execute(
-        """UPDATE tasks
-           SET status='pending-approval',
-               completed_at=CURRENT_TIMESTAMP,
-               duration_minutes=?,
-               notes=?,
-               assigned_to=?
-           WHERE id=?""",
-        (
+        # Employee completion remains assigned to the employee.
+        assigned_to = task["assigned_to"]
+
+        if not assigned_to and role == "employee":
+            assigned_to = user["id"]
+
+        conn.execute("""
+            UPDATE tasks
+            SET status = 'pending-approval',
+                completed_at = CURRENT_TIMESTAMP,
+                duration_minutes = ?,
+                notes = ?,
+                assigned_to = ?
+            WHERE id = ?
+        """, (
             duration,
             d.get("notes"),
-            task["assigned_to"] or uid,
+            assigned_to,
             tid
+        ))
+
+        conn.execute("""
+            UPDATE zones
+            SET status = 'pending'
+            WHERE id = ?
+        """, (task["zone_id"],))
+
+        conn.commit()
+
+        return jsonify(
+            message="Completed and sent for approval",
+            duration_minutes=duration
         )
-    )
 
-    conn.execute(
-        """UPDATE zones
-           SET status='pending'
-           WHERE id=?""",
-        (task["zone_id"],)
-    )
+    finally:
+        conn.close()
 
-    conn.commit()
-    conn.close()
 
-    return jsonify(
-        message="Completed and sent for approval",
-        duration_minutes=duration
-    )
-#miss_task---------------------------------------------------------------
+# ─── miss task ────────────────────────────────────────────────────────────────
+
 @app.route("/api/tasks/<tid>/miss", methods=["PUT"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def miss_task(tid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    role = user.get("role")
 
     conn = get_db()
 
-    task = row_to_dict(
-        conn.execute("""
-            SELECT
-                t.*,
-                z.location_id
-            FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE t.id=?
-        """, (tid,)).fetchone()
-    )
+    try:
 
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
+        task = task_scope_allowed(conn, tid, user)
 
-    # Only pending tasks can be marked as missed
-    if task["status"] != "pending":
-        conn.close()
-        return jsonify(
-            error="Only pending tasks can be marked as missed"
-        ), 400
+        if not task:
+            return jsonify(error="Access denied"), 403
 
-    # Supervisor can only mark tasks as missed in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
+        if task["status"] != "pending":
             return jsonify(
-                error="You can only manage tasks in your location"
-            ), 403
+                error="Only pending tasks can be marked as missed"
+            ), 400
 
-    new_count = (task["overdue_count"] or 0) + 1
+        new_count = (task["overdue_count"] or 0) + 1
 
-    conn.execute(
-        """UPDATE tasks
-           SET status='missed',
-               is_overdue=1,
-               overdue_count=?
-           WHERE id=?""",
-        (new_count, tid)
-    )
+        conn.execute("""
+            UPDATE tasks
+            SET status = 'missed',
+                is_overdue = 1,
+                overdue_count = ?
+            WHERE id = ?
+        """, (
+            new_count,
+            tid
+        ))
 
-    conn.execute(
-        "UPDATE zones SET status='overdue' WHERE id=?",
-        (task["zone_id"],)
-    )
+        conn.execute("""
+            UPDATE zones
+            SET status = 'overdue'
+            WHERE id = ?
+        """, (task["zone_id"],))
 
-    sev = (
-        "critical"
-        if new_count >= 3
-        else "high"
-        if new_count >= 2
-        else "warning"
-    )
+        severity = (
+            "critical"
+            if new_count >= 3
+            else "high"
+            if new_count >= 2
+            else "warning"
+        )
 
-    conn.execute(
-        "INSERT INTO alerts VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (
+        conn.execute("""
+            INSERT INTO alerts (
+                id,
+                type,
+                severity,
+                zone_id,
+                user_id,
+                task_id,
+                message,
+                is_read,
+                created_at
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP
+            )
+        """, (
             str(uuid.uuid4()),
             "missed_cleaning",
-            sev,
+            severity,
             task["zone_id"],
-            None,
+            task["assigned_to"],
             tid,
-            f"Cleaning missed {new_count}x for zone. Immediate attention required.",
-            0
+            f"Cleaning missed {new_count}x for zone. Immediate attention required."
+        ))
+
+        conn.commit()
+
+        return jsonify(
+            message="Missed",
+            overdue_count=new_count
         )
-    )
 
-    conn.commit()
-    conn.close()
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
 
-    return jsonify(
-        message="Missed",
-        overdue_count=new_count
-    )
+    finally:
+        conn.close()
 
 #overdue_tasks-----------------------------------------------------------------
 @app.route("/api/tasks/overdue")
 @jwt_required()
 def overdue_tasks():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    organization_id = user.get("organization_id")
+    role = user.get("role")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
 
     conn = get_db()
 
-    q = """
-        SELECT t.*, 
-               z.name zone_name,
-               z.floor,
-               l.name location_name,
-               u.name staff_name
-        FROM tasks t
-        LEFT JOIN zones z ON t.zone_id=z.id
-        LEFT JOIN locations l ON z.location_id=l.id
-        LEFT JOIN users u ON t.assigned_to=u.id
-       WHERE t.is_overdue=1
-    """
+    try:
+        q = """
+            SELECT
+                t.*,
+                z.name AS zone_name,
+                z.floor,
+                l.name AS location_name,
+                u.name AS staff_name
+            FROM tasks t
+            JOIN zones z
+                ON t.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            LEFT JOIN users u
+                ON t.assigned_to = u.id
+            WHERE t.is_overdue = 1
+              AND l.organization_id = ?
+        """
 
-    params = []
+        params = [organization_id]
 
-    # Staff can only see their own overdue tasks
-    if role == "staff":
-        q += " AND t.assigned_to=?"
-        params.append(uid)
+        # ---------------------------------------------------------
+        # ADMIN
+        # ---------------------------------------------------------
+        # Admin sees every overdue task inside their organization.
+        if role == "admin":
+            pass
 
-    # Supervisor can only see overdue tasks in their location
-    elif role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
+        # ---------------------------------------------------------
+        # SUPERVISOR
+        # ---------------------------------------------------------
+        # Supervisor sees overdue tasks only for zones controlled
+        # by one of their teams.
+        elif role == "supervisor":
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+            if not team_ids:
+                return jsonify([])
 
-        q += " AND z.location_id=?"
-        params.append(supervisor["location_id"])
+            placeholders = ",".join("?" for _ in team_ids)
 
-    q += """
-        ORDER BY t.overdue_count DESC,
-                 t.scheduled_at ASC
-    """
+            q += f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    WHERE tz.zone_id = t.zone_id
+                      AND tz.team_id IN ({placeholders})
+                )
+            """
 
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
+            params.extend(team_ids)
 
-    conn.close()
+        # ---------------------------------------------------------
+        # EMPLOYEE
+        # ---------------------------------------------------------
+        # Employee sees only their own overdue tasks.
+        elif role == "employee":
 
-    return jsonify(rows)
-# ─── cleaning logs ────────────────────────────────────────────────────────────
-#create^logs^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            q += """
+                AND t.assigned_to = ?
+            """
+
+            params.append(user.get("id"))
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        q += """
+            ORDER BY
+                t.overdue_count DESC,
+                t.scheduled_at ASC
+        """
+
+        rows = rows_to_list(
+            conn.execute(q, params).fetchall()
+        )
+
+        return jsonify(rows)
+
+    finally:
+        conn.close()
+# ─── cleaning logs ───────────────────────────────────────────────────────────
+
+#create_logs^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 @app.route("/api/logs", methods=["POST"])
 @jwt_required()
 def create_log():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    uid = user.get("id")
+    role = user.get("role")
+    organization_id = user.get("organization_id")
 
     zone_id = request.form.get("zone_id")
     task_id = request.form.get("task_id")
     notes = request.form.get("notes")
 
     if not task_id or not zone_id:
-        return jsonify(error="task_id and zone_id required"), 400
+        return jsonify(
+            error="task_id and zone_id required"
+        ), 400
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
 
     conn = get_db()
 
-    task = conn.execute("""
-        SELECT
-            t.*,
-            z.location_id
-        FROM tasks t
-        LEFT JOIN zones z
-            ON t.zone_id=z.id
-        WHERE t.id=?
-    """, (task_id,)).fetchone()
-
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
-
-    # Task and submitted zone must match
-    if task["zone_id"] != zone_id:
-        conn.close()
-        return jsonify(error="Task and zone do not match"), 400
-
-    # Only in-progress tasks can receive a cleaning log
-    if task["status"] != "in-progress":
-        conn.close()
-        return jsonify(
-            error="Only in-progress tasks can receive cleaning logs"
-        ), 400
-
-    # Staff can only submit logs for their own assigned tasks
-    if role == "staff":
-        if task["assigned_to"] != uid:
-            conn.close()
-            return jsonify(
-                error="You can only submit logs for your assigned tasks"
-            ), 403
-
-    # Supervisor can only submit logs for tasks in their location
-    elif role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(
-                error="You can only submit logs for tasks in your location"
-            ), 403
-
-    before_photo = after_photo = None
-
-    for field in ("before_photo", "after_photo"):
-        f = request.files.get(field)
-
-        if f:
-            fname = str(uuid.uuid4()) + os.path.splitext(f.filename)[1]
-            f.save(os.path.join(UPLOAD_FOLDER, fname))
-
-            if field == "before_photo":
-                before_photo = fname
-            else:
-                after_photo = fname
-
-    ai_score, ai_feedback = (None, None)
-
-    if after_photo:
-        ai_score, ai_feedback = simulate_ai_score()
-
-    lid = str(uuid.uuid4())
-
-    conn.execute(
-        "INSERT INTO cleaning_logs VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
-        (
-            lid,
+    try:
+        task = conn.execute("""
+            SELECT
+                t.*,
+                z.location_id,
+                l.organization_id
+            FROM tasks t
+            JOIN zones z
+                ON t.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            WHERE t.id = ?
+              AND l.organization_id = ?
+        """, (
             task_id,
-            uid,
-            zone_id,
-            before_photo,
-            after_photo,
-            ai_score,
-            ai_feedback,
-            notes
+            organization_id
+        )).fetchone()
+
+        if not task:
+            return jsonify(
+                error="Task not found"
+            ), 404
+
+        # Submitted zone must match the task's zone.
+        if task["zone_id"] != zone_id:
+            return jsonify(
+                error="Task and zone do not match"
+            ), 400
+
+        # Only in-progress tasks can receive a cleaning log.
+        if task["status"] != "in-progress":
+            return jsonify(
+                error="Only in-progress tasks can receive cleaning logs"
+            ), 400
+
+        # ---------------------------------------------------------
+        # ROLE / SCOPE CHECK
+        # ---------------------------------------------------------
+
+        if role == "admin":
+            # Admin can submit logs for any task in their organization.
+            pass
+
+        elif role == "supervisor":
+            team_ids = get_current_team_ids()
+
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
+
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones tz
+                WHERE tz.zone_id = ?
+                  AND tz.team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                zone_id,
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only submit logs for your team's zones"
+                ), 403
+
+        elif role == "employee":
+            # Employee can only submit a log for their own assigned task.
+            if task["assigned_to"] != uid:
+                return jsonify(
+                    error="You can only submit logs for your assigned tasks"
+                ), 403
+
+        else:
+            return jsonify(
+                error="Invalid role"
+            ), 403
+
+        before_photo = None
+        after_photo = None
+
+        for field in ("before_photo", "after_photo"):
+            f = request.files.get(field)
+
+            if f:
+                fname = str(uuid.uuid4()) + os.path.splitext(
+                    f.filename
+                )[1]
+
+                f.save(
+                    os.path.join(
+                        UPLOAD_FOLDER,
+                        fname
+                    )
+                )
+
+                if field == "before_photo":
+                    before_photo = fname
+                else:
+                    after_photo = fname
+
+        ai_score = None
+        ai_feedback = None
+
+        if after_photo:
+            ai_score, ai_feedback = simulate_ai_score()
+
+        lid = str(uuid.uuid4())
+
+        conn.execute(
+            """
+            INSERT INTO cleaning_logs (
+                id,
+                task_id,
+                user_id,
+                zone_id,
+                before_photo,
+                after_photo,
+                ai_cleanliness_score,
+                ai_feedback,
+                notes,
+                logged_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                lid,
+                task_id,
+                uid,
+                zone_id,
+                before_photo,
+                after_photo,
+                ai_score,
+                ai_feedback,
+                notes
+            )
         )
-    )
 
-    conn.execute(
-        "UPDATE tasks SET status='pending-approval', assigned_to=? WHERE id=?",
-        (task["assigned_to"] or uid, task_id)
-    )
+        # Task remains associated with the original assigned employee.
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'pending-approval'
+            WHERE id = ?
+            """,
+            (task_id,)
+        )
 
-    conn.execute(
-        "UPDATE zones SET status='pending' WHERE id=?",
-        (zone_id,)
-    )
+        conn.execute(
+            """
+            UPDATE zones
+            SET status = 'pending'
+            WHERE id = ?
+            """,
+            (zone_id,)
+        )
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
-    return jsonify(
-        id=lid,
-        ai_cleanliness_score=ai_score,
-        ai_feedback=ai_feedback
-    ), 201
-#get^logs^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        return jsonify(
+            id=lid,
+            ai_cleanliness_score=ai_score,
+            ai_feedback=ai_feedback
+        ), 201
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(
+            error=str(e)
+        ), 500
+
+    finally:
+        conn.close()
+
+
+#get_logs^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 @app.route("/api/logs", methods=["GET"])
 @jwt_required()
 def get_logs():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    uid = user.get("id")
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+    team_ids = get_current_team_ids()
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
     args = request.args
 
     conn = get_db()
 
-    q = """
-        SELECT cl.*,
-               u.name staff_name,
-               u.notification_email staff_email,
-               z.name zone_name,
-               l.name location_name
-        FROM cleaning_logs cl
-        LEFT JOIN tasks t ON cl.task_id=t.id
-        LEFT JOIN users u ON cl.user_id=u.id
-        LEFT JOIN zones z ON cl.zone_id=z.id
-        LEFT JOIN locations l ON z.location_id=l.id
-        WHERE 1=1
-    """
+    try:
+        q = """
+            SELECT
+                cl.*,
+                u.name AS staff_name,
+                u.notification_email AS staff_email,
+                z.name AS zone_name,
+                l.name AS location_name
+            FROM cleaning_logs cl
+            JOIN zones z
+                ON cl.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            LEFT JOIN users u
+                ON cl.user_id = u.id
+            WHERE l.organization_id = ?
+        """
 
-    params = []
+        params = [organization_id]
 
-    # Staff can only see their own logs
-    if role == "staff":
-        q += " AND cl.user_id=?"
-        params.append(uid)
+        # ---------------------------------------------------------
+        # ADMIN
+        # ---------------------------------------------------------
+        if role == "admin":
+            pass
 
-    # Supervisor can only see logs from their location
-    elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        # ---------------------------------------------------------
+        # SUPERVISOR
+        # ---------------------------------------------------------
+        elif role == "supervisor":
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+            if not team_ids:
+                return jsonify([])
 
-        q += " AND z.location_id=?"
-        params.append(supervisor["location_id"])
+            placeholders = ",".join("?" for _ in team_ids)
 
-    # Optional filters
-    if args.get("zone_id"):
-        q += " AND cl.zone_id=?"
-        params.append(args["zone_id"])
+            q += f"""
+                AND EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    WHERE tz.zone_id = cl.zone_id
+                      AND tz.team_id IN ({placeholders})
+                )
+            """
 
-    if args.get("user_id"):
-        q += " AND cl.user_id=?"
-        params.append(args["user_id"])
+            params.extend(team_ids)
 
-    if args.get("task_id"):
-        q += " AND cl.task_id=?"
-        params.append(args["task_id"])
+        # ---------------------------------------------------------
+        # EMPLOYEE
+        # ---------------------------------------------------------
+        elif role == "employee":
 
-    q += " ORDER BY cl.logged_at DESC LIMIT 100"
+            q += """
+                AND cl.user_id = ?
+            """
 
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
+            params.append(uid)
 
-    conn.close()
+        else:
+            return jsonify(
+                error="Invalid role"
+            ), 403
 
-    return jsonify(rows)
-#approve_tasks-------------------------------------------------------------------
+        # ---------------------------------------------------------
+        # OPTIONAL FILTERS
+        # ---------------------------------------------------------
+
+        if args.get("zone_id"):
+            requested_zone = args["zone_id"]
+
+            # Employee/supervisor scope remains enforced by the
+            # base query above.
+            q += """
+                AND cl.zone_id = ?
+            """
+
+            params.append(requested_zone)
+
+        if args.get("user_id"):
+            requested_user = args["user_id"]
+
+            # Base role scope still applies.
+            q += """
+                AND cl.user_id = ?
+            """
+
+            params.append(requested_user)
+
+        if args.get("task_id"):
+            requested_task = args["task_id"]
+
+            q += """
+                AND cl.task_id = ?
+            """
+
+            params.append(requested_task)
+
+        q += """
+            ORDER BY cl.logged_at DESC
+            LIMIT 100
+        """
+
+        rows = rows_to_list(
+            conn.execute(q, params).fetchall()
+        )
+
+        return jsonify(rows)
+
+    finally:
+        conn.close()
+
+
+# approve_tasks -----------------------------------------------------------------
 @app.route("/api/tasks/<tid>/approve", methods=["PUT"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def approve_task(tid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    uid = user.get("id")
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
 
     conn = get_db()
 
-    task = conn.execute("""
-        SELECT
-            t.id,
-            t.status,
-            z.location_id
-        FROM tasks t
-        LEFT JOIN zones z
-            ON t.zone_id=z.id
-        WHERE t.id=?
-    """, (tid,)).fetchone()
+    try:
+        task = conn.execute("""
+            SELECT
+                t.id,
+                t.status,
+                t.zone_id,
+                l.organization_id
+            FROM tasks t
+            JOIN zones z
+                ON t.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            WHERE t.id = ?
+              AND l.organization_id = ?
+        """, (
+            tid,
+            organization_id
+        )).fetchone()
 
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
+        if not task:
+            return jsonify(error="Task not found"), 404
 
-    # Only tasks waiting for approval can be approved
-    if task["status"] != "pending-approval":
-        conn.close()
-        return jsonify(
-            error="Only tasks pending approval can be approved"
-        ), 400
-
-    # Supervisor can only approve tasks in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
+        if task["status"] != "pending-approval":
             return jsonify(
-                error="You can only approve tasks in your location"
-            ), 403
+                error="Only tasks pending approval can be approved"
+            ), 400
 
-    conn.execute(
-        "UPDATE tasks SET status='completed' WHERE id=?",
-        (tid,)
-    )
+        # Supervisor can only approve tasks belonging to their teams.
+        if role == "supervisor":
+            team_ids = get_current_team_ids()
 
-    conn.commit()
-    conn.close()
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
 
-    return jsonify(message="Task approved")
-#reject_tasks---------------------------------------------------------------------
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones tz
+                WHERE tz.zone_id = ?
+                  AND tz.team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                task["zone_id"],
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only approve tasks in your team's zones"
+                ), 403
+
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'completed'
+            WHERE id = ?
+            """,
+            (tid,)
+        )
+
+        conn.commit()
+
+        return jsonify(message="Task approved")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
+
+
+# reject_tasks ------------------------------------------------------------------
 @app.route("/api/tasks/<tid>/reject", methods=["PUT"])
 @jwt_required()
 @require_roles("admin", "supervisor")
 def reject_task(tid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    uid = user.get("id")
+    role = user.get("role")
+    organization_id = user.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
 
     conn = get_db()
 
-    task = conn.execute("""
-        SELECT
-            t.id,
-            t.status,
-            z.location_id
-        FROM tasks t
-        LEFT JOIN zones z
-            ON t.zone_id=z.id
-        WHERE t.id=?
-    """, (tid,)).fetchone()
+    try:
+        task = conn.execute("""
+            SELECT
+                t.id,
+                t.status,
+                t.zone_id,
+                l.organization_id
+            FROM tasks t
+            JOIN zones z
+                ON t.zone_id = z.id
+            JOIN locations l
+                ON z.location_id = l.id
+            WHERE t.id = ?
+              AND l.organization_id = ?
+        """, (
+            tid,
+            organization_id
+        )).fetchone()
 
-    if not task:
-        conn.close()
-        return jsonify(error="Task not found"), 404
+        if not task:
+            return jsonify(error="Task not found"), 404
 
-    # Only tasks waiting for approval can be rejected
-    if task["status"] != "pending-approval":
-        conn.close()
-        return jsonify(
-            error="Only tasks pending approval can be rejected"
-        ), 400
-
-    # Supervisor can only reject tasks in their own location
-    if role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or task["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
+        if task["status"] != "pending-approval":
             return jsonify(
-                error="You can only reject tasks in your location"
-            ), 403
+                error="Only tasks pending approval can be rejected"
+            ), 400
 
-    conn.execute(
-        "UPDATE tasks SET status='rejected' WHERE id=?",
-        (tid,)
-    )
+        # Supervisor can only reject tasks belonging to their teams.
+        if role == "supervisor":
+            team_ids = get_current_team_ids()
 
-    conn.commit()
-    conn.close()
+            if not team_ids:
+                return jsonify(
+                    error="You are not assigned to a team"
+                ), 403
 
-    return jsonify(message="Task rejected")
+            placeholders = ",".join("?" for _ in team_ids)
+
+            allowed = conn.execute(f"""
+                SELECT 1
+                FROM team_zones tz
+                WHERE tz.zone_id = ?
+                  AND tz.team_id IN ({placeholders})
+                LIMIT 1
+            """, (
+                task["zone_id"],
+                *team_ids
+            )).fetchone()
+
+            if not allowed:
+                return jsonify(
+                    error="You can only reject tasks in your team's zones"
+                ), 403
+
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = 'rejected'
+            WHERE id = ?
+            """,
+            (tid,)
+        )
+
+        conn.commit()
+
+        return jsonify(message="Task rejected")
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify(error=str(e)), 500
+
+    finally:
+        conn.close()
 # ─── alerts ────────────────────────────────────────────────────────────────────
-
 @app.route("/api/alerts", methods=["GET"])
 @jwt_required()
 def get_alerts():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
-    args = request.args
+    user = get_current_user()
 
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    role = user.get("role")
+    uid = user.get("id")
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
+
+    args = request.args
     conn = get_db()
 
     q = """
         SELECT a.*,
-               z.name zone_name,
-               l.name location_name
+               z.name AS zone_name,
+               l.name AS location_name
         FROM alerts a
-        LEFT JOIN zones z ON a.zone_id=z.id
-        LEFT JOIN locations l ON z.location_id=l.id
-        WHERE 1=1
+        LEFT JOIN zones z
+            ON a.zone_id = z.id
+        LEFT JOIN locations l
+            ON z.location_id = l.id
+        LEFT JOIN users alert_user
+            ON a.user_id = alert_user.id
+        WHERE (
+            l.organization_id = ?
+            OR alert_user.organization_id = ?
+        )
     """
 
-    params = []
+    params = [org_id, org_id]
 
-    # Staff can only see their own alerts
-    if role == "staff":
-        q += " AND a.user_id=?"
-        params.append(uid)
+    # Admin: all alerts belonging to their organization.
+    if role == "admin":
+        pass
 
-    # Supervisor can see alerts from their location
+    # Supervisor: only alerts for zones belonging to teams they supervise.
     elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        q += """
+            AND (
+                a.user_id = ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM team_supervisors ts
+                    JOIN team_zones tz
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = a.zone_id
+                )
+            )
+        """
+        params.extend([uid, uid])
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify([])
+    # Employee: own alerts or alerts for zones explicitly assigned to them.
+    elif role == "employee":
+        q += """
+            AND (
+                a.user_id = ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM staff_zones sz
+                    WHERE sz.user_id = ?
+                      AND sz.zone_id = a.zone_id
+                )
+            )
+        """
+        params.extend([uid, uid])
 
-        q += " AND z.location_id=?"
-        params.append(supervisor["location_id"])
+    else:
+        conn.close()
+        return jsonify(error="Access denied"), 403
 
-    # Optional filters
     if args.get("is_read") is not None:
         q += " AND a.is_read=?"
         params.append(1 if args["is_read"] == "true" else 0)
@@ -2046,48 +5547,97 @@ def get_alerts():
     conn.close()
 
     return jsonify(rows)
-#mark-alert-read$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+
 @app.route("/api/alerts/<aid>/read", methods=["PUT"])
 @jwt_required()
 def mark_alert_read(aid):
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    role = user.get("role")
+    uid = user.get("id")
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     conn = get_db()
 
     alert = conn.execute(
         """
-        SELECT a.*, z.location_id
+        SELECT a.*
         FROM alerts a
-        LEFT JOIN zones z ON a.zone_id=z.id
+        LEFT JOIN zones z
+            ON a.zone_id = z.id
+        LEFT JOIN locations l
+            ON z.location_id = l.id
+        LEFT JOIN users alert_user
+            ON a.user_id = alert_user.id
         WHERE a.id=?
+          AND (
+              l.organization_id=?
+              OR alert_user.organization_id=?
+          )
         """,
-        (aid,)
+        (aid, org_id, org_id)
     ).fetchone()
 
     if not alert:
         conn.close()
         return jsonify(error="Alert not found"), 404
 
-    # Staff can only mark their own alerts
-    if role == "staff" and alert["user_id"] != uid:
-        conn.close()
-        return jsonify(error="Access denied"), 403
+    allowed = False
 
-    # Supervisor can only mark alerts in their location
-    if role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
+    # Admin can mark any alert in their organization.
+    if role == "admin":
+        allowed = True
+
+    # Supervisor can mark their own alerts or alerts in their team's zones.
+    elif role == "supervisor":
+        scope = conn.execute(
+            """
+            SELECT 1
+            WHERE ? = ?
+               OR EXISTS (
+                    SELECT 1
+                    FROM team_supervisors ts
+                    JOIN team_zones tz
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id=?
+                      AND tz.zone_id=?
+               )
+            LIMIT 1
+            """,
+            (alert["user_id"], uid, uid, alert["zone_id"])
         ).fetchone()
 
-        if (
-            not supervisor
-            or not supervisor["location_id"]
-            or alert["location_id"] != supervisor["location_id"]
-        ):
-            conn.close()
-            return jsonify(error="Access denied"), 403
+        allowed = bool(scope)
+
+    # Employee can mark their own alerts or alerts for assigned zones.
+    elif role == "employee":
+        scope = conn.execute(
+            """
+            SELECT 1
+            WHERE ? = ?
+               OR EXISTS (
+                    SELECT 1
+                    FROM staff_zones sz
+                    WHERE sz.user_id=?
+                      AND sz.zone_id=?
+               )
+            LIMIT 1
+            """,
+            (alert["user_id"], uid, uid, alert["zone_id"])
+        ).fetchone()
+
+        allowed = bool(scope)
+
+    if not allowed:
+        conn.close()
+        return jsonify(error="Access denied"), 403
 
     conn.execute(
         "UPDATE alerts SET is_read=1 WHERE id=?",
@@ -2098,48 +5648,84 @@ def mark_alert_read(aid):
     conn.close()
 
     return jsonify(message="Marked read")
-#mark-all-read$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+
+
 @app.route("/api/alerts/read-all", methods=["PUT"])
 @jwt_required()
 def mark_all_read():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    role = user.get("role")
+    uid = user.get("id")
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     conn = get_db()
 
+    # Admin: mark all alerts belonging to their organization only.
     if role == "admin":
-        conn.execute(
-            "UPDATE alerts SET is_read=1"
-        )
-
-    elif role == "staff":
-        conn.execute(
-            "UPDATE alerts SET is_read=1 WHERE user_id=?",
-            (uid,)
-        )
-
-    elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
-
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
-
         conn.execute(
             """
             UPDATE alerts
             SET is_read=1
-            WHERE zone_id IN (
-                SELECT id
-                FROM zones
-                WHERE location_id=?
+            WHERE id IN (
+                SELECT a.id
+                FROM alerts a
+                LEFT JOIN zones z
+                    ON a.zone_id=z.id
+                LEFT JOIN locations l
+                    ON z.location_id=l.id
+                LEFT JOIN users alert_user
+                    ON a.user_id=alert_user.id
+                WHERE l.organization_id=?
+                   OR alert_user.organization_id=?
             )
             """,
-            (supervisor["location_id"],)
+            (org_id, org_id)
         )
+
+    # Supervisor: only alerts from their supervised teams.
+    elif role == "supervisor":
+        conn.execute(
+            """
+            UPDATE alerts
+            SET is_read=1
+            WHERE user_id=?
+               OR zone_id IN (
+                    SELECT tz.zone_id
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id=tz.team_id
+                    WHERE ts.user_id=?
+               )
+            """,
+            (uid, uid)
+        )
+
+    # Employee: own alerts or alerts for their assigned zones.
+    elif role == "employee":
+        conn.execute(
+            """
+            UPDATE alerts
+            SET is_read=1
+            WHERE user_id=?
+               OR zone_id IN (
+                    SELECT zone_id
+                    FROM staff_zones
+                    WHERE user_id=?
+               )
+            """,
+            (uid, uid)
+        )
+
+    else:
+        conn.close()
+        return jsonify(error="Access denied"), 403
 
     conn.commit()
     conn.close()
@@ -2147,230 +5733,270 @@ def mark_all_read():
     return jsonify(message="Alerts marked read")
 
 # ─── analytics ────────────────────────────────────────────────────────────────
+# ============================================================
+# ANALYTICS — ORGANIZATION / TEAM / EMPLOYEE SCOPED
+# ============================================================
+
 @app.route("/api/analytics/dashboard")
 @jwt_required()
 def analytics_dashboard():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+    if not user:
+        return jsonify(error="User not found"), 404
 
-    requested_loc = request.args.get("location_id")
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     conn = get_db()
 
-    # ---------------------------------------------------------
-    # Determine what data this user is allowed to see
-    # ---------------------------------------------------------
+    try:
+        if role == "admin":
+            zone_scope = """
+                z.location_id IN (
+                    SELECT id FROM locations
+                    WHERE organization_id = ?
+                )
+            """
+            zone_params = [org_id]
 
-    if role == "admin":
-        # Admin can optionally filter by location
-        loc = requested_loc
+            task_scope = """
+                z.location_id IN (
+                    SELECT id FROM locations
+                    WHERE organization_id = ?
+                )
+            """
+            task_params = [org_id]
 
-    elif role == "supervisor":
-        # Supervisor is restricted to their own location
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+            alert_scope = """
+                (
+                    a.user_id IN (
+                        SELECT id FROM users
+                        WHERE organization_id = ?
+                    )
+                    OR z.location_id IN (
+                        SELECT id FROM locations
+                        WHERE organization_id = ?
+                    )
+                )
+            """
+            alert_params = [org_id, org_id]
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
+        elif role == "supervisor":
+            zone_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = z.id
+                )
+            """
+            zone_params = [uid]
 
-        loc = supervisor["location_id"]
+            task_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = t.zone_id
+                )
+            """
+            task_params = [uid]
 
-    else:
-        # Staff dashboard is personal
-        loc = None
+            alert_scope = """
+                (
+                    a.user_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM team_zones tz
+                        JOIN team_supervisors ts
+                            ON ts.team_id = tz.team_id
+                        WHERE ts.user_id = ?
+                          AND tz.zone_id = a.zone_id
+                    )
+                )
+            """
+            alert_params = [uid, uid]
 
-    # ---------------------------------------------------------
-    # STAFF DASHBOARD
-    # ---------------------------------------------------------
+        elif role == "employee":
+            zone_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM staff_zones sz
+                    WHERE sz.user_id = ?
+                      AND sz.zone_id = z.id
+                )
+            """
+            zone_params = [uid]
 
-    if role == "staff":
+            task_scope = "t.assigned_to = ?"
+            task_params = [uid]
 
-        zones = conn.execute("""
-            SELECT COUNT(*) total
-            FROM staff_zones
-            WHERE user_id=?
-        """, (uid,)).fetchone()["total"]
+            alert_scope = """
+                (
+                    a.user_id = ?
+                    OR EXISTS (
+                        SELECT 1
+                        FROM staff_zones sz
+                        WHERE sz.user_id = ?
+                          AND sz.zone_id = a.zone_id
+                    )
+                )
+            """
+            alert_params = [uid, uid]
 
-        cleaned = conn.execute("""
-            SELECT COUNT(DISTINCT z.id) total
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        # -------------------------
+        # ZONES
+        # -------------------------
+        zones = conn.execute(f"""
+            SELECT
+                COUNT(*) AS total,
+                SUM(
+                    CASE WHEN z.status = 'cleaned'
+                    THEN 1 ELSE 0 END
+                ) AS cleaned,
+                SUM(
+                    CASE WHEN z.status = 'overdue'
+                    THEN 1 ELSE 0 END
+                ) AS overdue,
+                SUM(
+                    CASE WHEN z.status = 'in-progress'
+                    THEN 1 ELSE 0 END
+                ) AS in_progress,
+                SUM(
+                    CASE WHEN z.status = 'pending'
+                    THEN 1 ELSE 0 END
+                ) AS pending
             FROM zones z
-            JOIN staff_zones sz ON sz.zone_id=z.id
-            WHERE sz.user_id=?
-              AND z.status='cleaned'
-        """, (uid,)).fetchone()["total"]
-
-        overdue = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-              AND is_overdue=1
-              AND status!='completed'
-        """, (uid,)).fetchone()[0]
-
-        in_progress = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status='in-progress'
-        """, (uid,)).fetchone()[0]
-
-        pending = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status IN ('pending', 'pending-approval')
-        """, (uid,)).fetchone()[0]
+            WHERE {zone_scope}
+        """, zone_params).fetchone()
 
         zones_data = {
-            "total": zones,
-            "cleaned": cleaned,
-            "overdue": overdue,
-            "in_progress": in_progress,
-            "pending": pending
+            "total": zones["total"] or 0,
+            "cleaned": zones["cleaned"] or 0,
+            "overdue": zones["overdue"] or 0,
+            "in_progress": zones["in_progress"] or 0,
+            "pending": zones["pending"] or 0
         }
 
-        today = row_to_dict(conn.execute("""
+        # -------------------------
+        # TODAY'S TASKS
+        # -------------------------
+        today = conn.execute(f"""
             SELECT
-                COUNT(*) total,
-                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
-                SUM(CASE WHEN status='missed' THEN 1 ELSE 0 END) missed,
-                SUM(CASE WHEN status IN ('pending','in-progress')
-                         THEN 1 ELSE 0 END) pending
-            FROM tasks
-            WHERE assigned_to=?
-              AND DATE(scheduled_at)=DATE('now')
-        """, (uid,)).fetchone()) or {}
-
-        total = today.get("total") or 1
-
-        today["compliance_pct"] = round(
-            (today.get("completed") or 0) / total * 100
-        )
-
-        avg_dur = conn.execute("""
-            SELECT AVG(duration_minutes)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status='completed'
-              AND duration_minutes IS NOT NULL
-        """, (uid,)).fetchone()[0]
-
-        alerts = rows_to_list(conn.execute("""
-            SELECT a.*, z.name zone_name
-            FROM alerts a
-            LEFT JOIN zones z ON a.zone_id=z.id
-            WHERE a.user_id=?
-              AND a.is_read=0
-            ORDER BY a.created_at DESC
-            LIMIT 10
-        """, (uid,)).fetchall())
-
-    # ---------------------------------------------------------
-    # ADMIN / SUPERVISOR DASHBOARD
-    # ---------------------------------------------------------
-
-    else:
-
-        lf = "AND z.location_id=?" if loc else ""
-        p = (loc,) if loc else ()
-
-        def count(where, params=()):
-            return conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM zones z
-                WHERE 1=1 {where}
-                """,
-                params
-            ).fetchone()[0]
-
-        zones_data = {
-            "total": count(lf, p),
-            "cleaned": count(
-                f"AND z.status='cleaned' {lf}", p
-            ),
-            "overdue": count(
-                f"AND z.status='overdue' {lf}", p
-            ),
-            "in_progress": count(
-                f"AND z.status='in-progress' {lf}", p
-            ),
-            "pending": count(
-                f"AND z.status='pending' {lf}", p
-            ),
-        }
-
-        today_q = f"""
-            SELECT
-                COUNT(*) total,
-                SUM(CASE WHEN t.status='completed'
-                         THEN 1 ELSE 0 END) completed,
-                SUM(CASE WHEN t.status='missed'
-                         THEN 1 ELSE 0 END) missed,
-                SUM(CASE WHEN t.status IN ('pending','in-progress')
-                         THEN 1 ELSE 0 END) pending
+                COUNT(*) AS total,
+                SUM(
+                    CASE WHEN t.status = 'completed'
+                    THEN 1 ELSE 0 END
+                ) AS completed,
+                SUM(
+                    CASE WHEN t.status = 'missed'
+                    THEN 1 ELSE 0 END
+                ) AS missed,
+                SUM(
+                    CASE
+                        WHEN t.status IN ('pending', 'in-progress')
+                        THEN 1 ELSE 0
+                    END
+                ) AS pending
             FROM tasks t
-            LEFT JOIN zones z ON t.zone_id=z.id
-            WHERE DATE(t.scheduled_at)=DATE('now') {lf}
-        """
+            JOIN zones z ON z.id = t.zone_id
+            WHERE DATE(t.scheduled_at) = DATE('now')
+              AND {task_scope}
+        """, task_params).fetchone()
 
-        today = row_to_dict(
-            conn.execute(today_q, p).fetchone()
-        ) or {}
+        total_today = today["total"] or 0
+        completed_today = today["completed"] or 0
 
-        total = today.get("total") or 1
+        today_data = {
+            "total": total_today,
+            "completed": completed_today,
+            "missed": today["missed"] or 0,
+            "pending": today["pending"] or 0,
+            "compliance_pct": (
+                round((completed_today / total_today) * 100)
+                if total_today else 0
+            )
+        }
 
-        today["compliance_pct"] = round(
-            (today.get("completed") or 0) / total * 100
-        )
-
-        avg_dur = conn.execute(
-            f"""
+        # -------------------------
+        # AVERAGE CLEANING DURATION
+        # -------------------------
+        avg_duration = conn.execute(f"""
             SELECT AVG(t.duration_minutes)
             FROM tasks t
-            LEFT JOIN zones z ON t.zone_id=z.id
-            WHERE t.status='completed'
+            JOIN zones z ON z.id = t.zone_id
+            WHERE t.status = 'completed'
               AND t.duration_minutes IS NOT NULL
-              {lf}
-            """,
-            p
-        ).fetchone()[0]
+              AND {task_scope}
+        """, task_params).fetchone()[0]
 
-        alerts = rows_to_list(conn.execute(
-            f"""
-            SELECT a.*, z.name zone_name
+        # -------------------------
+        # RECENT UNREAD ALERTS
+        # -------------------------
+        alerts = rows_to_list(conn.execute(f"""
+            SELECT
+                a.*,
+                z.name AS zone_name
             FROM alerts a
-            LEFT JOIN zones z ON a.zone_id=z.id
-            WHERE a.is_read=0
-              {lf}
+            LEFT JOIN zones z
+                ON z.id = a.zone_id
+            WHERE a.is_read = 0
+              AND {alert_scope}
             ORDER BY a.created_at DESC
             LIMIT 10
-            """,
-            p
-        ).fetchall())
+        """, alert_params).fetchall())
 
-    conn.close()
+        return jsonify(
+            zones=zones_data,
+            today=today_data,
+            avg_cleaning_duration=(
+                round(avg_duration)
+                if avg_duration is not None
+                else None
+            ),
+            recent_alerts=alerts
+        )
 
-    return jsonify(
-        zones=zones_data,
-        today=today,
-        avg_cleaning_duration=round(avg_dur) if avg_dur else None,
-        recent_alerts=alerts
-    )
-#staff analytics@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+    finally:
+        conn.close()
+
+
 @app.route("/api/analytics/staff")
 @jwt_required()
 def analytics_staff():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     from_d = request.args.get(
         "from",
         (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     )
+
     to_d = request.args.get(
         "to",
         datetime.now().strftime("%Y-%m-%d")
@@ -2378,582 +6004,391 @@ def analytics_staff():
 
     conn = get_db()
 
-    # Staff should only see their own performance
-    if role == "staff":
+    try:
+        if role == "admin":
+            user_scope = """
+                u.organization_id = ?
+                AND u.role = 'employee'
+                AND u.is_active = 1
+            """
+            user_params = [org_id]
 
-        rows = rows_to_list(conn.execute("""
+        elif role == "supervisor":
+            user_scope = """
+                u.organization_id = ?
+                AND u.role = 'employee'
+                AND u.is_active = 1
+                AND EXISTS (
+                    SELECT 1
+                    FROM team_members tm
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tm.team_id
+                    WHERE ts.user_id = ?
+                      AND tm.user_id = u.id
+                )
+            """
+            user_params = [org_id, uid]
+
+        elif role == "employee":
+            user_scope = """
+                u.id = ?
+                AND u.organization_id = ?
+            """
+            user_params = [uid, org_id]
+
+        else:
+            return jsonify(error="Invalid role"), 403
+
+        params = [from_d, to_d] + user_params
+
+        rows = rows_to_list(conn.execute(f"""
             SELECT
                 u.id,
                 u.name,
                 u.email,
-                COUNT(t.id) total_tasks,
-                SUM(CASE WHEN t.status='completed'
-                         THEN 1 ELSE 0 END) completed,
-                SUM(CASE WHEN t.status='missed'
-                         THEN 1 ELSE 0 END) missed,
+
+                COUNT(t.id) AS total_tasks,
+
+                SUM(
+                    CASE WHEN t.status = 'completed'
+                    THEN 1 ELSE 0 END
+                ) AS completed,
+
+                SUM(
+                    CASE WHEN t.status = 'missed'
+                    THEN 1 ELSE 0 END
+                ) AS missed,
+
                 AVG(
                     CASE
                         WHEN t.duration_minutes IS NOT NULL
                         THEN t.duration_minutes
                     END
-                ) avg_duration,
+                ) AS avg_duration,
+
                 ROUND(
                     100.0 *
-                    SUM(CASE WHEN t.status='completed'
-                             THEN 1 ELSE 0 END)
+                    SUM(
+                        CASE WHEN t.status = 'completed'
+                        THEN 1 ELSE 0 END
+                    )
                     / NULLIF(COUNT(t.id), 0),
                     1
-                ) compliance_pct
-            FROM users u
-            LEFT JOIN tasks t
-                ON t.assigned_to=u.id
-                AND DATE(t.scheduled_at) BETWEEN ? AND ?
-            WHERE u.id=?
-            GROUP BY u.id
-        """, (from_d, to_d, uid)).fetchall())
+                ) AS compliance_pct
 
-        conn.close()
+            FROM users u
+
+            LEFT JOIN tasks t
+                ON t.assigned_to = u.id
+                AND DATE(t.scheduled_at)
+                    BETWEEN ? AND ?
+
+            WHERE {user_scope}
+
+            GROUP BY u.id
+            ORDER BY u.name
+        """, params).fetchall())
+
         return jsonify(rows)
 
-    # Supervisor can see staff in their own location
-    if role == "supervisor":
-
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
-
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
-
-        rows = rows_to_list(conn.execute("""
-            SELECT
-                u.id,
-                u.name,
-                u.email,
-                COUNT(t.id) total_tasks,
-                SUM(CASE WHEN t.status='completed'
-                         THEN 1 ELSE 0 END) completed,
-                SUM(CASE WHEN t.status='missed'
-                         THEN 1 ELSE 0 END) missed,
-                AVG(
-                    CASE
-                        WHEN t.duration_minutes IS NOT NULL
-                        THEN t.duration_minutes
-                    END
-                ) avg_duration,
-                ROUND(
-                    100.0 *
-                    SUM(CASE WHEN t.status='completed'
-                             THEN 1 ELSE 0 END)
-                    / NULLIF(COUNT(t.id), 0),
-                    1
-                ) compliance_pct
-            FROM users u
-            LEFT JOIN tasks t
-                ON t.assigned_to=u.id
-                AND DATE(t.scheduled_at) BETWEEN ? AND ?
-            WHERE u.role='staff'
-              AND u.is_active=1
-              AND u.location_id=?
-            GROUP BY u.id
-            ORDER BY compliance_pct DESC
-        """, (
-            from_d,
-            to_d,
-            supervisor["location_id"]
-        )).fetchall())
-
+    finally:
         conn.close()
-        return jsonify(rows)
 
-    # Admin can see all staff
-    rows = rows_to_list(conn.execute("""
-        SELECT
-            u.id,
-            u.name,
-            u.email,
-            COUNT(t.id) total_tasks,
-            SUM(CASE WHEN t.status='completed'
-                     THEN 1 ELSE 0 END) completed,
-            SUM(CASE WHEN t.status='missed'
-                     THEN 1 ELSE 0 END) missed,
-            AVG(
-                CASE
-                    WHEN t.duration_minutes IS NOT NULL
-                    THEN t.duration_minutes
-                END
-            ) avg_duration,
-            ROUND(
-                100.0 *
-                SUM(CASE WHEN t.status='completed'
-                         THEN 1 ELSE 0 END)
-                / NULLIF(COUNT(t.id), 0),
-                1
-            ) compliance_pct
-        FROM users u
-        LEFT JOIN tasks t
-            ON t.assigned_to=u.id
-            AND DATE(t.scheduled_at) BETWEEN ? AND ?
-        WHERE u.role='staff'
-          AND u.is_active=1
-        GROUP BY u.id
-        ORDER BY compliance_pct DESC
-    """, (from_d, to_d)).fetchall())
 
-    conn.close()
-    return jsonify(rows)
-#analytics heatmap@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 @app.route("/api/analytics/heatmap")
 @jwt_required()
 def analytics_heatmap():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+    if not user:
+        return jsonify(error="User not found"), 404
 
-    days = request.args.get("days", 7)
-    requested_loc = request.args.get("location_id")
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
+
+    try:
+        days = max(1, min(int(request.args.get("days", 7)), 90))
+    except ValueError:
+        days = 7
 
     conn = get_db()
 
-    # ---------------------------------------------------------
-    # Determine allowed scope
-    # ---------------------------------------------------------
+    try:
+        if role == "admin":
+            zone_scope = """
+                z.location_id IN (
+                    SELECT id FROM locations
+                    WHERE organization_id = ?
+                )
+            """
+            zone_params = [org_id]
 
-    if role == "admin":
-        loc = requested_loc
+            task_scope = "1=1"
+            task_params = []
 
-    elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        elif role == "supervisor":
+            zone_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = z.id
+                )
+            """
+            zone_params = [uid]
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
+            task_scope = "1=1"
+            task_params = []
 
-        loc = supervisor["location_id"]
+        elif role == "employee":
+            zone_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM staff_zones sz
+                    WHERE sz.user_id = ?
+                      AND sz.zone_id = z.id
+                )
+            """
+            zone_params = [uid]
 
-    else:
-        # Staff can only see zones assigned to them
-        loc = None
+            task_scope = "t.assigned_to = ?"
+            task_params = [uid]
 
-    # ---------------------------------------------------------
-    # STAFF
-    # ---------------------------------------------------------
+        else:
+            return jsonify(error="Invalid role"), 403
 
-    if role == "staff":
+        # IMPORTANT:
+        # SQL placeholder order is:
+        # days -> task scope -> zone scope
+        params = [days] + task_params + zone_params
 
-        rows = rows_to_list(conn.execute("""
+        rows = rows_to_list(conn.execute(f"""
             SELECT
                 z.id,
                 z.name,
                 z.floor,
-                l.name location_name,
+                l.name AS location_name,
 
-                COUNT(t.id) total_tasks,
-
-                SUM(
-                    CASE
-                        WHEN t.status='missed'
-                        THEN 1 ELSE 0
-                    END
-                ) missed_count,
+                COUNT(t.id) AS total_tasks,
 
                 SUM(
-                    CASE
-                        WHEN t.status='completed'
-                        THEN 1 ELSE 0
-                    END
-                ) completed_count,
+                    CASE WHEN t.status = 'missed'
+                    THEN 1 ELSE 0 END
+                ) AS missed_count,
+
+                SUM(
+                    CASE WHEN t.status = 'completed'
+                    THEN 1 ELSE 0 END
+                ) AS completed_count,
 
                 ROUND(
                     100.0 *
                     SUM(
-                        CASE
-                            WHEN t.status='completed'
-                            THEN 1 ELSE 0
-                        END
+                        CASE WHEN t.status = 'completed'
+                        THEN 1 ELSE 0 END
                     )
                     / NULLIF(COUNT(t.id), 0),
                     1
-                ) compliance_pct,
+                ) AS compliance_pct,
 
                 AVG(
                     CASE
                         WHEN t.duration_minutes IS NOT NULL
                         THEN t.duration_minutes
                     END
-                ) avg_duration,
+                ) AS avg_duration,
 
-                z.status current_status
+                z.status AS current_status
 
             FROM zones z
 
-            JOIN staff_zones sz
-                ON sz.zone_id=z.id
-               AND sz.user_id=?
-
             LEFT JOIN locations l
-                ON z.location_id=l.id
+                ON l.id = z.location_id
 
             LEFT JOIN tasks t
-                ON t.zone_id=z.id
-               AND t.assigned_to=?
-               AND t.scheduled_at >= datetime(
+                ON t.zone_id = z.id
+                AND t.scheduled_at >= datetime(
                     'now',
                     '-' || ? || ' days'
-               )
+                )
+                AND {task_scope}
+
+            WHERE {zone_scope}
 
             GROUP BY z.id
             ORDER BY missed_count DESC
-        """, (uid, uid, days)).fetchall())
+        """, params).fetchall())
 
-        conn.close()
         return jsonify(rows)
 
-    # ---------------------------------------------------------
-    # ADMIN / SUPERVISOR
-    # ---------------------------------------------------------
+    finally:
+        conn.close()
 
-    lf = "AND z.location_id=?" if loc else ""
-    params = [days]
 
-    if loc:
-        params.append(loc)
-
-    rows = rows_to_list(conn.execute(f"""
-        SELECT
-            z.id,
-            z.name,
-            z.floor,
-            l.name location_name,
-
-            COUNT(t.id) total_tasks,
-
-            SUM(
-                CASE
-                    WHEN t.status='missed'
-                    THEN 1 ELSE 0
-                END
-            ) missed_count,
-
-            SUM(
-                CASE
-                    WHEN t.status='completed'
-                    THEN 1 ELSE 0
-                END
-            ) completed_count,
-
-            ROUND(
-                100.0 *
-                SUM(
-                    CASE
-                        WHEN t.status='completed'
-                        THEN 1 ELSE 0
-                    END
-                )
-                / NULLIF(COUNT(t.id), 0),
-                1
-            ) compliance_pct,
-
-            AVG(
-                CASE
-                    WHEN t.duration_minutes IS NOT NULL
-                    THEN t.duration_minutes
-                END
-            ) avg_duration,
-
-            z.status current_status
-
-        FROM zones z
-
-        LEFT JOIN locations l
-            ON z.location_id=l.id
-
-        LEFT JOIN tasks t
-            ON t.zone_id=z.id
-           AND t.scheduled_at >= datetime(
-                'now',
-                '-' || ? || ' days'
-           )
-
-        WHERE 1=1 {lf}
-
-        GROUP BY z.id
-        ORDER BY missed_count DESC
-
-    """, params).fetchall())
-
-    conn.close()
-    return jsonify(rows)
-#analytics reports@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 @app.route("/api/analytics/reports")
 @jwt_required()
 def analytics_reports():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     period = request.args.get("period", "daily")
-    requested_loc = request.args.get("location_id")
+
+    group_expression = {
+        "weekly": "strftime('%Y-W%W', t.scheduled_at)",
+        "monthly": "strftime('%Y-%m', t.scheduled_at)",
+        "daily": "DATE(t.scheduled_at)"
+    }.get(period, "DATE(t.scheduled_at)")
 
     conn = get_db()
 
-    grp = {
-        "weekly": "strftime('%Y-W%W',t.scheduled_at)",
-        "monthly": "strftime('%Y-%m',t.scheduled_at)"
-    }.get(
-        period,
-        "DATE(t.scheduled_at)"
-    )
+    try:
+        if role == "admin":
+            scope = """
+                z.location_id IN (
+                    SELECT id FROM locations
+                    WHERE organization_id = ?
+                )
+            """
+            params = [org_id]
 
-    # ---------------------------------------------------------
-    # STAFF — personal report
-    # ---------------------------------------------------------
+        elif role == "supervisor":
+            scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = t.zone_id
+                )
+            """
+            params = [uid]
 
-    if role == "staff":
+        elif role == "employee":
+            scope = "t.assigned_to = ?"
+            params = [uid]
+
+        else:
+            return jsonify(error="Invalid role"), 403
 
         rows = rows_to_list(conn.execute(f"""
             SELECT
-                {grp} period,
+                {group_expression} AS period,
 
-                COUNT(t.id) total,
-
-                SUM(
-                    CASE
-                        WHEN t.status='completed'
-                        THEN 1 ELSE 0
-                    END
-                ) completed,
+                COUNT(t.id) AS total,
 
                 SUM(
-                    CASE
-                        WHEN t.status='missed'
-                        THEN 1 ELSE 0
-                    END
-                ) missed,
+                    CASE WHEN t.status = 'completed'
+                    THEN 1 ELSE 0 END
+                ) AS completed,
+
+                SUM(
+                    CASE WHEN t.status = 'missed'
+                    THEN 1 ELSE 0 END
+                ) AS missed,
 
                 ROUND(
                     100.0 *
                     SUM(
-                        CASE
-                            WHEN t.status='completed'
-                            THEN 1 ELSE 0
-                        END
+                        CASE WHEN t.status = 'completed'
+                        THEN 1 ELSE 0 END
                     )
                     / NULLIF(COUNT(t.id), 0),
                     1
-                ) compliance_pct,
+                ) AS compliance_pct,
 
                 AVG(
                     CASE
                         WHEN t.duration_minutes IS NOT NULL
                         THEN t.duration_minutes
                     END
-                ) avg_duration
+                ) AS avg_duration
 
             FROM tasks t
 
-            WHERE t.assigned_to=?
+            JOIN zones z
+                ON z.id = t.zone_id
 
-            GROUP BY {grp}
+            WHERE {scope}
 
+            GROUP BY {group_expression}
             ORDER BY period DESC
             LIMIT 30
+        """, params).fetchall())
 
-        """, (uid,)).fetchall())
-
-        conn.close()
         return jsonify(rows)
 
-    # ---------------------------------------------------------
-    # SUPERVISOR — own location
-    # ---------------------------------------------------------
+    finally:
+        conn.close()
 
-    if role == "supervisor":
 
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
-
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
-
-        loc = supervisor["location_id"]
-
-    # ---------------------------------------------------------
-    # ADMIN — optional location filter
-    # ---------------------------------------------------------
-
-    else:
-        loc = requested_loc
-
-    lf = "AND z.location_id=?" if loc else ""
-    params = (loc,) if loc else ()
-
-    rows = rows_to_list(conn.execute(f"""
-        SELECT
-            {grp} period,
-
-            COUNT(t.id) total,
-
-            SUM(
-                CASE
-                    WHEN t.status='completed'
-                    THEN 1 ELSE 0
-                END
-            ) completed,
-
-            SUM(
-                CASE
-                    WHEN t.status='missed'
-                    THEN 1 ELSE 0
-                END
-            ) missed,
-
-            ROUND(
-                100.0 *
-                SUM(
-                    CASE
-                        WHEN t.status='completed'
-                        THEN 1 ELSE 0
-                    END
-                )
-                / NULLIF(COUNT(t.id), 0),
-                1
-            ) compliance_pct,
-
-            AVG(
-                CASE
-                    WHEN t.duration_minutes IS NOT NULL
-                    THEN t.duration_minutes
-                END
-            ) avg_duration
-
-        FROM tasks t
-
-        LEFT JOIN zones z
-            ON t.zone_id=z.id
-
-        WHERE 1=1 {lf}
-
-        GROUP BY {grp}
-
-        ORDER BY period DESC
-        LIMIT 30
-
-    """, params).fetchall())
-
-    conn.close()
-    return jsonify(rows)
-#analytics kpis@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
 @app.route("/api/analytics/kpis")
 @jwt_required()
 def analytics_kpis():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
+    if not user:
+        return jsonify(error="User not found"), 404
 
-    requested_loc = request.args.get("location_id")
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     conn = get_db()
 
-    # ---------------------------------------------------------
-    # Determine allowed scope
-    # ---------------------------------------------------------
+    try:
+        if role == "admin":
+            task_scope = """
+                z.location_id IN (
+                    SELECT id FROM locations
+                    WHERE organization_id = ?
+                )
+            """
+            scope_params = [org_id]
 
-    if role == "admin":
-        loc = requested_loc
+        elif role == "supervisor":
+            task_scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = t.zone_id
+                )
+            """
+            scope_params = [uid]
 
-    elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+        elif role == "employee":
+            task_scope = "t.assigned_to = ?"
+            scope_params = [uid]
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(error="Supervisor location not configured"), 403
-
-        loc = supervisor["location_id"]
-
-    else:
-        loc = None
-
-    # ---------------------------------------------------------
-    # STAFF — personal KPIs
-    # ---------------------------------------------------------
-
-    if role == "staff":
-
-        def compliance(days):
-            row = conn.execute("""
-                SELECT
-                    ROUND(
-                        100.0 *
-                        SUM(
-                            CASE
-                                WHEN status='completed'
-                                THEN 1 ELSE 0
-                            END
-                        )
-                        / NULLIF(COUNT(*), 0),
-                        1
-                    ) pct
-                FROM tasks
-                WHERE assigned_to=?
-                  AND scheduled_at >= datetime(
-                      'now',
-                      '-' || ? || ' days'
-                  )
-            """, (uid, days)).fetchone()
-
-            return row["pct"] or 0
-
-        avg_dur = conn.execute("""
-            SELECT AVG(duration_minutes)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status='completed'
-              AND duration_minutes IS NOT NULL
-              AND scheduled_at >= datetime('now','-30 days')
-        """, (uid,)).fetchone()[0]
-
-        warnings = rows_to_list(conn.execute("""
-            SELECT
-                z.id,
-                z.name,
-                COUNT(t.id) missed_count
-
-            FROM zones z
-
-            JOIN staff_zones sz
-                ON sz.zone_id=z.id
-               AND sz.user_id=?
-
-            JOIN tasks t
-                ON t.zone_id=z.id
-               AND t.assigned_to=?
-               AND t.status='missed'
-               AND t.scheduled_at >= datetime('now','-7 days')
-
-            GROUP BY z.id
-
-            HAVING missed_count >= 2
-
-            ORDER BY missed_count DESC
-        """, (uid, uid)).fetchall())
-
-    # ---------------------------------------------------------
-    # ADMIN / SUPERVISOR
-    # ---------------------------------------------------------
-
-    else:
-
-        lf = "AND z.location_id=?" if loc else ""
-        params = (loc,) if loc else ()
+        else:
+            return jsonify(error="Invalid role"), 403
 
         def compliance(days):
             row = conn.execute(f"""
@@ -2961,218 +6396,351 @@ def analytics_kpis():
                     ROUND(
                         100.0 *
                         SUM(
-                            CASE
-                                WHEN t.status='completed'
-                                THEN 1 ELSE 0
-                            END
+                            CASE WHEN t.status = 'completed'
+                            THEN 1 ELSE 0 END
                         )
                         / NULLIF(COUNT(*), 0),
                         1
-                    ) pct
+                    ) AS pct
 
                 FROM tasks t
 
-                LEFT JOIN zones z
-                    ON t.zone_id=z.id
+                JOIN zones z
+                    ON z.id = t.zone_id
 
                 WHERE t.scheduled_at >= datetime(
                     'now',
                     '-' || ? || ' days'
                 )
-                {lf}
-            """, (days,) + params).fetchone()
+
+                AND {task_scope}
+            """, [days] + scope_params).fetchone()
 
             return row["pct"] or 0
 
-        avg_dur = conn.execute(f"""
+        avg_duration = conn.execute(f"""
             SELECT AVG(t.duration_minutes)
 
             FROM tasks t
 
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
+            JOIN zones z
+                ON z.id = t.zone_id
 
-            WHERE t.status='completed'
+            WHERE t.status = 'completed'
               AND t.duration_minutes IS NOT NULL
-              AND t.scheduled_at >= datetime('now','-30 days')
-              {lf}
-        """, params).fetchone()[0]
+              AND t.scheduled_at >= datetime('now', '-30 days')
+              AND {task_scope}
+        """, scope_params).fetchone()[0]
 
         warnings = rows_to_list(conn.execute(f"""
             SELECT
                 z.id,
                 z.name,
-                COUNT(t.id) missed_count
+                COUNT(t.id) AS missed_count
 
             FROM zones z
 
             JOIN tasks t
-                ON t.zone_id=z.id
+                ON t.zone_id = z.id
 
-            WHERE t.status='missed'
-              AND t.scheduled_at >= datetime('now','-7 days')
-              {lf}
+            WHERE t.status = 'missed'
+              AND t.scheduled_at >= datetime('now', '-7 days')
+              AND {task_scope}
 
-                       GROUP BY z.id
+            GROUP BY z.id
 
-            HAVING missed_count >= 2
+            HAVING COUNT(t.id) >= 2
 
             ORDER BY missed_count DESC
-        """, params).fetchall())
+        """, scope_params).fetchall())
 
-    compliance_7d = compliance(7)
-    compliance_30d = compliance(30)
+        return jsonify(
+            compliance_7d=compliance(7),
+            compliance_30d=compliance(30),
+            avg_duration_30d=(
+                round(avg_duration)
+                if avg_duration is not None
+                else None
+            ),
+            predictive_warnings=warnings
+        )
 
-    conn.close()
+    finally:
+        conn.close()
 
-    return jsonify(
-        compliance_7d=compliance_7d,
-        compliance_30d=compliance_30d,
-        avg_duration_30d=round(avg_dur) if avg_dur else None,
-        predictive_warnings=warnings
-    )
-#analytics pdf reports@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+#pdf reports________________________________________________________________________________
+# ============================================================
+# PDF REPORTS — ORGANIZATION / TEAM / EMPLOYEE SCOPED
+# ============================================================
+
 @app.route("/api/reports/pdf")
 @jwt_required()
 def export_pdf():
-    uid = get_jwt_identity()
-    role = get_jwt().get("role")
+    user = get_current_user()
 
-    requested_loc = request.args.get("location_id")
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    uid = user["id"]
+    role = user["role"]
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
 
     conn = get_db()
 
-    # ---------------------------------------------------------
-    # Determine allowed scope
-    # ---------------------------------------------------------
+    try:
+        if role == "admin":
 
-    if role == "admin":
-        loc = requested_loc
+            scope = """
+                z.location_id IN (
+                    SELECT id
+                    FROM locations
+                    WHERE organization_id = ?
+                )
+            """
 
-    elif role == "supervisor":
-        supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
-            (uid,)
-        ).fetchone()
+            params = [org_id]
 
-        if not supervisor or not supervisor["location_id"]:
-            conn.close()
-            return jsonify(
-                error="Supervisor location not configured"
-            ), 403
+            title = "CleanTrack Organization Report"
 
-        loc = supervisor["location_id"]
+        elif role == "supervisor":
 
-    else:
-        loc = None
+            scope = """
+                EXISTS (
+                    SELECT 1
+                    FROM team_zones tz
+                    JOIN team_supervisors ts
+                        ON ts.team_id = tz.team_id
+                    WHERE ts.user_id = ?
+                      AND tz.zone_id = t.zone_id
+                )
+            """
 
-    # ---------------------------------------------------------
-    # Build report data
-    # ---------------------------------------------------------
+            params = [uid]
 
-    if role == "staff":
+            title = "CleanTrack Team Report"
 
-        total = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-        """, (uid,)).fetchone()[0]
+        elif role == "employee":
 
-        completed = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status='completed'
-        """, (uid,)).fetchone()[0]
+            scope = """
+                t.assigned_to = ?
+                AND z.location_id IN (
+                    SELECT id
+                    FROM locations
+                    WHERE organization_id = ?
+                )
+            """
 
-        missed = conn.execute("""
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE assigned_to=?
-              AND status='missed'
-        """, (uid,)).fetchone()[0]
+            params = [uid, org_id]
 
-    else:
+            title = "CleanTrack Personal Report"
 
-        lf = "AND z.location_id=?" if loc else ""
-        params = (loc,) if loc else ()
+        else:
+            return jsonify(error="Invalid role"), 403
 
-        total = conn.execute(f"""
-            SELECT COUNT(*)
+        # -----------------------------------------------------
+        # Task statistics
+        # -----------------------------------------------------
+
+        stats = conn.execute(f"""
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN 1 ELSE 0
+                    END
+                ) AS completed,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'missed'
+                        THEN 1 ELSE 0
+                    END
+                ) AS missed,
+
+                SUM(
+                    CASE
+                        WHEN t.status IN ('pending', 'in-progress')
+                        THEN 1 ELSE 0
+                    END
+                ) AS pending,
+
+                AVG(
+                    CASE
+                        WHEN t.duration_minutes IS NOT NULL
+                        THEN t.duration_minutes
+                    END
+                ) AS avg_duration
+
             FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE 1=1 {lf}
-        """, params).fetchone()[0]
 
-        completed = conn.execute(f"""
-            SELECT COUNT(*)
+            JOIN zones z
+                ON z.id = t.zone_id
+
+            WHERE {scope}
+        """, params).fetchone()
+
+        total = stats["total"] or 0
+        completed = stats["completed"] or 0
+        missed = stats["missed"] or 0
+        pending = stats["pending"] or 0
+        avg_duration = stats["avg_duration"]
+
+        compliance = (
+            round((completed / total) * 100, 1)
+            if total
+            else 0
+        )
+
+        # -----------------------------------------------------
+        # Recent task breakdown
+        # -----------------------------------------------------
+
+        recent_tasks = rows_to_list(conn.execute(f"""
+            SELECT
+                t.id,
+                t.status,
+                t.scheduled_at,
+                t.completed_at,
+                t.duration_minutes,
+                z.name AS zone_name,
+                u.name AS employee_name
+
             FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE t.status='completed'
-              {lf}
-        """, params).fetchone()[0]
 
-        missed = conn.execute(f"""
-            SELECT COUNT(*)
-            FROM tasks t
-            LEFT JOIN zones z
-                ON t.zone_id=z.id
-            WHERE t.status='missed'
-              {lf}
-        """, params).fetchone()[0]
+            JOIN zones z
+                ON z.id = t.zone_id
 
-    conn.close()
+            LEFT JOIN users u
+                ON u.id = t.assigned_to
 
-    compliance = round(
-        (completed / total) * 100,
-        1
-    ) if total else 0
+            WHERE {scope}
 
-    # ---------------------------------------------------------
-    # Generate PDF
-    # ---------------------------------------------------------
+            ORDER BY t.scheduled_at DESC
 
-    buffer = BytesIO()
+            LIMIT 20
+        """, params).fetchall())
 
-    doc = SimpleDocTemplate(buffer)
-    styles = getSampleStyleSheet()
+        # -----------------------------------------------------
+        # Generate PDF
+        # -----------------------------------------------------
 
-    content = [
-        Paragraph(
-            "CleanTrack Report",
-            styles["Title"]
-        ),
-        Paragraph(
-            f"Total Tasks: {total}",
-            styles["Normal"]
-        ),
-        Paragraph(
-            f"Completed Tasks: {completed}",
-            styles["Normal"]
-        ),
-        Paragraph(
-            f"Missed Tasks: {missed}",
-            styles["Normal"]
-        ),
-        Paragraph(
-            f"Compliance: {compliance}%",
-            styles["Normal"]
-        ),
-    ]
+        buffer = BytesIO()
 
-    doc.build(content)
+        doc = SimpleDocTemplate(
+            buffer,
+            rightMargin=40,
+            leftMargin=40,
+            topMargin=40,
+            bottomMargin=40
+        )
 
-    buffer.seek(0)
+        styles = getSampleStyleSheet()
 
-    return send_file(
-        buffer,
-        as_attachment=True,
-        download_name="cleantrack_report.pdf",
-        mimetype="application/pdf"
-    )
+        content = [
+            Paragraph(
+                title,
+                styles["Title"]
+            ),
 
+            Spacer(1, 15),
+
+            Paragraph(
+                f"Generated for: {user['name']}",
+                styles["Normal"]
+            ),
+
+            Spacer(1, 15),
+
+            Paragraph(
+                f"Total Tasks: {total}",
+                styles["Normal"]
+            ),
+
+            Paragraph(
+                f"Completed Tasks: {completed}",
+                styles["Normal"]
+            ),
+
+            Paragraph(
+                f"Missed Tasks: {missed}",
+                styles["Normal"]
+            ),
+
+            Paragraph(
+                f"Pending Tasks: {pending}",
+                styles["Normal"]
+            ),
+
+            Paragraph(
+                f"Compliance: {compliance}%",
+                styles["Normal"]
+            ),
+
+            Paragraph(
+                f"Average Cleaning Duration: "
+                f"{round(avg_duration) if avg_duration is not None else 'N/A'} minutes",
+                styles["Normal"]
+            ),
+
+            Spacer(1, 20),
+
+            Paragraph(
+                "Recent Tasks",
+                styles["Heading2"]
+            ),
+
+            Spacer(1, 10)
+        ]
+
+        # -----------------------------------------------------
+        # Add recent task rows
+        # -----------------------------------------------------
+
+        for task in recent_tasks:
+
+            employee_name = (
+                task["employee_name"]
+                if task["employee_name"]
+                else "Unassigned"
+            )
+
+            scheduled = (
+                task["scheduled_at"]
+                if task["scheduled_at"]
+                else "N/A"
+            )
+
+            content.append(
+                Paragraph(
+                    f"{task['zone_name']} — "
+                    f"{employee_name} — "
+                    f"{task['status']} — "
+                    f"{scheduled}",
+                    styles["Normal"]
+                )
+            )
+
+        doc.build(content)
+
+        buffer.seek(0)
+
+        return send_file(
+            buffer,
+            as_attachment=True,
+            download_name="cleantrack_report.pdf",
+            mimetype="application/pdf"
+        )
+
+    finally:
+        conn.close()
 # ─── uploads ─────────────────────────────────────────────────────────────────
 
 @app.route("/uploads/<path:filename>")
