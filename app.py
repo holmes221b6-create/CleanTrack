@@ -39,13 +39,11 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 # Explicitly trust both localhost and 127.0.0.1 variants of your dashboard
 CORS(
     app,
-    resources={
-        r"/api/*": {
-            "origins": [
-                "https://cleantrack-frontend-ry0o.onrender.com"
-            ]
-        }
-    },
+    origins=[
+        "https://cleantrack-frontend-ry0o.onrender.com",
+        "http://127.0.0.1:5500",
+        "http://localhost:5500"
+    ],
     supports_credentials=True
 )
 jwt = JWTManager(app)
