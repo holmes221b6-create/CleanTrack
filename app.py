@@ -183,6 +183,65 @@ def get_current_user_id():
     """
     return get_jwt_identity()
 
+@app.route("/api/auth/me", methods=["GET"])
+@jwt_required()
+def get_current_user_route():
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if user.get("account_status") != "active":
+        return jsonify(error="Your account is not active"), 403
+
+    user_id = user["id"]
+    role = user["role"]
+
+    conn = get_db()
+
+    if role == "supervisor":
+        team_rows = conn.execute(
+            """
+            SELECT team_id
+            FROM team_supervisors
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
+    elif role == "employee":
+        team_rows = conn.execute(
+            """
+            SELECT team_id
+            FROM team_members
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
+    else:
+        team_rows = []
+
+    conn.close()
+
+    team_ids = [row["team_id"] for row in team_rows]
+
+    return jsonify(
+        user={
+            "id": user.get("id"),
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "location_id": user.get("location_id"),
+            "organization_id": user.get("organization_id"),
+            "organization_name": user.get("organization_name"),
+            "organization_code": user.get("organization_code"),
+            "account_status": user.get("account_status"),
+            "team_ids": team_ids
+        }
+    ), 200
+
+
 
 def get_current_org_id():
     """
