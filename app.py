@@ -8,6 +8,7 @@ from functools import wraps
 import bcrypt
 import qrcode
 import resend
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
@@ -446,35 +447,41 @@ def simulate_ai_score():
 def login():
     data = request.get_json() or {}
 
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
     if not email or not password:
-        return jsonify(error="Email and password required"), 400
+        return jsonify(
+            error="Email and password required"
+        ), 400
 
     conn = get_db()
 
-    user = row_to_dict(conn.execute(
-        """
-        SELECT
-            u.*,
-            o.name AS organization_name,
-            o.organization_code
-        FROM users u
-        LEFT JOIN organizations o
-            ON o.id = u.organization_id
-        WHERE LOWER(u.email) = ?
-        """,
-        (email,)
-    ).fetchone())
+    user = row_to_dict(
+        conn.execute(
+            """
+            SELECT
+                u.*,
+                o.name AS organization_name,
+                o.organization_code
+            FROM users u
+            LEFT JOIN organizations o
+                ON o.id = u.organization_id
+            WHERE LOWER(u.email) = ?
+            """,
+            (email,)
+        ).fetchone()
+    )
 
     conn.close()
 
     # Do not reveal whether the email exists.
     if not user:
-        return jsonify(error="Invalid credentials"), 401
+        return jsonify(
+            error="Invalid credentials"
+        ), 401
 
-    # Account status is now the primary account-state check.
+    # Account status check.
     if user.get("account_status") != "active":
         status = user.get("account_status") or "pending"
 
@@ -497,24 +504,68 @@ def login():
             error="Your account is not active."
         ), 403
 
-    # Keep the old is_active flag as an additional safety check
-    # during the transition.
+    # Keep the old is_active flag as an additional safety check.
     if not user.get("is_active"):
-        return jsonify(error="Your account is not active."), 403
+        return jsonify(
+            error="Your account is not active."
+        ), 403
 
+    # Password must exist.
     if not user.get("password_hash"):
-        return jsonify(error="Invalid credentials"), 401
+        return jsonify(
+            error="Invalid credentials"
+        ), 401
 
+    stored_hash = user["password_hash"]
+    password_valid = False
+    legacy_hash = False
+
+    # Try the current bcrypt format first.
     try:
         password_valid = bcrypt.checkpw(
             password.encode(),
-            user["password_hash"].encode()
+            stored_hash.encode()
         )
     except (ValueError, TypeError):
         password_valid = False
 
+    # If bcrypt fails, try an older Werkzeug hash.
     if not password_valid:
-        return jsonify(error="Invalid credentials"), 401
+        try:
+            password_valid = check_password_hash(
+                stored_hash,
+                password
+            )
+            legacy_hash = password_valid
+        except (ValueError, TypeError):
+            password_valid = False
+
+    # Password is wrong.
+    if not password_valid:
+        return jsonify(
+            error="Invalid credentials"
+        ), 401
+
+    # Convert an old Werkzeug hash to bcrypt after successful login.
+    if legacy_hash:
+        new_hash = bcrypt.hashpw(
+            password.encode(),
+            bcrypt.gensalt()
+        ).decode()
+
+        conn = get_db()
+
+        conn.execute(
+            """
+            UPDATE users
+            SET password_hash = ?
+            WHERE id = ?
+            """,
+            (new_hash, user["id"])
+        )
+
+        conn.commit()
+        conn.close()
 
     # Get team scope for the JWT.
     user_id = user["id"]
@@ -524,13 +575,14 @@ def login():
 
     if role == "supervisor":
         team_rows = conn.execute(
-     """
-     SELECT team_id
-     FROM team_supervisors
-     WHERE user_id = ?
-     """,
-     (user_id,)
- ).fetchall()
+            """
+            SELECT team_id
+            FROM team_supervisors
+            WHERE user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+
     elif role == "employee":
         team_rows = conn.execute(
             """
@@ -546,7 +598,10 @@ def login():
 
     conn.close()
 
-    team_ids = [row["team_id"] for row in team_rows]
+    team_ids = [
+        row["team_id"]
+        for row in team_rows
+    ]
 
     # JWT contains identity + authorization context.
     token = create_access_token(
@@ -579,7 +634,6 @@ def login():
     )
 
 
-@app.route("/api/auth/me")
 @jwt_required()
 def me():
     user = get_current_user()
