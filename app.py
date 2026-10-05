@@ -5937,7 +5937,641 @@ def admin_home():
 
     finally:
         conn.close()
+        
+     # ============================================================
+# ADMIN DASHBOARD — ADMIN ONLY
+# ============================================================
 
+@app.route("/api/admin/dashboard")
+@jwt_required()
+def admin_dashboard():
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    if user.get("role") != "admin":
+        return jsonify(error="Admin access required"), 403
+
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
+
+    today = datetime.now().date()
+
+    default_from = today - timedelta(days=6)
+
+    from_value = request.args.get(
+        "from",
+        default_from.isoformat()
+    )
+
+    to_value = request.args.get(
+        "to",
+        today.isoformat()
+    )
+
+    try:
+        from_date = datetime.strptime(
+            from_value,
+            "%Y-%m-%d"
+        ).date()
+
+        to_date = datetime.strptime(
+            to_value,
+            "%Y-%m-%d"
+        ).date()
+
+    except ValueError:
+        return jsonify(
+            error="Dates must use YYYY-MM-DD format"
+        ), 400
+
+    if from_date > to_date:
+        return jsonify(
+            error="From date cannot be after To date"
+        ), 400
+
+    period_days = (to_date - from_date).days + 1
+
+    conn = get_db()
+
+    try:
+        # ----------------------------------------------------
+        # SUMMARY
+        # ----------------------------------------------------
+
+        summary = conn.execute(
+            """
+            SELECT
+                COUNT(t.id) AS total_tasks,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS completed_tasks,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'missed'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS missed_tasks,
+
+                SUM(
+                    CASE
+                        WHEN t.status IN ('pending', 'in-progress')
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS pending_tasks,
+
+                AVG(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN t.duration_minutes
+                    END
+                ) AS avg_clean_time
+
+            FROM tasks t
+
+            JOIN zones z
+                ON z.id = t.zone_id
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+              AND DATE(t.scheduled_at)
+                  BETWEEN ? AND ?
+            """,
+            (
+                org_id,
+                from_value,
+                to_value
+            )
+        ).fetchone()
+
+        total_tasks = summary["total_tasks"] or 0
+        completed_tasks = summary["completed_tasks"] or 0
+        missed_tasks = summary["missed_tasks"] or 0
+        pending_tasks = summary["pending_tasks"] or 0
+
+        if total_tasks:
+            compliance = round(
+                (completed_tasks / total_tasks) * 100,
+                1
+            )
+        else:
+            compliance = 0
+
+        avg_clean_time = summary["avg_clean_time"]
+
+
+        # ----------------------------------------------------
+        # CURRENT ZONE STATUS
+        # ----------------------------------------------------
+
+        zone_rows = conn.execute(
+            """
+            SELECT
+                z.status,
+                COUNT(*) AS count
+
+            FROM zones z
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+
+            GROUP BY z.status
+            """,
+            (org_id,)
+        ).fetchall()
+
+        zone_status = {
+            "cleaned": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "overdue": 0
+        }
+
+        for row in zone_rows:
+            status = str(
+                row["status"] or ""
+            ).strip().lower()
+
+            count = row["count"] or 0
+
+            if status == "cleaned":
+                zone_status["cleaned"] += count
+
+            elif status in (
+                "in-progress",
+                "in_progress"
+            ):
+                zone_status["in_progress"] += count
+
+            elif status == "overdue":
+                zone_status["overdue"] += count
+
+            else:
+                zone_status["pending"] += count
+
+        zone_status["total"] = sum(
+            zone_status.values()
+        )
+
+
+        # ----------------------------------------------------
+        # OVERDUE ZONES
+        # ----------------------------------------------------
+
+        overdue_zones = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM zones z
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+              AND z.status = 'overdue'
+            """,
+            (org_id,)
+        ).fetchone()[0] or 0
+
+
+        # ----------------------------------------------------
+        # TREND
+        # ----------------------------------------------------
+
+        trend_rows = conn.execute(
+            """
+            SELECT
+                DATE(t.scheduled_at) AS day,
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS completed
+
+            FROM tasks t
+
+            JOIN zones z
+                ON z.id = t.zone_id
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+              AND DATE(t.scheduled_at)
+                  BETWEEN ? AND ?
+
+            GROUP BY DATE(t.scheduled_at)
+
+            ORDER BY day ASC
+            """,
+            (
+                org_id,
+                from_value,
+                to_value
+            )
+        ).fetchall()
+
+        trend = []
+
+        for row in trend_rows:
+            total = row["total"] or 0
+            completed = row["completed"] or 0
+
+            if total:
+                compliance_pct = round(
+                    (completed / total) * 100,
+                    1
+                )
+            else:
+                compliance_pct = 0
+
+            if period_days <= 31:
+                label = datetime.strptime(
+                    row["day"],
+                    "%Y-%m-%d"
+                ).strftime("%d %b")
+
+            elif period_days <= 180:
+                label = datetime.strptime(
+                    row["day"],
+                    "%Y-%m-%d"
+                ).strftime("Week %W")
+
+            else:
+                label = datetime.strptime(
+                    row["day"],
+                    "%Y-%m-%d"
+                ).strftime("%b %Y")
+
+            trend.append({
+                "label": label,
+                "total": total,
+                "completed": completed,
+                "compliance_pct": compliance_pct
+            })
+
+
+        # ----------------------------------------------------
+        # LOCATION PULSE
+        # ----------------------------------------------------
+
+        location_rows = conn.execute(
+            """
+            SELECT
+                l.id,
+                l.name,
+
+                COUNT(DISTINCT z.id) AS zone_count,
+
+                COUNT(t.id) AS total_tasks,
+
+                SUM(
+                    CASE
+                        WHEN t.status = 'completed'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS completed_tasks,
+
+                SUM(
+                    CASE
+                        WHEN z.status = 'overdue'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS overdue_zones
+
+            FROM locations l
+
+            LEFT JOIN zones z
+                ON z.location_id = l.id
+
+            LEFT JOIN tasks t
+                ON t.zone_id = z.id
+               AND DATE(t.scheduled_at)
+                   BETWEEN ? AND ?
+
+            WHERE l.organization_id = ?
+
+            GROUP BY l.id, l.name
+
+            ORDER BY l.name
+
+            LIMIT 8
+            """,
+            (
+                from_value,
+                to_value,
+                org_id
+            )
+        ).fetchall()
+
+        locations = []
+
+        for row in location_rows:
+            total = row["total_tasks"] or 0
+            completed = row["completed_tasks"] or 0
+
+            if total:
+                location_compliance = round(
+                    (completed / total) * 100,
+                    1
+                )
+            else:
+                location_compliance = None
+
+            locations.append({
+                "id": row["id"],
+                "name": row["name"],
+                "zone_count": row["zone_count"] or 0,
+                "overdue_zones": row["overdue_zones"] or 0,
+                "total_tasks": total,
+                "completed_tasks": completed,
+                "compliance_pct": location_compliance
+            })
+
+
+        # ----------------------------------------------------
+        # STAFF OVERVIEW
+        # ----------------------------------------------------
+
+        staff_rows = conn.execute(
+            """
+            SELECT
+                role,
+                COUNT(*) AS count
+
+            FROM users
+
+            WHERE organization_id = ?
+              AND is_active = 1
+              AND role IN ('employee', 'supervisor')
+
+            GROUP BY role
+            """,
+            (org_id,)
+        ).fetchall()
+
+        supervisors = 0
+        employees = 0
+
+        for row in staff_rows:
+            if row["role"] == "supervisor":
+                supervisors = row["count"] or 0
+
+            elif row["role"] == "employee":
+                employees = row["count"] or 0
+
+        staff_total = supervisors + employees
+
+
+        # ----------------------------------------------------
+        # NEEDS ATTENTION
+        # ----------------------------------------------------
+
+        needs_attention = []
+
+        overdue_rows = conn.execute(
+            """
+            SELECT
+                z.name AS zone_name,
+                l.name AS location_name
+
+            FROM zones z
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+              AND z.status = 'overdue'
+
+            ORDER BY z.name
+
+            LIMIT 3
+            """,
+            (org_id,)
+        ).fetchall()
+
+        for row in overdue_rows:
+            needs_attention.append({
+                "severity": "high",
+                "title": "Overdue zone",
+                "detail": (
+                    f'{row["zone_name"]} · '
+                    f'{row["location_name"]}'
+                )
+            })
+
+        for location in locations:
+            score = location["compliance_pct"]
+
+            if (
+                score is not None
+                and score < 80
+            ):
+                needs_attention.append({
+                    "severity": "medium",
+                    "title": "Location below target",
+                    "detail": (
+                        f'{location["name"]} · '
+                        f'{score}% compliance'
+                    )
+                })
+
+        unread_alerts = conn.execute(
+            """
+            SELECT COUNT(*)
+
+            FROM alerts a
+
+            LEFT JOIN zones z
+                ON z.id = a.zone_id
+
+            LEFT JOIN locations l
+                ON l.id = z.location_id
+
+            LEFT JOIN users u
+                ON u.id = a.user_id
+
+            WHERE a.is_read = 0
+              AND (
+                    l.organization_id = ?
+                    OR u.organization_id = ?
+              )
+            """,
+            (
+                org_id,
+                org_id
+            )
+        ).fetchone()[0] or 0
+
+        if unread_alerts:
+            needs_attention.append({
+                "severity": "medium",
+                "title": "Unread alerts",
+                "detail": (
+                    f"{unread_alerts} "
+                    f"notification"
+                    f"{'' if unread_alerts == 1 else 's'}"
+                )
+            })
+
+        needs_attention = needs_attention[:6]
+
+
+        # ----------------------------------------------------
+        # RECENT ACTIVITY
+        # ----------------------------------------------------
+
+        activity_rows = conn.execute(
+            """
+            SELECT
+                'cleaning' AS kind,
+                'Cleaning completed' AS title,
+                z.name || ' · ' || l.name AS detail,
+                cl.logged_at AS activity_time
+
+            FROM cleaning_logs cl
+
+            JOIN zones z
+                ON z.id = cl.zone_id
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+
+            UNION ALL
+
+            SELECT
+                'task' AS kind,
+
+                CASE
+                    WHEN t.status = 'completed'
+                    THEN 'Task completed'
+                    ELSE 'Task created'
+                END AS title,
+
+                z.name || ' · ' || l.name AS detail,
+
+                COALESCE(
+                    t.completed_at,
+                    t.created_at
+                ) AS activity_time
+
+            FROM tasks t
+
+            JOIN zones z
+                ON z.id = t.zone_id
+
+            JOIN locations l
+                ON l.id = z.location_id
+
+            WHERE l.organization_id = ?
+
+            UNION ALL
+
+            SELECT
+                'alert' AS kind,
+                'Alert' AS title,
+                a.message AS detail,
+                a.created_at AS activity_time
+
+            FROM alerts a
+
+            LEFT JOIN zones z
+                ON z.id = a.zone_id
+
+            LEFT JOIN locations l
+                ON l.id = z.location_id
+
+            LEFT JOIN users u
+                ON u.id = a.user_id
+
+            WHERE
+                l.organization_id = ?
+                OR u.organization_id = ?
+
+            ORDER BY activity_time DESC
+
+            LIMIT 8
+            """,
+            (
+                org_id,
+                org_id,
+                org_id,
+                org_id
+            )
+        ).fetchall()
+
+        recent_activity = [
+            dict(row)
+            for row in activity_rows
+        ]
+
+
+        return jsonify({
+            "period": {
+                "from": from_value,
+                "to": to_value,
+                "days": period_days
+            },
+
+            "summary": {
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "missed_tasks": missed_tasks,
+                "pending_tasks": pending_tasks,
+                "compliance_pct": compliance,
+                "overdue_zones": overdue_zones,
+                "avg_clean_time": (
+                    round(avg_clean_time)
+                    if avg_clean_time is not None
+                    else None
+                )
+            },
+
+            "zone_status": zone_status,
+
+            "trend": trend,
+
+            "locations": locations,
+
+            "staff": {
+                "supervisors": supervisors,
+                "employees": employees,
+                "total": staff_total
+            },
+
+            "needs_attention": needs_attention,
+
+            "recent_activity": recent_activity
+        })
+
+    finally:
+        conn.close()
 # ─── analytics ────────────────────────────────────────────────────────────────
 # ============================================================
 # ANALYTICS — ORGANIZATION / TEAM / EMPLOYEE SCOPED
