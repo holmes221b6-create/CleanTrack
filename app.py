@@ -5840,6 +5840,104 @@ def mark_all_read():
 
     return jsonify(message="Alerts marked read")
 
+#home page---------------------------------------------------------------------
+
+@app.route("/api/home/admin")
+@jwt_required()
+def admin_home():
+
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(error="Account is not active"), 403
+
+    if user["role"] != "admin":
+        return jsonify(error="Admin access required"), 403
+
+    org_id = user.get("organization_id")
+
+    if not org_id:
+        return jsonify(error="Organization not configured"), 403
+
+    conn = get_db()
+
+    try:
+
+        organization = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                organization_code
+            FROM organizations
+            WHERE id = ?
+            """,
+            (org_id,)
+        ).fetchone()
+
+        if not organization:
+            return jsonify(error="Organization not found"), 404
+
+        staff = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            WHERE organization_id = ?
+              AND role IN ('employee', 'supervisor')
+              AND is_active = 1
+            """,
+            (org_id,)
+        ).fetchone()[0]
+
+        teams = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM teams
+            WHERE organization_id = ?
+            """,
+            (org_id,)
+        ).fetchone()[0]
+
+        locations = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM locations
+            WHERE organization_id = ?
+            """,
+            (org_id,)
+        ).fetchone()[0]
+
+        zones = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM zones z
+            JOIN locations l
+                ON l.id = z.location_id
+            WHERE l.organization_id = ?
+            """,
+            (org_id,)
+        ).fetchone()[0]
+
+        return jsonify(
+            organization={
+                "id": organization["id"],
+                "name": organization["name"],
+                "organization_code": organization["organization_code"],
+            },
+            counts={
+                "staff": staff or 0,
+                "teams": teams or 0,
+                "locations": locations or 0,
+                "zones": zones or 0,
+            }
+        )
+
+    finally:
+        conn.close()
+
 # ─── analytics ────────────────────────────────────────────────────────────────
 # ============================================================
 # ANALYTICS — ORGANIZATION / TEAM / EMPLOYEE SCOPED
