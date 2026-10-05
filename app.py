@@ -4055,6 +4055,352 @@ def update_user(uid):
 
     finally:
         conn.close()
+        
+        # ============================================================
+# ADMIN STAFF — ADMIN ONLY
+# ============================================================
+
+@app.route("/api/admin/staff", methods=["GET"])
+@jwt_required()
+def admin_staff():
+    user = get_current_user()
+
+    if not user:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(user):
+        return jsonify(
+            error="Account is not active.",
+            account_status=user.get("account_status")
+        ), 403
+
+    if user.get("role") != "admin":
+        return jsonify(error="Admin access required"), 403
+
+    organization_id = user.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="User has no organization assigned"
+        ), 403
+
+    conn = get_db()
+
+    try:
+        user_rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.notification_email,
+                    u.phone,
+                    u.role,
+                    u.location_id,
+                    u.is_active,
+                    u.account_status,
+                    u.employee_id,
+                    u.created_at
+                FROM users u
+                WHERE u.organization_id = ?
+                ORDER BY u.name
+                """,
+                (organization_id,)
+            ).fetchall()
+        )
+
+        location_rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    id,
+                    name
+                FROM locations
+                WHERE organization_id = ?
+                ORDER BY name
+                """,
+                (organization_id,)
+            ).fetchall()
+        )
+
+        team_rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    id,
+                    name
+                FROM teams
+                WHERE organization_id = ?
+                ORDER BY name
+                """,
+                (organization_id,)
+            ).fetchall()
+        )
+
+        supervisor_team_rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    ts.user_id AS supervisor_id,
+                    ts.team_id AS team_id,
+                    t.name AS team_name
+                FROM team_supervisors ts
+                JOIN teams t
+                    ON t.id = ts.team_id
+                WHERE t.organization_id = ?
+                ORDER BY t.name
+                """,
+                (organization_id,)
+            ).fetchall()
+        )
+
+        employee_team_rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    tm.user_id AS employee_id,
+                    tm.team_id AS team_id
+                FROM team_members tm
+                JOIN teams t
+                    ON t.id = tm.team_id
+                WHERE t.organization_id = ?
+                """
+            ).fetchall()
+        )
+
+        locations = {
+            str(row["id"]): row["name"]
+            for row in location_rows
+        }
+
+        teams = {
+            str(row["id"]): row["name"]
+            for row in team_rows
+        }
+
+        users = {
+            str(row["id"]): row
+            for row in user_rows
+        }
+
+        supervisor_teams = {}
+
+        for row in supervisor_team_rows:
+            supervisor_id = str(
+                row["supervisor_id"]
+            )
+
+            supervisor_teams.setdefault(
+                supervisor_id,
+                []
+            ).append(
+                {
+                    "id": row["team_id"],
+                    "name": row["team_name"]
+                }
+            )
+
+        employee_teams = {}
+
+        for row in employee_team_rows:
+            employee_id = str(
+                row["employee_id"]
+            )
+
+            employee_teams.setdefault(
+                employee_id,
+                []
+            ).append(row["team_id"])
+
+        def build_employee(user_row):
+            user_id = str(user_row["id"])
+
+            team_ids = employee_teams.get(
+                user_id,
+                []
+            )
+
+            return {
+                "id": user_row["id"],
+                "name": user_row["name"],
+                "email": user_row["email"],
+                "phone": user_row["phone"],
+                "employee_id": user_row["employee_id"],
+                "role": user_row["role"],
+                "is_active": bool(
+                    user_row["is_active"]
+                ),
+                "account_status": user_row[
+                    "account_status"
+                ],
+                "location_id": user_row[
+                    "location_id"
+                ],
+                "location_name": locations.get(
+                    str(user_row["location_id"])
+                ),
+                "team_ids": team_ids,
+                "team_names": [
+                    teams.get(str(team_id))
+                    for team_id in team_ids
+                    if teams.get(str(team_id))
+                ],
+                "created_at": user_row[
+                    "created_at"
+                ],
+                "last_activity": None
+            }
+
+        employees = {
+            str(row["id"]): build_employee(row)
+            for row in user_rows
+            if row["role"] == "employee"
+        }
+
+        supervisors = []
+
+        for row in user_rows:
+
+            if row["role"] != "supervisor":
+                continue
+
+            supervisor_id = str(
+                row["id"]
+            )
+
+            supervisor_teams_for_user = supervisor_teams.get(
+    supervisor_id,
+    []
+)
+
+            team_ids = {
+                str(team["id"])
+                for team in supervisor_teams_for_user
+            }
+
+            employee_list = []
+
+            for employee in employees.values():
+
+                employee_team_ids = {
+                    str(team_id)
+                    for team_id in employee[
+                        "team_ids"
+                    ]
+                }
+
+                if employee_team_ids.intersection(
+                    team_ids
+                ):
+                    employee_list.append(
+                        employee
+                    )
+
+            location_names = sorted(
+                {
+                    employee["location_name"]
+                    for employee in employee_list
+                    if employee["location_name"]
+                }
+            )
+
+            supervisors.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "email": row["email"],
+                    "phone": row["phone"],
+                    "employee_id": row[
+                        "employee_id"
+                    ],
+                    "role": row["role"],
+                    "is_active": bool(
+                        row["is_active"]
+                    ),
+                    "account_status": row[
+                        "account_status"
+                    ],
+                    "created_at": row[
+                        "created_at"
+                    ],
+                    "last_activity": None,
+                    "teams": supervisor_teams_for_user,
+                    "employees": employee_list,
+                    "employee_count": len(
+                        employee_list
+                    ),
+                    "location_names": location_names
+                }
+            )
+
+        assigned_employee_ids = set(
+            employee_teams.keys()
+        )
+
+        unassigned_employees = [
+            employee
+            for employee_id, employee
+            in employees.items()
+            if employee_id not in assigned_employee_ids
+        ]
+
+        active_count = 0
+        inactive_count = 0
+        pending_count = 0
+
+        for employee in employees.values():
+
+            if employee["account_status"] == "pending":
+                pending_count += 1
+
+            elif employee["is_active"]:
+                active_count += 1
+
+            else:
+                inactive_count += 1
+
+        for supervisor in supervisors:
+
+            if supervisor["account_status"] == "pending":
+                pending_count += 1
+
+            elif supervisor["is_active"]:
+                active_count += 1
+
+            else:
+                inactive_count += 1
+
+        return jsonify(
+            summary={
+                "total_staff":
+                    len(supervisors) +
+                    len(employees),
+
+                "supervisors":
+                    len(supervisors),
+
+                "employees":
+                    len(employees),
+
+                "active":
+                    active_count,
+
+                "pending":
+                    pending_count,
+
+                "inactive":
+                    inactive_count
+            },
+            supervisors=supervisors,
+            unassigned_employees=
+                unassigned_employees,
+            teams=team_rows,
+            locations=location_rows
+        )
+
+    finally:
+        conn.close()
 # ─── tasks ────────────────────────────────────────────────────────────────────
 
 def task_scope_allowed(conn, task_id, user):
