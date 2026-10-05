@@ -3901,19 +3901,43 @@ def update_user(uid):
                 return jsonify(
                     error="Employee ID is already in use"
                 ), 409
+            
+            # Location assignment — Admin only.
+            new_location_id = d.get("location_id")
+
+            if new_location_id:
+
+             location = conn.execute(
+        """
+        SELECT id
+        FROM locations
+        WHERE id = ?
+          AND organization_id = ?
+        """,
+        (
+            new_location_id,
+            organization_id
+        )
+    ).fetchone()
+
+        if not location:
+          return jsonify(
+            error="Location does not exist in your organization"
+        ), 400
 
         # Basic user fields.
         conn.execute(
             """
-            UPDATE users
-            SET
-                name = COALESCE(?, name),
-                email = COALESCE(?, email),
-                notification_email = COALESCE(?, notification_email),
-                phone = COALESCE(?, phone),
-                role = COALESCE(?, role),
-                employee_id = COALESCE(?, employee_id),
-                is_active = COALESCE(?, is_active)
+  UPDATE users
+SET
+    name = COALESCE(?, name),
+    email = COALESCE(?, email),
+    notification_email = COALESCE(?, notification_email),
+    phone = COALESCE(?, phone),
+    role = COALESCE(?, role),
+    employee_id = COALESCE(?, employee_id),
+    location_id = COALESCE(?, location_id),
+    is_active = COALESCE(?, is_active)
             WHERE id = ?
               AND organization_id = ?
             """,
@@ -3926,7 +3950,14 @@ def update_user(uid):
                 d.get("phone"),
                 new_role if editor_role == "admin" else None,
                 new_employee_id,
-                d.get("is_active")
+
+new_location_id
+if editor_role == "admin"
+else None,
+
+d.get("is_active")
+if editor_role == "admin"
+else None
                 if editor_role == "admin"
                 else None,
                 uid,
