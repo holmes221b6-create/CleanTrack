@@ -1,8 +1,11 @@
 import sqlite3
 import os
 
-TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL")
-TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
+_turso_url = os.getenv("TURSO_DATABASE_URL")
+_turso_token = os.getenv("TURSO_AUTH_TOKEN")
+
+TURSO_DATABASE_URL = _turso_url.strip() if _turso_url else None
+TURSO_AUTH_TOKEN = _turso_token.strip() if _turso_token else None
 DB_PATH = os.getenv("DB_PATH", "cleantrack.db")
 
 
