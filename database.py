@@ -1,14 +1,83 @@
 import sqlite3
 import os
 
+TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "cleantrack.db")
 
 
+class CleanTrackRow(dict):
+    """
+    SQLite-compatible row object for Turso.
+
+    Supports both:
+        row["email"]
+    and:
+        row[0]
+
+    This lets the existing CleanTrack backend continue using
+    its current row-access patterns.
+    """
+
+    def __init__(self, cursor, values):
+        self._keys = [
+            column[0]
+            for column in (cursor.description or [])
+        ]
+        self._values = tuple(values)
+
+        super().__init__(
+            zip(self._keys, self._values)
+        )
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+
+        return super().__getitem__(key)
+
+
+def turso_row_factory(cursor, row):
+    return CleanTrackRow(cursor, row)
+
+
+def using_turso():
+    return bool(
+        TURSO_DATABASE_URL
+        and TURSO_AUTH_TOKEN
+    )
+
+
 def get_db():
+
+    if using_turso():
+
+        import turso_serverless
+
+        conn = turso_serverless.connect(
+            TURSO_DATABASE_URL,
+            auth_token=TURSO_AUTH_TOKEN
+        )
+
+        conn.row_factory = turso_row_factory
+
+        return conn
+
+
+    # Local development continues using normal SQLite.
+
     conn = sqlite3.connect(DB_PATH)
+
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+
+    conn.execute(
+        "PRAGMA journal_mode=WAL"
+    )
+
+    conn.execute(
+        "PRAGMA foreign_keys=ON"
+    )
+
     return conn
 
 
@@ -25,10 +94,16 @@ def add_column_if_missing(conn, table, column, definition):
         conn.execute(
             f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
         )
-
 def init_db():
-    conn = get_db()
 
+    if using_turso():
+        print(
+            "Using Turso database; "
+            "skipping local SQLite initialization."
+        )
+        return
+
+    conn = get_db()
     try:
         c = conn.cursor()
 
