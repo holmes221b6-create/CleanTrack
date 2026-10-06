@@ -1208,19 +1208,26 @@ def get_account_requests():
     if status:
         if status not in (
             "pending",
+            "waiting",
             "approved",
             "rejected"
         ):
             conn.close()
-            return jsonify(error="Invalid request status"), 400
+            return jsonify(
+                error="Invalid request status"
+            ), 400
 
         query += " AND ar.status = ?"
         params.append(status)
 
+
     query += " ORDER BY ar.created_at DESC"
 
     rows = rows_to_list(
-        conn.execute(query, params).fetchall()
+        conn.execute(
+            query,
+            params
+        ).fetchall()
     )
 
     conn.close()
@@ -1234,13 +1241,6 @@ def get_account_requests():
 @jwt_required()
 @require_roles("admin")
 def approve_account_request(request_id):
-    """
-    Approve a pending supervisor/employee registration request.
-
-    The administrator may optionally provide a team_id in the
-    approval request. If supplied, that team overrides the
-    team originally requested by the applicant.
-    """
 
     admin = get_current_user()
 
@@ -1251,21 +1251,39 @@ def approve_account_request(request_id):
     admin_id = admin.get("id")
 
     if not organization_id:
-        return jsonify(error="Administrator has no organization"), 400
-
-    # ---------------------------------------------------------
-    # Optional admin-selected team
-    # ---------------------------------------------------------
+        return jsonify(
+            error="Administrator has no organization"
+        ), 400
 
     data = request.get_json() or {}
-    selected_team_id = data.get("team_id")
 
-    if selected_team_id:
-        selected_team_id = str(selected_team_id).strip() or None
+    selected_team_id = (
+        str(data.get("team_id") or "").strip()
+        or None
+    )
+
+    selected_role = (
+        str(data.get("role") or "").strip().lower()
+        or None
+    )
+
+    selected_location_id = (
+        str(data.get("location_id") or "").strip()
+        or None
+    )
+
+    if selected_role and selected_role not in (
+        "supervisor",
+        "employee"
+    ):
+        return jsonify(
+            error="Approved role must be supervisor or employee"
+        ), 400
 
     conn = get_db()
 
     try:
+
         # -----------------------------------------------------
         # Find request inside admin's organization
         # -----------------------------------------------------
@@ -1284,33 +1302,74 @@ def approve_account_request(request_id):
         ).fetchone()
 
         if not request_row:
-            conn.close()
-            return jsonify(error="Account request not found"), 404
+            return jsonify(
+                error="Account request not found"
+            ), 404
 
-        account_request = row_to_dict(request_row)
+        account_request = row_to_dict(
+            request_row
+        )
 
-        if account_request["status"] != "pending":
-            conn.close()
+        # -----------------------------------------------------
+        # Request must still be pending or waiting
+        # -----------------------------------------------------
+
+        if account_request["status"] not in (
+            "pending",
+            "waiting"
+        ):
             return jsonify(
                 error="This account request has already been processed."
             ), 409
 
-        requested_role = account_request["requested_role"]
+        # -----------------------------------------------------
+        # Determine final role
+        # -----------------------------------------------------
 
-        if requested_role not in (
+        requested_role = (
+            account_request["requested_role"]
+        )
+
+        final_role = (
+            selected_role
+            if selected_role
+            else requested_role
+        )
+
+        if final_role not in (
             "supervisor",
             "employee"
         ):
-            conn.close()
             return jsonify(
                 error="Invalid requested role."
             ), 400
 
         # -----------------------------------------------------
+        # Validate selected location
+        # -----------------------------------------------------
+
+        if selected_location_id:
+
+            location = conn.execute(
+                """
+                SELECT id
+                FROM locations
+                WHERE id = ?
+                  AND organization_id = ?
+                """,
+                (
+                    selected_location_id,
+                    organization_id
+                )
+            ).fetchone()
+
+            if not location:
+                return jsonify(
+                    error="Selected location does not exist in this organization."
+                ), 400
+
+        # -----------------------------------------------------
         # Determine final team
-        #
-        # Admin-selected team takes priority.
-        # Otherwise use the applicant's requested team.
         # -----------------------------------------------------
 
         effective_team_id = (
@@ -1339,7 +1398,6 @@ def approve_account_request(request_id):
             ).fetchone()
 
             if not team:
-                conn.close()
                 return jsonify(
                     error="Selected team does not exist in this organization."
                 ), 400
@@ -1360,7 +1418,6 @@ def approve_account_request(request_id):
         ).fetchone()
 
         if existing_user:
-            conn.close()
             return jsonify(
                 error="A user with this email already exists."
             ), 409
@@ -1369,7 +1426,9 @@ def approve_account_request(request_id):
         # Prevent duplicate employee ID
         # -----------------------------------------------------
 
-        employee_id = account_request["employee_id"]
+        employee_id = account_request[
+            "employee_id"
+        ]
 
         if employee_id:
 
@@ -1387,7 +1446,6 @@ def approve_account_request(request_id):
             ).fetchone()
 
             if existing_employee:
-                conn.close()
                 return jsonify(
                     error="Employee ID is already in use."
                 ), 409
@@ -1418,7 +1476,9 @@ def approve_account_request(request_id):
                 approved_at,
                 employee_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?
+            )
             """,
             (
                 user_id,
@@ -1427,8 +1487,8 @@ def approve_account_request(request_id):
                 account_request["notification_email"],
                 account_request["phone"],
                 account_request["password_hash"],
-                requested_role,
-                None,
+                final_role,
+                selected_location_id,
                 1,
                 organization_id,
                 "active",
@@ -1443,9 +1503,11 @@ def approve_account_request(request_id):
 
         if effective_team_id:
 
-            relationship_id = str(uuid.uuid4())
+            relationship_id = str(
+                uuid.uuid4()
+            )
 
-            if requested_role == "supervisor":
+            if final_role == "supervisor":
 
                 conn.execute(
                     """
@@ -1463,7 +1525,7 @@ def approve_account_request(request_id):
                     )
                 )
 
-            elif requested_role == "employee":
+            elif final_role == "employee":
 
                 conn.execute(
                     """
@@ -1503,25 +1565,99 @@ def approve_account_request(request_id):
 
         conn.commit()
 
+        return jsonify(
+            message="Account request approved successfully.",
+            user={
+                "id": user_id,
+                "name": account_request["name"],
+                "email": account_request["email"],
+                "role": final_role,
+                "organization_id": organization_id,
+                "account_status": "active",
+                "team_id": effective_team_id,
+                "location_id": selected_location_id
+            }
+        ), 201
+
     except Exception:
         conn.rollback()
-        conn.close()
         raise
 
-    conn.close()
+    finally:
+        conn.close()
+#wait--------------------------------------------------------------------------
 
-    return jsonify(
-        message="Account request approved successfully.",
-        user={
-            "id": user_id,
-            "name": account_request["name"],
-            "email": account_request["email"],
-            "role": requested_role,
-            "organization_id": organization_id,
-            "account_status": "active",
-            "team_id": effective_team_id
-        }
-    ), 201
+@app.route(
+    "/api/admin/account-requests/<request_id>/wait",
+    methods=["POST"]
+)
+@jwt_required()
+@require_roles("admin")
+def wait_account_request(request_id):
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    organization_id = admin.get("organization_id")
+    admin_id = admin.get("id")
+
+    conn = get_db()
+
+    try:
+        row = conn.execute(
+            """
+            SELECT id, status
+            FROM account_requests
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                request_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not row:
+            return jsonify(
+                error="Account request not found"
+            ), 404
+
+        if row["status"] != "pending":
+            return jsonify(
+                error="Only pending requests can be moved to waiting"
+            ), 409
+
+        conn.execute(
+            """
+            UPDATE account_requests
+            SET status = 'waiting',
+                reviewed_by = ?,
+                reviewed_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                admin_id,
+                request_id,
+                organization_id
+            )
+        )
+
+        conn.commit()
+
+        return jsonify(
+            message="Account request moved to waiting."
+        )
+
+    except Exception as e:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+#reject------------------------------------------------------------------------
 @app.route(
     "/api/admin/account-requests/<request_id>/reject",
     methods=["POST"]
@@ -3535,10 +3671,13 @@ def get_users():
 @jwt_required()
 @require_roles("admin", "supervisor")
 def create_user():
+
     creator = get_current_user()
 
     if not creator:
-        return jsonify(error="User not found"), 404
+        return jsonify(
+            error="User not found"
+        ), 404
 
     if not require_account_status(creator):
         return jsonify(
@@ -3554,14 +3693,29 @@ def create_user():
             error="User has no organization assigned"
         ), 403
 
-    d = request.get_json() or {}
+    data = request.get_json() or {}
 
-    name = (d.get("name") or "").strip()
-    email = (d.get("email") or "").strip().lower()
-    password = d.get("password") or ""
-    requested_role = (d.get("role") or "employee").strip().lower()
-    team_id = d.get("team_id")
-    employee_id = (d.get("employee_id") or "").strip() or None
+    name = (
+        data.get("name") or ""
+    ).strip()
+
+    email = (
+        data.get("email") or ""
+    ).strip().lower()
+
+    password = (
+        data.get("password") or ""
+    )
+
+    requested_role = (
+        data.get("role") or "employee"
+    ).strip().lower()
+
+    team_id = data.get("team_id")
+
+    employee_id = (
+        data.get("employee_id") or ""
+    ).strip() or None
 
     if not name or not email or not password:
         return jsonify(
@@ -3573,13 +3727,19 @@ def create_user():
             error="Password must be at least 8 characters"
         ), 400
 
-    if requested_role not in ("supervisor", "employee"):
+    if requested_role not in (
+        "supervisor",
+        "employee"
+    ):
         return jsonify(
             error="Only supervisor or employee accounts can be created here"
         ), 400
 
-    # Supervisor can create employees only.
-    if creator_role == "supervisor" and requested_role != "employee":
+    # Supervisors can only create employees.
+    if (
+        creator_role == "supervisor"
+        and requested_role != "employee"
+    ):
         return jsonify(
             error="Supervisors can only create employee accounts"
         ), 403
@@ -3587,19 +3747,30 @@ def create_user():
     conn = get_db()
 
     try:
+
+        # -----------------------------------------------------
+        # Prevent duplicate email
+        # -----------------------------------------------------
+
         existing = conn.execute(
             """
             SELECT id
             FROM users
             WHERE LOWER(email) = ?
             """,
-            (email,)
+            (
+                email,
+            )
         ).fetchone()
 
         if existing:
             return jsonify(
                 error="Email already exists"
             ), 409
+
+        # -----------------------------------------------------
+        # Prevent duplicate employee ID
+        # -----------------------------------------------------
 
         if employee_id:
 
@@ -3621,7 +3792,10 @@ def create_user():
                     error="Employee ID is already in use"
                 ), 409
 
-        # Team is mandatory for supervisor/employee management.
+        # -----------------------------------------------------
+        # Team is required
+        # -----------------------------------------------------
+
         if not team_id:
             return jsonify(
                 error="team_id is required"
@@ -3645,7 +3819,11 @@ def create_user():
                 error="Team does not exist in your organization"
             ), 400
 
-        # Supervisor may only add employees to a team they supervise.
+        # -----------------------------------------------------
+        # Supervisor may only add employees
+        # to teams they supervise.
+        # -----------------------------------------------------
+
         if creator_role == "supervisor":
 
             supervised = conn.execute(
@@ -3666,7 +3844,13 @@ def create_user():
                     error="You can only add employees to your own teams"
                 ), 403
 
-        user_id = str(uuid.uuid4())
+        # -----------------------------------------------------
+        # Create user
+        # -----------------------------------------------------
+
+        user_id = str(
+            uuid.uuid4()
+        )
 
         password_hash = bcrypt.hashpw(
             password.encode(),
@@ -3691,14 +3875,16 @@ def create_user():
                 account_status,
                 employee_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 user_id,
                 name,
                 email,
-                d.get("notification_email"),
-                d.get("phone"),
+                data.get("notification_email"),
+                data.get("phone"),
                 password_hash,
                 requested_role,
                 None,
@@ -3709,7 +3895,13 @@ def create_user():
             )
         )
 
-        relationship_id = str(uuid.uuid4())
+        # -----------------------------------------------------
+        # Assign team according to role
+        # -----------------------------------------------------
+
+        relationship_id = str(
+            uuid.uuid4()
+        )
 
         if requested_role == "employee":
 
@@ -3759,12 +3951,16 @@ def create_user():
         ), 201
 
     except Exception as e:
+
         conn.rollback()
-        return jsonify(error=str(e)), 500
+
+        return jsonify(
+            error=str(e)
+        ), 500
 
     finally:
-        conn.close()
 
+        conn.close()
 
 @app.route("/api/users/<uid>", methods=["PUT"])
 @jwt_required()
