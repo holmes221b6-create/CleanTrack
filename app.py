@@ -2003,6 +2003,370 @@ def create_team():
             "organization_id": organization_id
         }
     ), 201
+
+# ============================================================
+# ADMIN TEAM SEARCH
+# ============================================================
+
+@app.route(
+    "/api/admin/teams/search",
+    methods=["GET"]
+)
+@jwt_required()
+@require_roles("admin")
+def search_admin_teams():
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(admin):
+        return jsonify(
+            error="Account is not active"
+        ), 403
+
+    organization_id = admin.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="Administrator has no organization"
+        ), 400
+
+    query_text = (
+        request.args.get("q") or ""
+    ).strip()
+
+    if not query_text:
+        return jsonify([])
+
+    try:
+        limit = int(
+            request.args.get("limit") or 8
+        )
+    except ValueError:
+        limit = 8
+
+    limit = max(1, min(limit, 20))
+
+    search_value = f"%{query_text.lower()}%"
+
+    conn = get_db()
+
+    try:
+
+        rows = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    t.id,
+                    t.name,
+                    t.description,
+                    t.organization_id,
+                    t.created_at,
+
+                    (
+                        SELECT COUNT(*)
+                        FROM team_supervisors ts_count
+                        WHERE ts_count.team_id = t.id
+                    ) AS supervisor_count,
+
+                    (
+                        SELECT COUNT(*)
+                        FROM team_members tm_count
+                        WHERE tm_count.team_id = t.id
+                    ) AS employee_count,
+
+                    (
+                        SELECT COUNT(*)
+                        FROM team_locations tl_count
+                        WHERE tl_count.team_id = t.id
+                    ) AS location_count,
+
+                    (
+                        SELECT COUNT(*)
+                        FROM team_zones tz_count
+                        WHERE tz_count.team_id = t.id
+                    ) AS zone_count
+
+                FROM teams t
+
+                WHERE t.organization_id = ?
+
+                  AND (
+                        LOWER(
+                            COALESCE(t.name, '')
+                        ) LIKE ?
+
+                        OR
+
+                        LOWER(
+                            COALESCE(t.description, '')
+                        ) LIKE ?
+
+                        OR EXISTS (
+                            SELECT 1
+                            FROM team_supervisors ts
+                            JOIN users u
+                                ON u.id = ts.user_id
+                            WHERE ts.team_id = t.id
+                              AND u.organization_id = ?
+                              AND LOWER(
+                                  COALESCE(u.name, '')
+                              ) LIKE ?
+                        )
+
+                        OR EXISTS (
+                            SELECT 1
+                            FROM team_members tm
+                            JOIN users u
+                                ON u.id = tm.user_id
+                            WHERE tm.team_id = t.id
+                              AND u.organization_id = ?
+                              AND LOWER(
+                                  COALESCE(u.name, '')
+                              ) LIKE ?
+                        )
+
+                        OR EXISTS (
+                            SELECT 1
+                            FROM team_locations tl
+                            JOIN locations l
+                                ON l.id = tl.location_id
+                            WHERE tl.team_id = t.id
+                              AND l.organization_id = ?
+                              AND LOWER(
+                                  COALESCE(l.name, '')
+                              ) LIKE ?
+                        )
+
+                        OR EXISTS (
+                            SELECT 1
+                            FROM team_zones tz
+                            JOIN zones z
+                                ON z.id = tz.zone_id
+                            JOIN locations l
+                                ON l.id = z.location_id
+                            WHERE tz.team_id = t.id
+                              AND l.organization_id = ?
+                              AND LOWER(
+                                  COALESCE(z.name, '')
+                              ) LIKE ?
+                        )
+                  )
+
+                ORDER BY
+                    CASE
+                        WHEN LOWER(t.name) = ?
+                            THEN 0
+                        WHEN LOWER(t.name) LIKE ?
+                            THEN 1
+                        ELSE 2
+                    END,
+                    LOWER(t.name)
+
+                LIMIT ?
+                """,
+                (
+                    organization_id,
+
+                    search_value,
+                    search_value,
+
+                    organization_id,
+                    search_value,
+
+                    organization_id,
+                    search_value,
+
+                    organization_id,
+                    search_value,
+
+                    organization_id,
+                    search_value,
+
+                    query_text.lower(),
+                    f"{query_text.lower()}%",
+
+                    limit
+                )
+            ).fetchall()
+        )
+
+        return jsonify(rows)
+
+    finally:
+        conn.close()
+
+# ============================================================
+# ADMIN TEAM DETAIL
+# ============================================================
+
+@app.route(
+    "/api/admin/teams/<team_id>",
+    methods=["GET"]
+)
+@jwt_required()
+@require_roles("admin")
+def get_admin_team_detail(team_id):
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(error="User not found"), 404
+
+    if not require_account_status(admin):
+        return jsonify(
+            error="Account is not active"
+        ), 403
+
+    organization_id = admin.get(
+        "organization_id"
+    )
+
+    if not organization_id:
+        return jsonify(
+            error="Administrator has no organization"
+        ), 400
+
+    team_id = str(team_id).strip()
+
+    conn = get_db()
+
+    try:
+
+        team = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                description,
+                organization_id,
+                created_at
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not team:
+            return jsonify(
+                error="Team not found"
+            ), 404
+
+        team = row_to_dict(team)
+
+        supervisors = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.phone,
+                    u.employee_id,
+                    u.role,
+                    u.is_active,
+                    u.account_status,
+                    u.created_at
+                FROM team_supervisors ts
+                JOIN users u
+                    ON u.id = ts.user_id
+                WHERE ts.team_id = ?
+                  AND u.organization_id = ?
+                  AND u.role = 'supervisor'
+                ORDER BY u.name
+                """,
+                (
+                    team_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+        employees = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    u.id,
+                    u.name,
+                    u.email,
+                    u.phone,
+                    u.employee_id,
+                    u.role,
+                    u.is_active,
+                    u.account_status,
+                    u.created_at
+                FROM team_members tm
+                JOIN users u
+                    ON u.id = tm.user_id
+                WHERE tm.team_id = ?
+                  AND u.organization_id = ?
+                  AND u.role = 'employee'
+                ORDER BY u.name
+                """,
+                (
+                    team_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+        locations = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    l.*
+                FROM team_locations tl
+                JOIN locations l
+                    ON l.id = tl.location_id
+                WHERE tl.team_id = ?
+                  AND l.organization_id = ?
+                ORDER BY l.name
+                """,
+                (
+                    team_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+        zones = rows_to_list(
+            conn.execute(
+                """
+                SELECT
+                    z.*,
+                    l.name AS location_name
+                FROM team_zones tz
+                JOIN zones z
+                    ON z.id = tz.zone_id
+                JOIN locations l
+                    ON l.id = z.location_id
+                WHERE tz.team_id = ?
+                  AND l.organization_id = ?
+                ORDER BY z.name
+                """,
+                (
+                    team_id,
+                    organization_id
+                )
+            ).fetchall()
+        )
+
+        return jsonify(
+            team=team,
+            supervisors=supervisors,
+            employees=employees,
+            locations=locations,
+            zones=zones
+        )
+
+    finally:
+        conn.close()
 # ─── locations ────────────────────────────────────────────────────────────────
 @app.route("/api/locations", methods=["GET"])
 @jwt_required()
