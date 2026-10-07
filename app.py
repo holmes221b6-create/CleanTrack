@@ -22,7 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from database import get_db, init_db
 from io import BytesIO
-from reportlab.platypus import SimpleDocTemplate, Paragraph
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 load_dotenv("back.env")
 resend.api_key = os.getenv("RESEND_API_KEY")
@@ -2007,6 +2007,413 @@ def create_team():
 # ============================================================
 # ADMIN TEAM SEARCH
 # ============================================================
+@app.route(
+    "/api/admin/teams/<team_id>",
+    methods=["PUT"]
+)
+@jwt_required()
+@require_roles("admin")
+def update_admin_team(team_id):
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(
+            error="User not found"
+        ), 404
+
+    if not require_account_status(admin):
+        return jsonify(
+            error="Account is not active.",
+            account_status=admin.get("account_status")
+        ), 403
+
+    organization_id = admin.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="Administrator has no organization"
+        ), 403
+
+    data = request.get_json() or {}
+
+    name = (
+        data.get("name") or ""
+    ).strip()
+
+    description = (
+        data.get("description") or ""
+    ).strip()
+
+    if not name:
+        return jsonify(
+            error="Team name is required."
+        ), 400
+
+    if not description:
+        description = None
+
+    conn = get_db()
+
+    try:
+
+        team = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                description,
+                organization_id,
+                created_at
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not team:
+            return jsonify(
+                error="Team not found"
+            ), 404
+
+        duplicate = conn.execute(
+            """
+            SELECT id
+            FROM teams
+            WHERE organization_id = ?
+              AND LOWER(name) = LOWER(?)
+              AND id != ?
+            """,
+            (
+                organization_id,
+                name,
+                team_id
+            )
+        ).fetchone()
+
+        if duplicate:
+            return jsonify(
+                error="A team with this name already exists."
+            ), 409
+
+        conn.execute(
+            """
+            UPDATE teams
+            SET name = ?,
+                description = ?
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                name,
+                description,
+                team_id,
+                organization_id
+            )
+        )
+
+        conn.commit()
+
+        updated = conn.execute(
+            """
+            SELECT
+                id,
+                name,
+                description,
+                organization_id,
+                created_at
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        return jsonify(
+            team=row_to_dict(updated)
+        ), 200
+
+    except Exception as error:
+
+        conn.rollback()
+
+        return jsonify(
+            error=str(error)
+        ), 500
+
+    finally:
+
+        conn.close()
+
+
+@app.route(
+    "/api/admin/teams/<team_id>/people",
+    methods=["PUT"]
+)
+@jwt_required()
+@require_roles("admin")
+def update_admin_team_people(team_id):
+
+    admin = get_current_user()
+
+    if not admin:
+        return jsonify(
+            error="User not found"
+        ), 404
+
+    if not require_account_status(admin):
+        return jsonify(
+            error="Account is not active.",
+            account_status=admin.get("account_status")
+        ), 403
+
+    organization_id = admin.get("organization_id")
+
+    if not organization_id:
+        return jsonify(
+            error="Administrator has no organization"
+        ), 403
+
+    data = request.get_json() or {}
+
+    supervisor_ids = data.get(
+        "supervisor_ids",
+        []
+    )
+
+    employee_ids = data.get(
+        "employee_ids",
+        []
+    )
+
+    if not isinstance(supervisor_ids, list):
+        return jsonify(
+            error="supervisor_ids must be an array."
+        ), 400
+
+    if not isinstance(employee_ids, list):
+        return jsonify(
+            error="employee_ids must be an array."
+        ), 400
+
+    supervisor_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in supervisor_ids
+            if str(value).strip()
+        )
+    )
+
+    employee_ids = list(
+        dict.fromkeys(
+            str(value).strip()
+            for value in employee_ids
+            if str(value).strip()
+        )
+    )
+
+    overlapping_ids = (
+        set(supervisor_ids)
+        & set(employee_ids)
+    )
+
+    if overlapping_ids:
+        return jsonify(
+            error=(
+                "A user cannot be both a supervisor "
+                "and an employee on the same team."
+            )
+        ), 400
+
+    conn = get_db()
+
+    try:
+
+        team = conn.execute(
+            """
+            SELECT id
+            FROM teams
+            WHERE id = ?
+              AND organization_id = ?
+            """,
+            (
+                team_id,
+                organization_id
+            )
+        ).fetchone()
+
+        if not team:
+            return jsonify(
+                error="Team not found"
+            ), 404
+
+        all_ids = [
+            *supervisor_ids,
+            *employee_ids
+        ]
+
+        users = []
+
+        if all_ids:
+
+            placeholders = ",".join(
+                ["?"] * len(all_ids)
+            )
+
+            users = conn.execute(
+                f"""
+                SELECT
+                    id,
+                    role,
+                    is_active,
+                    account_status
+                FROM users
+                WHERE organization_id = ?
+                  AND id IN ({placeholders})
+                """,
+                (
+                    organization_id,
+                    *all_ids
+                )
+            ).fetchall()
+
+        found_ids = {
+            str(row["id"])
+            for row in users
+        }
+
+        missing_ids = [
+            user_id
+            for user_id in all_ids
+            if user_id not in found_ids
+        ]
+
+        if missing_ids:
+            return jsonify(
+                error=(
+                    "One or more selected users do not "
+                    "belong to your organization."
+                )
+            ), 400
+
+        users_by_id = {
+            str(row["id"]): row
+            for row in users
+        }
+
+        invalid_supervisors = [
+            user_id
+            for user_id in supervisor_ids
+            if users_by_id[user_id]["role"] != "supervisor"
+        ]
+
+        if invalid_supervisors:
+            return jsonify(
+                error=(
+                    "Only supervisor accounts can be "
+                    "assigned as team supervisors."
+                )
+            ), 400
+
+        invalid_employees = [
+            user_id
+            for user_id in employee_ids
+            if users_by_id[user_id]["role"] != "employee"
+        ]
+
+        if invalid_employees:
+            return jsonify(
+                error=(
+                    "Only employee accounts can be "
+                    "assigned as team employees."
+                )
+            ), 400
+
+        conn.execute("BEGIN")
+
+        conn.execute(
+            """
+            DELETE FROM team_supervisors
+            WHERE team_id = ?
+            """,
+            (
+                team_id,
+            )
+        )
+
+        conn.execute(
+            """
+            DELETE FROM team_members
+            WHERE team_id = ?
+            """,
+            (
+                team_id,
+            )
+        )
+
+        for user_id in supervisor_ids:
+
+            conn.execute(
+                """
+                INSERT INTO team_supervisors (
+                    id,
+                    team_id,
+                    user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    team_id,
+                    user_id
+                )
+            )
+
+        for user_id in employee_ids:
+
+            conn.execute(
+                """
+                INSERT INTO team_members (
+                    id,
+                    team_id,
+                    user_id
+                )
+                VALUES (?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    team_id,
+                    user_id
+                )
+            )
+
+        conn.commit()
+
+        return jsonify(
+            message="Team people updated successfully.",
+            team_id=team_id,
+            supervisor_ids=supervisor_ids,
+            employee_ids=employee_ids
+        ), 200
+
+    except Exception as error:
+
+        conn.rollback()
+
+        return jsonify(
+            error=str(error)
+        ), 500
+
+    finally:
+
+        conn.close()
 
 @app.route(
     "/api/admin/teams/search",
@@ -8250,27 +8657,42 @@ def analytics_kpis():
 # PDF REPORTS — ORGANIZATION / TEAM / EMPLOYEE SCOPED
 # ============================================================
 
-@app.route("/api/reports/pdf")
+@app.route(
+    "/api/reports/pdf",
+    methods=["GET"]
+)
 @jwt_required()
 def export_pdf():
+
     user = get_current_user()
 
     if not user:
-        return jsonify(error="User not found"), 404
+        return jsonify(
+            error="User not found"
+        ), 404
 
     if not require_account_status(user):
-        return jsonify(error="Account is not active"), 403
+        return jsonify(
+            error="Account is not active"
+        ), 403
 
-    uid = user["id"]
-    role = user["role"]
+    uid = user.get("id")
+    role = user.get("role")
     org_id = user.get("organization_id")
 
     if not org_id:
-        return jsonify(error="Organization not configured"), 403
+        return jsonify(
+            error="Organization not configured"
+        ), 403
 
     conn = get_db()
 
     try:
+
+        # -----------------------------------------------------
+        # Determine report scope
+        # -----------------------------------------------------
+
         if role == "admin":
 
             scope = """
@@ -8281,9 +8703,13 @@ def export_pdf():
                 )
             """
 
-            params = [org_id]
+            params = [
+                org_id
+            ]
 
-            title = "CleanTrack Organization Report"
+            title = (
+                "CleanTrack Organization Report"
+            )
 
         elif role == "supervisor":
 
@@ -8298,9 +8724,13 @@ def export_pdf():
                 )
             """
 
-            params = [uid]
+            params = [
+                uid
+            ]
 
-            title = "CleanTrack Team Report"
+            title = (
+                "CleanTrack Team Report"
+            )
 
         elif role == "employee":
 
@@ -8313,39 +8743,55 @@ def export_pdf():
                 )
             """
 
-            params = [uid, org_id]
+            params = [
+                uid,
+                org_id
+            ]
 
-            title = "CleanTrack Personal Report"
+            title = (
+                "CleanTrack Personal Report"
+            )
 
         else:
-            return jsonify(error="Invalid role"), 403
+
+            return jsonify(
+                error="Invalid role"
+            ), 403
+
 
         # -----------------------------------------------------
         # Task statistics
         # -----------------------------------------------------
 
-        stats = conn.execute(f"""
+        stats = conn.execute(
+            f"""
             SELECT
                 COUNT(*) AS total,
 
                 SUM(
                     CASE
                         WHEN t.status = 'completed'
-                        THEN 1 ELSE 0
+                        THEN 1
+                        ELSE 0
                     END
                 ) AS completed,
 
                 SUM(
                     CASE
                         WHEN t.status = 'missed'
-                        THEN 1 ELSE 0
+                        THEN 1
+                        ELSE 0
                     END
                 ) AS missed,
 
                 SUM(
                     CASE
-                        WHEN t.status IN ('pending', 'in-progress')
-                        THEN 1 ELSE 0
+                        WHEN t.status IN (
+                            'pending',
+                            'in-progress'
+                        )
+                        THEN 1
+                        ELSE 0
                     END
                 ) AS pending,
 
@@ -8362,51 +8808,87 @@ def export_pdf():
                 ON z.id = t.zone_id
 
             WHERE {scope}
-        """, params).fetchone()
+            """,
+            params
+        ).fetchone()
 
-        total = stats["total"] or 0
-        completed = stats["completed"] or 0
-        missed = stats["missed"] or 0
-        pending = stats["pending"] or 0
-        avg_duration = stats["avg_duration"]
+
+        total = (
+            stats["total"]
+            or 0
+        )
+
+        completed = (
+            stats["completed"]
+            or 0
+        )
+
+        missed = (
+            stats["missed"]
+            or 0
+        )
+
+        pending = (
+            stats["pending"]
+            or 0
+        )
+
+        avg_duration = (
+            stats["avg_duration"]
+        )
+
 
         compliance = (
-            round((completed / total) * 100, 1)
+            round(
+                (
+                    completed /
+                    total
+                ) * 100,
+                1
+            )
             if total
             else 0
         )
 
-        # -----------------------------------------------------
-        # Recent task breakdown
-        # -----------------------------------------------------
-
-        recent_tasks = rows_to_list(conn.execute(f"""
-            SELECT
-                t.id,
-                t.status,
-                t.scheduled_at,
-                t.completed_at,
-                t.duration_minutes,
-                z.name AS zone_name,
-                u.name AS employee_name
-
-            FROM tasks t
-
-            JOIN zones z
-                ON z.id = t.zone_id
-
-            LEFT JOIN users u
-                ON u.id = t.assigned_to
-
-            WHERE {scope}
-
-            ORDER BY t.scheduled_at DESC
-
-            LIMIT 20
-        """, params).fetchall())
 
         # -----------------------------------------------------
-        # Generate PDF
+        # Recent tasks
+        # -----------------------------------------------------
+
+        recent_tasks = rows_to_list(
+            conn.execute(
+                f"""
+                SELECT
+                    t.id,
+                    t.status,
+                    t.scheduled_at,
+                    t.completed_at,
+                    t.duration_minutes,
+                    z.name AS zone_name,
+                    u.name AS employee_name
+
+                FROM tasks t
+
+                JOIN zones z
+                    ON z.id = t.zone_id
+
+                LEFT JOIN users u
+                    ON u.id = t.assigned_to
+
+                WHERE {scope}
+
+                ORDER BY
+                    t.scheduled_at DESC
+
+                LIMIT 20
+                """,
+                params
+            ).fetchall()
+        )
+
+
+        # -----------------------------------------------------
+        # Create PDF
         # -----------------------------------------------------
 
         buffer = BytesIO()
@@ -8421,93 +8903,172 @@ def export_pdf():
 
         styles = getSampleStyleSheet()
 
-        content = [
+
+        content = []
+
+
+        content.append(
             Paragraph(
                 title,
                 styles["Title"]
-            ),
+            )
+        )
 
-            Spacer(1, 15),
+        content.append(
+            Spacer(
+                1,
+                15
+            )
+        )
 
+        content.append(
             Paragraph(
-                f"Generated for: {user['name']}",
+                f"Generated for: "
+                f"{user.get('name') or 'User'}",
                 styles["Normal"]
-            ),
+            )
+        )
 
-            Spacer(1, 15),
+        content.append(
+            Spacer(
+                1,
+                15
+            )
+        )
 
+        content.append(
             Paragraph(
                 f"Total Tasks: {total}",
                 styles["Normal"]
-            ),
+            )
+        )
 
+        content.append(
             Paragraph(
                 f"Completed Tasks: {completed}",
                 styles["Normal"]
-            ),
+            )
+        )
 
+        content.append(
             Paragraph(
                 f"Missed Tasks: {missed}",
                 styles["Normal"]
-            ),
+            )
+        )
 
+        content.append(
             Paragraph(
                 f"Pending Tasks: {pending}",
                 styles["Normal"]
-            ),
+            )
+        )
 
+        content.append(
             Paragraph(
                 f"Compliance: {compliance}%",
                 styles["Normal"]
-            ),
+            )
+        )
 
+        average_duration_text = (
+            f"{round(avg_duration)} minutes"
+            if avg_duration is not None
+            else "N/A"
+        )
+
+        content.append(
             Paragraph(
                 f"Average Cleaning Duration: "
-                f"{round(avg_duration) if avg_duration is not None else 'N/A'} minutes",
+                f"{average_duration_text}",
                 styles["Normal"]
-            ),
+            )
+        )
 
-            Spacer(1, 20),
+        content.append(
+            Spacer(
+                1,
+                20
+            )
+        )
 
+        content.append(
             Paragraph(
                 "Recent Tasks",
                 styles["Heading2"]
-            ),
+            )
+        )
 
-            Spacer(1, 10)
-        ]
+        content.append(
+            Spacer(
+                1,
+                10
+            )
+        )
+
 
         # -----------------------------------------------------
         # Add recent task rows
         # -----------------------------------------------------
 
-        for task in recent_tasks:
+        if recent_tasks:
 
-            employee_name = (
-                task["employee_name"]
-                if task["employee_name"]
-                else "Unassigned"
-            )
+            for task in recent_tasks:
 
-            scheduled = (
-                task["scheduled_at"]
-                if task["scheduled_at"]
-                else "N/A"
-            )
+                employee_name = (
+                    task["employee_name"]
+                    if task["employee_name"]
+                    else "Unassigned"
+                )
+
+                zone_name = (
+                    task["zone_name"]
+                    if task["zone_name"]
+                    else "Unknown Zone"
+                )
+
+                scheduled = (
+                    task["scheduled_at"]
+                    if task["scheduled_at"]
+                    else "N/A"
+                )
+
+                status = (
+                    task["status"]
+                    if task["status"]
+                    else "Unknown"
+                )
+
+                content.append(
+                    Paragraph(
+                        f"{zone_name} — "
+                        f"{employee_name} — "
+                        f"{status} — "
+                        f"{scheduled}",
+                        styles["Normal"]
+                    )
+                )
+
+        else:
 
             content.append(
                 Paragraph(
-                    f"{task['zone_name']} — "
-                    f"{employee_name} — "
-                    f"{task['status']} — "
-                    f"{scheduled}",
+                    "No recent tasks found.",
                     styles["Normal"]
                 )
             )
 
-        doc.build(content)
+
+        # -----------------------------------------------------
+        # Build PDF
+        # -----------------------------------------------------
+
+        doc.build(
+            content
+        )
 
         buffer.seek(0)
+
 
         return send_file(
             buffer,
@@ -8516,7 +9077,9 @@ def export_pdf():
             mimetype="application/pdf"
         )
 
+
     finally:
+
         conn.close()
 # ─── uploads ─────────────────────────────────────────────────────────────────
 
