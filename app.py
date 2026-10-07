@@ -7185,7 +7185,6 @@ def mark_all_read():
     return jsonify(message="Alerts marked read")
 
 #home page---------------------------------------------------------------------
-
 @app.route("/api/home/admin")
 @jwt_required()
 def admin_home():
@@ -7193,95 +7192,101 @@ def admin_home():
     user = get_current_user()
 
     if not user:
-        return jsonify(error="User not found"), 404
+        return jsonify(
+            error="User not found"
+        ), 404
 
     if not require_account_status(user):
-        return jsonify(error="Account is not active"), 403
+        return jsonify(
+            error="Account is not active"
+        ), 403
 
     if user["role"] != "admin":
-        return jsonify(error="Admin access required"), 403
+        return jsonify(
+            error="Admin access required"
+        ), 403
 
     org_id = user.get("organization_id")
 
     if not org_id:
-        return jsonify(error="Organization not configured"), 403
+        return jsonify(
+            error="Organization not configured"
+        ), 403
 
     conn = get_db()
 
     try:
 
-        organization = conn.execute(
+        home = conn.execute(
             """
             SELECT
-                id,
-                name,
-                organization_code
-            FROM organizations
-            WHERE id = ?
+                o.id,
+                o.name,
+                o.organization_code,
+
+                (
+                    SELECT COUNT(*)
+                    FROM users u
+                    WHERE u.organization_id = o.id
+                      AND u.role IN (
+                          'employee',
+                          'supervisor'
+                      )
+                      AND u.is_active = 1
+                ) AS staff_count,
+
+                (
+                    SELECT COUNT(*)
+                    FROM teams t
+                    WHERE t.organization_id = o.id
+                ) AS team_count,
+
+                (
+                    SELECT COUNT(*)
+                    FROM locations l
+                    WHERE l.organization_id = o.id
+                ) AS location_count,
+
+                (
+                    SELECT COUNT(*)
+                    FROM zones z
+                    JOIN locations l2
+                        ON l2.id = z.location_id
+                    WHERE l2.organization_id = o.id
+                ) AS zone_count
+
+            FROM organizations o
+            WHERE o.id = ?
             """,
             (org_id,)
         ).fetchone()
 
-        if not organization:
-            return jsonify(error="Organization not found"), 404
-
-        staff = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM users
-            WHERE organization_id = ?
-              AND role IN ('employee', 'supervisor')
-              AND is_active = 1
-            """,
-            (org_id,)
-        ).fetchone()[0]
-
-        teams = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM teams
-            WHERE organization_id = ?
-            """,
-            (org_id,)
-        ).fetchone()[0]
-
-        locations = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM locations
-            WHERE organization_id = ?
-            """,
-            (org_id,)
-        ).fetchone()[0]
-
-        zones = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM zones z
-            JOIN locations l
-                ON l.id = z.location_id
-            WHERE l.organization_id = ?
-            """,
-            (org_id,)
-        ).fetchone()[0]
+        if not home:
+            return jsonify(
+                error="Organization not found"
+            ), 404
 
         return jsonify(
             organization={
-                "id": organization["id"],
-                "name": organization["name"],
-                "organization_code": organization["organization_code"],
+                "id": home["id"],
+                "name": home["name"],
+                "organization_code":
+                    home["organization_code"]
             },
             counts={
-                "staff": staff or 0,
-                "teams": teams or 0,
-                "locations": locations or 0,
-                "zones": zones or 0,
+                "staff":
+                    home["staff_count"] or 0,
+                "teams":
+                    home["team_count"] or 0,
+                "locations":
+                    home["location_count"] or 0,
+                "zones":
+                    home["zone_count"] or 0
             }
-        )
+        ), 200
 
     finally:
-        conn.close()
-        
+        conn.close()        
      # ============================================================
 # ADMIN DASHBOARD — ADMIN ONLY
 # ============================================================
@@ -9134,12 +9139,57 @@ scheduler.add_job(check_overdue, "interval", minutes=15)
 
 # ─── run ──────────────────────────────────────────────────────────────────────
 
-
 init_db()
 
+
 if __name__ == "__main__":
-    from seed import seed
-    seed()
-    scheduler.start()
-    print("\n🧹 CleanTrack API  →  http://127.0.0.1:5000")
-    app.run(debug=True, port=5000, use_reloader=False)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            "5000"
+        )
+    )
+
+    host = os.environ.get(
+        "HOST",
+        "0.0.0.0"
+    )
+
+
+    # Run seed only when explicitly requested.
+    if os.environ.get(
+        "CLEANTRACK_SEED",
+        "0"
+    ) == "1":
+
+        from seed import seed
+
+        seed()
+
+
+    # Start background jobs only for the local
+    # direct Python process.
+    try:
+
+        scheduler.start()
+
+    except Exception as error:
+
+        print(
+            f"Scheduler startup warning: {error}"
+        )
+
+
+    print(
+        f"\nCleanTrack API -> "
+        f"http://{host}:{port}"
+    )
+
+
+    app.run(
+        host=host,
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
