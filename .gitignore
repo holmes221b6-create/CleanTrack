@@ -3,3 +3,17 @@ back.env.txt
 .env
 gmail_credentials.json
 token.json
+
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Local databases
+*.db
+instance/
+
+# Virtual environments
+venv/
+.venv/
+back.env
+uploads/

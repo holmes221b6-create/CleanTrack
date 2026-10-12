@@ -1,0 +1,118 @@
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import verify_jwt_in_request
+
+from app.extensions import db
+from app.models.membership_request import MembershipRequest
+from app.models.user import User
+from app.services.permissions import get_current_user, roles_required
+
+
+membership_bp = Blueprint(
+    "membership",
+    __name__,
+    url_prefix="/api/membership",
+)
+
+
+@membership_bp.get("/requests")
+@roles_required("Admin")
+def list_membership_requests():
+    admin = get_current_user()
+
+    requests_list = (
+        MembershipRequest.query
+        .filter_by(
+            organization_id=admin.organization_id,
+            status="pending",
+        )
+        .order_by(MembershipRequest.created_at.asc())
+        .all()
+    )
+
+    return jsonify({
+        "membership_requests": [
+            {
+                **membership_request.to_dict(),
+                "applicant": (
+                    membership_request.user.to_dict()
+                    if membership_request.user
+                    else None
+                ),
+            }
+            for membership_request in requests_list
+        ]
+    }), 200
+
+
+@membership_bp.post("/requests/<int:request_id>/review")
+@roles_required("Admin")
+def review_membership_request(request_id):
+    admin = get_current_user()
+    data = request.get_json(silent=True) or {}
+
+    decision = data.get("decision", "").strip().lower()
+    review_message = data.get("review_message", "").strip()
+
+    if decision not in {"approve", "reject"}:
+        return jsonify({
+            "error": "Decision must be 'approve' or 'reject'."
+        }), 400
+
+    membership_request = db.session.get(
+        MembershipRequest,
+        request_id,
+    )
+
+    if (
+        membership_request is None
+        or membership_request.organization_id != admin.organization_id
+    ):
+        return jsonify({
+            "error": "Membership request not found."
+        }), 404
+
+    if membership_request.status != "pending":
+        return jsonify({
+            "error": "This request has already been reviewed."
+        }), 409
+
+    applicant = db.session.get(User, membership_request.user_id)
+
+    if applicant is None:
+        return jsonify({
+            "error": "Applicant account not found."
+        }), 404
+
+    if applicant.account_status != "pending":
+        return jsonify({
+            "error": "Applicant account is not pending."
+        }), 409
+
+    if decision == "approve":
+        applicant.account_status = "active"
+        membership_request.status = "approved"
+    else:
+        applicant.account_status = "rejected"
+        membership_request.status = "rejected"
+
+    membership_request.review_message = review_message or None
+    membership_request.reviewed_by_id = admin.id
+    membership_request.reviewed_at = db.func.now()
+
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "error": "Membership review could not be saved."
+        }), 500
+
+    return jsonify({
+        "message": (
+            "Membership request approved."
+            if decision == "approve"
+            else "Membership request rejected."
+        ),
+        "membership_request": membership_request.to_dict(),
+        "user": applicant.to_dict(),
+    }), 200
