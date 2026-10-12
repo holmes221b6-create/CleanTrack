@@ -192,70 +192,343 @@ def simulate_ai_score():
     else:             feedback = "Needs re-cleaning — multiple areas below standard."
     return score, feedback
 
-# ─── auth ────────────────────────────────────────────────────────────────────
+# ─── authentication and organization workspace ────────────────────────────────
+
+def _generate_organization_code(conn):
+    for _ in range(30):
+        code = "CT-" + uuid.uuid4().hex[:8].upper()
+        if not conn.execute("SELECT 1 FROM organizations WHERE code=?", (code,)).fetchone():
+            return code
+    raise RuntimeError("Could not generate a unique organization code.")
+
+def _current_user_organization(conn, user_id):
+    row = conn.execute(
+        "SELECT organization_id FROM users WHERE id=?", (user_id,)
+    ).fetchone()
+    return row["organization_id"] if row else None
+
+def _organization_payload(conn, org_id):
+    organization = row_to_dict(conn.execute(
+        "SELECT id, name, code, description, created_at FROM organizations WHERE id=?",
+        (org_id,)
+    ).fetchone())
+    if not organization:
+        return None
+    organization["stats"] = {
+        "staff": conn.execute(
+            """SELECT COUNT(*) FROM users
+               WHERE organization_id=? AND membership_status='approved'
+                 AND is_active=1 AND role IN ('supervisor','employee','staff')""",
+            (org_id,)
+        ).fetchone()[0],
+        "teams": conn.execute(
+            "SELECT COUNT(*) FROM teams WHERE organization_id=? AND status!='archived'",
+            (org_id,)
+        ).fetchone()[0],
+        "locations": conn.execute(
+            "SELECT COUNT(*) FROM locations WHERE organization_id=?",
+            (org_id,)
+        ).fetchone()[0],
+        "zones": conn.execute(
+            """SELECT COUNT(*) FROM zones z JOIN locations l ON l.id=z.location_id
+               WHERE l.organization_id=?""",
+            (org_id,)
+        ).fetchone()[0]
+    }
+    return organization
+
+def _attach_legacy_records_to_first_org(conn, org_id):
+    # Older CleanTrack databases were single-workspace. Attach their unclaimed
+    # records only when this is the first organization, preserving later isolation.
+    total = conn.execute("SELECT COUNT(*) FROM organizations").fetchone()[0]
+    if total == 1:
+        conn.execute(
+            "UPDATE users SET organization_id=? WHERE organization_id IS NULL",
+            (org_id,)
+        )
+        conn.execute(
+            "UPDATE locations SET organization_id=? WHERE organization_id IS NULL",
+            (org_id,)
+        )
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     data = request.get_json() or {}
-    email = data.get("email", "").strip()
-    password = data.get("password", "")
+    email = str(data.get("email") or "").strip().lower()
+    password = str(data.get("password") or "")
     if not email or not password:
         return jsonify(error="Email and password required"), 400
+
     conn = get_db()
     user = row_to_dict(conn.execute(
-        "SELECT * FROM users WHERE email=? AND is_active=1", (email,)
+        "SELECT * FROM users WHERE lower(email)=?", (email,)
     ).fetchone())
-    conn.close()
     if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+        conn.close()
         return jsonify(error="Invalid credentials"), 401
-    token = create_access_token(
-        identity=user["id"],
-        additional_claims={"role": user["role"], "name": user["name"], "email": user["email"], "location_id": user.get("location_id")}
-    )
-    return jsonify(token=token, user={k: user[k] for k in ("id","name","email","role","location_id")})
+
+    if user.get("membership_status") == "pending":
+        conn.close()
+        return jsonify(error="Your request to join this organization is waiting for Admin approval."), 403
+    if not user.get("is_active", 1):
+        conn.close()
+        return jsonify(error="This account is inactive. Contact your organization Admin."), 403
+
+    organization_name = None
+    if user.get("organization_id"):
+        org = conn.execute(
+            "SELECT name FROM organizations WHERE id=?", (user["organization_id"],)
+        ).fetchone()
+        organization_name = org["name"] if org else None
+    conn.close()
+
+    claims = {
+        "role": user["role"],
+        "name": user["name"],
+        "email": user["email"],
+        "location_id": user.get("location_id"),
+        "organization_id": user.get("organization_id"),
+        "membership_status": user.get("membership_status", "approved")
+    }
+    token = create_access_token(identity=user["id"], additional_claims=claims)
+    safe_user = {
+        "id": user["id"], "name": user["name"], "email": user["email"],
+        "role": user["role"], "location_id": user.get("location_id"),
+        "organization_id": user.get("organization_id"),
+        "organization_name": organization_name,
+        "membership_status": user.get("membership_status", "approved")
+    }
+    return jsonify(token=token, user=safe_user)
 
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     data = request.get_json() or {}
-    name = data.get("name") or data.get("full_name")
-    email = data.get("email")
-    password = data.get("password")
+    name = str(data.get("name") or data.get("full_name") or "").strip()
+    email = str(data.get("email") or "").strip().lower()
+    password = str(data.get("password") or "")
+    role = str(data.get("role") or "").strip().lower()
+    organization_name = str(data.get("organization_name") or "").strip()
+    organization_code = str(data.get("organization_code") or "").strip().upper()
+
     if not name or not email or not password:
-        return jsonify(error="name, email, password required"), 400
+        return jsonify(error="Name, email, and password are required."), 400
+    if len(password) < 10:
+        return jsonify(error="Use a password with at least 10 characters."), 400
+    if role not in ("admin", "supervisor", "employee"):
+        return jsonify(error="Choose Admin, Supervisor, or Employee."), 400
+    if role == "admin" and len(organization_name) < 2:
+        return jsonify(error="Enter your organization name."), 400
+    if role in ("supervisor", "employee") and not organization_code:
+        return jsonify(error="Enter the organization code provided by your Admin."), 400
+
     conn = get_db()
-    if conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone():
+    if conn.execute("SELECT id FROM users WHERE lower(email)=?", (email,)).fetchone():
         conn.close()
-        return jsonify(error="Email already registered"), 409
+        return jsonify(error="Email already registered."), 409
+
+    org = None
+    if role in ("supervisor", "employee"):
+        org = row_to_dict(conn.execute(
+            "SELECT id, name FROM organizations WHERE upper(code)=?",
+            (organization_code,)
+        ).fetchone())
+        if not org:
+            conn.close()
+            return jsonify(error="That organization code was not found. Check the code with the Admin."), 404
+
     uid = str(uuid.uuid4())
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    pending = role in ("supervisor", "employee")
     conn.execute("""
-    INSERT INTO users
-    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-""", (
-    uid,
-    name,
-    email,
-    data.get("notification_email"),
-    data.get("phone"),
-    hashed,
-    data.get("role", "staff"),
-    data.get("location_id"),
-    1
-))
-    conn.commit(); conn.close()
-    return jsonify(id=uid), 201
+        INSERT INTO users
+          (id, name, email, password_hash, role, organization_id,
+           membership_status, is_active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        uid, name, email, hashed, role,
+        org["id"] if org else None,
+        "pending" if pending else "approved",
+        0 if pending else 1
+    ))
+
+    if role == "admin":
+        org_id = str(uuid.uuid4())
+        code = _generate_organization_code(conn)
+        conn.execute("""
+            INSERT INTO organizations (id, name, code, description, created_by)
+            VALUES (?, ?, ?, ?, ?)
+        """, (org_id, organization_name, code, str(data.get("description") or "").strip(), uid))
+        conn.execute("UPDATE users SET organization_id=? WHERE id=?", (org_id, uid))
+        _attach_legacy_records_to_first_org(conn, org_id)
+        conn.commit()
+        user = {
+            "id": uid, "name": name, "email": email, "role": "admin",
+            "organization_id": org_id, "organization_name": organization_name,
+            "membership_status": "approved"
+        }
+        token = create_access_token(
+            identity=uid,
+            additional_claims={
+                "role": "admin", "name": name, "email": email,
+                "organization_id": org_id, "membership_status": "approved"
+            }
+        )
+        conn.close()
+        return jsonify(
+            token=token, user=user,
+            organization={"id": org_id, "name": organization_name, "code": code},
+            message="Organization created. Share its code with people who need to request access."
+        ), 201
+
+    conn.commit()
+    conn.close()
+    return jsonify(
+        user={"id": uid, "name": name, "email": email, "role": role,
+              "organization_id": org["id"], "organization_name": org["name"],
+              "membership_status": "pending"},
+        membership_status="pending",
+        message="Your request was sent to the organization Admin. You can sign in after it is approved."
+    ), 201
 
 @app.route("/api/auth/me")
 @jwt_required()
 def me():
     uid = get_jwt_identity()
     conn = get_db()
+    user = row_to_dict(conn.execute("""
+        SELECT u.id, u.name, u.email, u.phone, u.role, u.location_id,
+               u.organization_id, u.membership_status, u.created_at,
+               o.name AS organization_name
+        FROM users u LEFT JOIN organizations o ON o.id=u.organization_id
+        WHERE u.id=?
+    """, (uid,)).fetchone())
+    conn.close()
+    if not user:
+        return jsonify(error="Account not found."), 404
+    if user.get("membership_status") == "pending" or not user.get("is_active", 1):
+        return jsonify(error="This account does not have active workspace access."), 403
+    return jsonify(user=user)
+
+@app.route("/api/organizations/current", methods=["GET"])
+@require_roles("admin")
+def get_current_organization():
+    uid = get_jwt_identity()
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(organization=None, stats={"staff": 0, "teams": 0, "locations": 0, "zones": 0})
+    organization = _organization_payload(conn, org_id)
+    conn.close()
+    return jsonify(organization=organization, stats=(organization or {}).get("stats", {}))
+
+@app.route("/api/organizations/current", methods=["POST"])
+@require_roles("admin")
+def create_current_organization():
+    uid = get_jwt_identity()
+    data = request.get_json() or {}
+    name = str(data.get("name") or data.get("organization_name") or "").strip()
+    description = str(data.get("description") or "").strip()
+    if len(name) < 2:
+        return jsonify(error="Enter an organization name with at least two characters."), 400
+
+    conn = get_db()
     user = row_to_dict(conn.execute(
-        "SELECT id,name,email,phone,role,location_id,created_at FROM users WHERE id=?", (uid,)
+        "SELECT id, organization_id FROM users WHERE id=?", (uid,)
+    ).fetchone())
+    if not user:
+        conn.close()
+        return jsonify(error="Account not found."), 404
+    if user.get("organization_id"):
+        organization = _organization_payload(conn, user["organization_id"])
+        conn.close()
+        return jsonify(error="Your account already belongs to an organization.", organization=organization), 409
+
+    org_id = str(uuid.uuid4())
+    code = _generate_organization_code(conn)
+    conn.execute("""
+        INSERT INTO organizations (id, name, code, description, created_by)
+        VALUES (?, ?, ?, ?, ?)
+    """, (org_id, name, code, description, uid))
+    conn.execute(
+        "UPDATE users SET organization_id=?, membership_status='approved', is_active=1 WHERE id=?",
+        (org_id, uid)
+    )
+    _attach_legacy_records_to_first_org(conn, org_id)
+    conn.commit()
+    organization = _organization_payload(conn, org_id)
+    conn.close()
+    return jsonify(organization=organization, message="Organization created successfully."), 201
+
+@app.route("/api/organizations/members", methods=["GET"])
+@require_roles("admin")
+def get_organization_members():
+    uid = get_jwt_identity()
+    query = str(request.args.get("q") or "").strip().lower()
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(error="Create your organization before searching its members."), 409
+
+    sql = """
+        SELECT u.id, u.name, u.email, u.phone, u.role, u.location_id,
+               u.is_active, u.membership_status, u.created_at, l.name AS location_name
+        FROM users u LEFT JOIN locations l ON l.id=u.location_id
+        WHERE u.organization_id=? AND u.membership_status='approved' AND u.is_active=1
+    """
+    params = [org_id]
+    if query:
+        sql += " AND (lower(u.name) LIKE ? OR lower(u.email) LIKE ? OR lower(u.role) LIKE ? OR lower(COALESCE(l.name,'')) LIKE ?)"
+        like = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
+        params.extend([like, like, like, like])
+    sql += " ORDER BY u.name COLLATE NOCASE LIMIT 5000"
+    members = rows_to_list(conn.execute(sql, params).fetchall())
+    conn.close()
+    return jsonify(members=members, count=len(members))
+
+@app.route("/api/teams", methods=["GET"])
+@require_roles("admin")
+def get_organization_teams():
+    uid = get_jwt_identity()
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(teams=[])
+    teams = rows_to_list(conn.execute("""
+        SELECT id, organization_id, name, description, status, created_at
+        FROM teams WHERE organization_id=? ORDER BY name COLLATE NOCASE
+    """, (org_id,)).fetchall())
+    conn.close()
+    return jsonify(teams=teams)
+
+@app.route("/api/teams", methods=["POST"])
+@require_roles("admin")
+def create_organization_team():
+    uid = get_jwt_identity()
+    data = request.get_json() or {}
+    name = str(data.get("name") or "").strip()
+    if not name:
+        return jsonify(error="Team name is required."), 400
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(error="Create your organization before adding teams."), 409
+    team_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO teams (id, organization_id, name, description, status) VALUES (?, ?, ?, ?, 'active')",
+        (team_id, org_id, name, str(data.get("description") or "").strip())
+    )
+    conn.commit()
+    team = row_to_dict(conn.execute(
+        "SELECT id, organization_id, name, description, status, created_at FROM teams WHERE id=?",
+        (team_id,)
     ).fetchone())
     conn.close()
-    return jsonify(user)
+    return jsonify(team=team), 201
+
 # ─── locations ────────────────────────────────────────────────────────────────
 
 @app.route("/api/locations", methods=["GET"])
