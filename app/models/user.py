@@ -64,6 +64,11 @@ class User(db.Model):
             "account_status": self.account_status,
             "email_verified": self.email_verified,
             "organization_id": self.organization_id,
+            "organization_name": (
+                self.organization.name
+                if self.organization is not None
+                else None
+            ),
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at
