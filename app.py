@@ -530,7 +530,7 @@ def get_organization_members():
                     / NULLIF(COUNT(*), 0), 1) AS compliance_pct,
                 AVG(CASE WHEN status='completed' THEN duration_minutes END) AS avg_duration
             FROM tasks
-            WHERE DATE(scheduled_at) >= DATE('now', '-' || ? || ' days')
+            WHERE DATE(scheduled_at) BETWEEN DATE('now', '-' || ? || ' days') AND DATE('now')
             GROUP BY assigned_to
         ) p ON p.assigned_to=u.id
         WHERE u.organization_id=?
