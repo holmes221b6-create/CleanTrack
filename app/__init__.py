@@ -25,6 +25,12 @@ def create_app(config_class=Config):
     jwt.init_app(app)
     limiter.init_app(app)
 
+    # Ensure tables exist for a newly provisioned database. This creates
+    # missing tables but does not alter existing tables; use migrations for
+    # future schema changes.
+    with app.app_context():
+        db.create_all()
+
     cors.init_app(
         app,
         resources={r"/api/*": {"origins": app.config["CORS_ORIGINS"]}},
