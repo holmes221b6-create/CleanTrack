@@ -912,12 +912,16 @@ def create_zone():
 
     # Verify the location exists
     location = conn.execute("""
-        SELECT id
+        SELECT id, organization_id
         FROM locations
         WHERE id=?
     """, (d["location_id"],)).fetchone()
 
     if not location:
+        conn.close()
+        return jsonify(error="Location not found"), 404
+
+    if role == "admin" and location["organization_id"] != _current_user_organization(conn, uid):
         conn.close()
         return jsonify(error="Location not found"), 404
 
@@ -944,7 +948,10 @@ def create_zone():
     )
 
     conn.execute(
-        "INSERT INTO zones VALUES (?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)",
+        """INSERT INTO zones
+           (id, location_id, name, floor, type, qr_code,
+            cleaning_interval_minutes, status, last_cleaned_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             zid,
             d["location_id"],
@@ -977,12 +984,16 @@ def update_zone(zid):
     conn = get_db()
 
     zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
+        SELECT z.id, z.location_id, l.organization_id
+        FROM zones z JOIN locations l ON l.id=z.location_id
+        WHERE z.id=?
     """, (zid,)).fetchone()
 
     if not zone:
+        conn.close()
+        return jsonify(error="Zone not found"), 404
+
+    if role == "admin" and zone["organization_id"] != _current_user_organization(conn, uid):
         conn.close()
         return jsonify(error="Zone not found"), 404
 
@@ -1035,12 +1046,16 @@ def delete_zone(zid):
     conn = get_db()
 
     zone = conn.execute("""
-        SELECT id, location_id
-        FROM zones
-        WHERE id=?
+        SELECT z.id, z.location_id, l.organization_id
+        FROM zones z JOIN locations l ON l.id=z.location_id
+        WHERE z.id=?
     """, (zid,)).fetchone()
 
     if not zone:
+        conn.close()
+        return jsonify(error="Zone not found"), 404
+
+    if role == "admin" and zone["organization_id"] != _current_user_organization(conn, uid):
         conn.close()
         return jsonify(error="Zone not found"), 404
 
