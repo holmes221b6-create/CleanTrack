@@ -14,6 +14,7 @@ from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
 from app.routes.operations import operations_bp
+from app.routes.organization import organization_bp
 
 
 def create_app(config_class=Config):
@@ -46,6 +47,7 @@ def create_app(config_class=Config):
     app.register_blueprint(locations_bp)
     app.register_blueprint(zones_bp)
     app.register_blueprint(operations_bp)
+    app.register_blueprint(organization_bp)
 
     @app.get("/api/health")
     def health():
