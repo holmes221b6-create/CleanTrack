@@ -466,28 +466,178 @@ def create_current_organization():
 @require_roles("admin")
 def get_organization_members():
     uid = get_jwt_identity()
-    query = str(request.args.get("q") or "").strip().lower()
+    days = request.args.get("days", "30")
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 30
+    if days not in (7, 30, 90, 365):
+        days = 30
+
     conn = get_db()
     org_id = _current_user_organization(conn, uid)
     if not org_id:
         conn.close()
         return jsonify(error="Create your organization before searching its members."), 409
 
-    sql = """
-        SELECT u.id, u.name, u.email, u.phone, u.role, u.location_id,
-               u.is_active, u.membership_status, u.created_at, l.name AS location_name
-        FROM users u LEFT JOIN locations l ON l.id=u.location_id
-        WHERE u.organization_id=? AND u.membership_status='approved' AND u.is_active=1
-    """
-    params = [org_id]
-    if query:
-        sql += " AND (lower(u.name) LIKE ? OR lower(u.email) LIKE ? OR lower(u.role) LIKE ? OR lower(COALESCE(l.name,'')) LIKE ?)"
-        like = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
-        params.extend([like, like, like, like])
-    sql += " ORDER BY u.name COLLATE NOCASE LIMIT 5000"
-    members = rows_to_list(conn.execute(sql, params).fetchall())
+    # Every field in this directory is derived from this organization's real records.
+    # A person with no eligible task history remains unranked rather than receiving a fabricated score.
+    members = rows_to_list(conn.execute("""
+        SELECT
+            u.id, u.name, u.email, u.phone, u.role, u.location_id,
+            u.is_active, u.membership_status, u.created_at,
+            l.name AS location_name,
+            COALESCE(p.total_tasks, 0) AS total_tasks,
+            COALESCE(p.completed_tasks, 0) AS completed_tasks,
+            COALESCE(p.missed_tasks, 0) AS missed_tasks,
+            p.compliance_pct AS compliance_pct,
+            p.avg_duration AS avg_duration,
+            (
+                SELECT GROUP_CONCAT(tm.team_id)
+                FROM team_members tm
+                JOIN teams t ON t.id=tm.team_id
+                WHERE tm.user_id=u.id AND t.organization_id=u.organization_id
+            ) AS team_ids,
+            (
+                SELECT GROUP_CONCAT(t.name, ' | ')
+                FROM team_members tm
+                JOIN teams t ON t.id=tm.team_id
+                WHERE tm.user_id=u.id AND t.organization_id=u.organization_id
+            ) AS team_names,
+            (
+                SELECT GROUP_CONCAT(sz.zone_id)
+                FROM staff_zones sz
+                JOIN zones z ON z.id=sz.zone_id
+                JOIN locations zl ON zl.id=z.location_id
+                WHERE sz.user_id=u.id AND zl.organization_id=u.organization_id
+            ) AS zone_ids,
+            (
+                SELECT GROUP_CONCAT(z.name, ' | ')
+                FROM staff_zones sz
+                JOIN zones z ON z.id=sz.zone_id
+                JOIN locations zl ON zl.id=z.location_id
+                WHERE sz.user_id=u.id AND zl.organization_id=u.organization_id
+            ) AS zone_names
+        FROM users u
+        LEFT JOIN locations l ON l.id=u.location_id AND l.organization_id=u.organization_id
+        LEFT JOIN (
+            SELECT
+                assigned_to,
+                COUNT(*) AS total_tasks,
+                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_tasks,
+                SUM(CASE WHEN status='missed' THEN 1 ELSE 0 END) AS missed_tasks,
+                ROUND(100.0 * SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)
+                    / NULLIF(COUNT(*), 0), 1) AS compliance_pct,
+                AVG(CASE WHEN status='completed' THEN duration_minutes END) AS avg_duration
+            FROM tasks
+            WHERE DATE(scheduled_at) >= DATE('now', '-' || ? || ' days')
+            GROUP BY assigned_to
+        ) p ON p.assigned_to=u.id
+        WHERE u.organization_id=?
+          AND u.membership_status='approved'
+          AND u.is_active=1
+        ORDER BY u.name COLLATE NOCASE
+        LIMIT 5000
+    """, (days, org_id)).fetchall())
+
+    ranked = [
+        member for member in members
+        if str(member.get("role") or "").lower() in ("staff", "employee")
+        and int(member.get("total_tasks") or 0) > 0
+        and member.get("compliance_pct") is not None
+    ]
+    ranked.sort(key=lambda member: (
+        -float(member.get("compliance_pct") or 0),
+        -int(member.get("completed_tasks") or 0),
+        int(member.get("missed_tasks") or 0),
+        str(member.get("name") or "").casefold()
+    ))
+    rank_by_id = {member["id"]: index + 1 for index, member in enumerate(ranked)}
+    for member in members:
+        member["rank"] = rank_by_id.get(member["id"])
+        member["ranking_period_days"] = days
+        member["team_ids"] = [value for value in str(member.get("team_ids") or "").split(",") if value]
+        member["team_names"] = [value for value in str(member.get("team_names") or "").split(" | ") if value]
+        member["zone_ids"] = [value for value in str(member.get("zone_ids") or "").split(",") if value]
+        member["zone_names"] = [value for value in str(member.get("zone_names") or "").split(" | ") if value]
+
     conn.close()
-    return jsonify(members=members, count=len(members))
+    return jsonify(members=members, count=len(members), ranking_period_days=days, ranked_count=len(ranked))
+
+
+@app.route("/api/organizations/directory-options", methods=["GET"])
+@require_roles("admin")
+def get_organization_directory_options():
+    uid = get_jwt_identity()
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(locations=[], teams=[], zones=[])
+
+    locations = rows_to_list(conn.execute("""
+        SELECT id, name FROM locations
+        WHERE organization_id=? ORDER BY name COLLATE NOCASE
+    """, (org_id,)).fetchall())
+    teams = rows_to_list(conn.execute("""
+        SELECT id, name, status FROM teams
+        WHERE organization_id=? ORDER BY name COLLATE NOCASE
+    """, (org_id,)).fetchall())
+    zones = rows_to_list(conn.execute("""
+        SELECT z.id, z.name, z.location_id, l.name AS location_name
+        FROM zones z
+        JOIN locations l ON l.id=z.location_id
+        WHERE l.organization_id=?
+        ORDER BY l.name COLLATE NOCASE, z.name COLLATE NOCASE
+    """, (org_id,)).fetchall())
+    conn.close()
+    return jsonify(locations=locations, teams=teams, zones=zones)
+
+
+@app.route("/api/organizations/members/<member_id>/teams", methods=["POST"])
+@require_roles("admin")
+def set_organization_member_teams(member_id):
+    uid = get_jwt_identity()
+    data = request.get_json() or {}
+    team_ids = data.get("team_ids", [])
+    if not isinstance(team_ids, list):
+        return jsonify(error="team_ids must be a list."), 400
+    team_ids = list(dict.fromkeys(str(value) for value in team_ids if value))
+
+    conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(error="Create your organization before managing team assignments."), 409
+    member = conn.execute("""
+        SELECT id FROM users
+        WHERE id=? AND organization_id=?
+          AND membership_status='approved' AND is_active=1
+    """, (member_id, org_id)).fetchone()
+    if not member:
+        conn.close()
+        return jsonify(error="Member not found in your organization."), 404
+
+    if team_ids:
+        placeholders = ",".join("?" for _ in team_ids)
+        owned = conn.execute(
+            f"SELECT id FROM teams WHERE organization_id=? AND id IN ({placeholders})",
+            [org_id] + team_ids
+        ).fetchall()
+        if len(owned) != len(team_ids):
+            conn.close()
+            return jsonify(error="One or more teams do not belong to your organization."), 400
+
+    conn.execute("DELETE FROM team_members WHERE user_id=?", (member_id,))
+    for team_id in team_ids:
+        conn.execute(
+            "INSERT INTO team_members (team_id, user_id) VALUES (?, ?)",
+            (team_id, member_id)
+        )
+    conn.commit()
+    conn.close()
+    return jsonify(message="Team assignments saved.", member_id=member_id, team_ids=team_ids)
+
 
 @app.route("/api/teams", methods=["GET"])
 @require_roles("admin")
