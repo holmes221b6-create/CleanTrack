@@ -44,6 +44,7 @@ CORS(
         r"/api/*": {
             "origins": [
                 "https://cleantrack-frontend-ry0o.onrender.com",
+                "https://cleantrack-main.onrender.com",
                 "http://127.0.0.1:8000",
                 "http://localhost:8000",
                 "http://127.0.0.1:5500",
@@ -128,6 +129,7 @@ def after_request(response):
     origin = request.headers.get("Origin")
     allowed_origins = {
         "https://cleantrack-frontend-ry0o.onrender.com",
+        "https://cleantrack-main.onrender.com",
         "http://127.0.0.1:8000",
         "http://localhost:8000",
         "http://127.0.0.1:5500",
@@ -539,13 +541,18 @@ def get_locations():
 
     conn = get_db()
 
-    # Admin can see all locations
+    # Admin can see locations assigned to their own organization only.
     if role == "admin":
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
+            conn.close()
+            return jsonify([])
         rows = rows_to_list(conn.execute("""
             SELECT *
             FROM locations
+            WHERE organization_id=?
             ORDER BY name
-        """).fetchall())
+        """, (org_id,)).fetchall())
 
     # Supervisor can only see their own location
     elif role == "supervisor":
@@ -599,17 +606,24 @@ def create_location():
         return jsonify(error="name required"), 400
 
     lid = str(uuid.uuid4())
-
+    uid = get_jwt_identity()
     conn = get_db()
+    org_id = _current_user_organization(conn, uid)
+    if not org_id:
+        conn.close()
+        return jsonify(error="Create your organization before adding locations."), 409
 
     conn.execute(
-        "INSERT INTO locations VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)",
+        """INSERT INTO locations
+           (id, name, address, city, country, organization_id)
+           VALUES (?, ?, ?, ?, ?, ?)""",
         (
             lid,
             d["name"],
             d.get("address"),
             d.get("city"),
-            d.get("country")
+            d.get("country"),
+            org_id
         )
     )
 
@@ -629,12 +643,16 @@ def update_location(lid):
     conn = get_db()
 
     location = conn.execute("""
-        SELECT id
+        SELECT id, organization_id
         FROM locations
         WHERE id=?
     """, (lid,)).fetchone()
 
     if not location:
+        conn.close()
+        return jsonify(error="Location not found"), 404
+
+    if role == "admin" and location["organization_id"] != _current_user_organization(conn, uid):
         conn.close()
         return jsonify(error="Location not found"), 404
 
@@ -679,15 +697,16 @@ def update_location(lid):
 @jwt_required()
 @require_roles("admin")
 def delete_location(lid):
+    uid = get_jwt_identity()
     conn = get_db()
 
     location = conn.execute("""
-        SELECT id
+        SELECT id, organization_id
         FROM locations
         WHERE id=?
     """, (lid,)).fetchone()
 
-    if not location:
+    if not location or location["organization_id"] != _current_user_organization(conn, uid):
         conn.close()
         return jsonify(error="Location not found"), 404
 
@@ -714,27 +733,30 @@ def get_zones():
     # Admin — all zones, optional location filter
     # ---------------------------------------------------------
     if role == "admin":
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
+            conn.close()
+            return jsonify([])
 
         q = """
             SELECT z.*, l.name location_name,
               (SELECT COUNT(*)
                FROM tasks t
-               WHERE t.zone_i=z.id
+               WHERE t.zone_id=z.id
                  AND t.status='pending') pending_tasks,
               (SELECT COUNT(*)
                FROM tasks t
                WHERE t.zone_id=z.id
                  AND t.is_overdue=1) overdue_tasks
             FROM zones z
-            LEFT JOIN locations l ON z.location_id=l.id
+            INNER JOIN locations l ON z.location_id=l.id
+            WHERE l.organization_id=?
         """
-
+        params = [org_id]
         if requested_loc:
-            q += " WHERE z.location_id=? ORDER BY z.name"
-            params = (requested_loc,)
-        else:
-            q += " ORDER BY z.name"
-            params = ()
+            q += " AND z.location_id=?"
+            params.append(requested_loc)
+        q += " ORDER BY z.name"
 
     # ---------------------------------------------------------
     # Supervisor — zones in their own location
@@ -1323,6 +1345,15 @@ def get_users():
 
     params = []
 
+    # The Admin directory is tenant-scoped; pending join requests are shown separately.
+    if role == "admin":
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
+            conn.close()
+            return jsonify([])
+        q += " AND organization_id=? AND membership_status='approved' AND is_active=1"
+        params.append(org_id)
+
     # Supervisor can only see staff in their own location
     if role == "supervisor":
         supervisor = conn.execute(
@@ -1372,10 +1403,15 @@ def create_user():
         return jsonify(error="Email exists"), 409
     uid = str(uuid.uuid4())
     hashed = bcrypt.hashpw(d["password"].encode(), bcrypt.gensalt()).decode()
+    org_id = _current_user_organization(conn, get_jwt_identity())
+    if not org_id:
+        conn.close()
+        return jsonify(error="Create your organization before adding staff."), 409
     conn.execute("""
     INSERT INTO users
-    (id, name, email, notification_email, phone, password_hash, role, location_id, is_active)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, name, email, notification_email, phone, password_hash, role, location_id,
+     organization_id, membership_status, is_active)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 1)
 """, (
     uid,
     d["name"],
@@ -1385,7 +1421,7 @@ def create_user():
     hashed,
     "staff",
     d.get("location_id"),
-    1
+    org_id
 ))
     conn.commit(); conn.close()
     return jsonify(id=uid), 201
