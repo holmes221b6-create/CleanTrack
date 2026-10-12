@@ -41,7 +41,7 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS zones (
-
+            id TEXT PRIMARY KEY,
             location_id TEXT NOT NULL,
             name TEXT NOT NULL,
             floor TEXT,
@@ -122,6 +122,9 @@ def init_db():
         },
         "locations": {
             "organization_id": "TEXT"
+        },
+        "zones": {
+            "id": "TEXT"
         }
     }
     for table, columns in migrations.items():
@@ -129,6 +132,14 @@ def init_db():
         for column, definition in columns.items():
             if column not in existing:
                 c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    # Some early SQLite schemas omitted zones.id even though all task routes use it.
+    # Backfill a stable unique identifier for existing zones before adding the index.
+    zone_columns = {row[1] for row in c.execute("PRAGMA table_info(zones)").fetchall()}
+    if "id" in zone_columns:
+        for row in c.execute("SELECT rowid FROM zones WHERE id IS NULL OR id=''").fetchall():
+            c.execute("UPDATE zones SET id=? WHERE rowid=?", ("zone-" + __import__("uuid").uuid4().hex, row[0]))
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_zones_id ON zones(id)")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id, membership_status, role)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_locations_organization ON locations(organization_id)")
