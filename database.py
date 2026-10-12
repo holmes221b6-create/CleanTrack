@@ -14,12 +14,30 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     c.executescript("""
+        CREATE TABLE IF NOT EXISTS organizations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            code TEXT NOT NULL UNIQUE,
+            description TEXT,
+            created_by TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS teams (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            status TEXT DEFAULT 'active',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (organization_id) REFERENCES organizations(id)
+        );
         CREATE TABLE IF NOT EXISTS locations (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             address TEXT,
             city TEXT,
             country TEXT,
+            organization_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS zones (
@@ -44,6 +62,8 @@ def init_db():
             password_hash TEXT NOT NULL,
             role TEXT DEFAULT 'staff',
             location_id TEXT,
+            organization_id TEXT,
+            membership_status TEXT NOT NULL DEFAULT 'approved',
             is_active INTEGER DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -93,11 +113,26 @@ def init_db():
         );
        """)
 
-    # Add notification_email to existing databases that don't have it yet
-    try:
-        c.execute("ALTER TABLE users ADD COLUMN notification_email TEXT")
-    except sqlite3.OperationalError:
-        pass
+    # Safe additive migrations for databases created before organizations existed.
+    migrations = {
+        "users": {
+            "notification_email": "TEXT",
+            "organization_id": "TEXT",
+            "membership_status": "TEXT NOT NULL DEFAULT 'approved'"
+        },
+        "locations": {
+            "organization_id": "TEXT"
+        }
+    }
+    for table, columns in migrations.items():
+        existing = {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+        for column, definition in columns.items():
+            if column not in existing:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    c.execute("CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id, membership_status, role)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_locations_organization ON locations(organization_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id)")
 
     conn.commit()
     conn.close()
