@@ -141,6 +141,20 @@ def init_db():
             c.execute("UPDATE zones SET id=? WHERE rowid=?", ("zone-" + __import__("uuid").uuid4().hex, row[0]))
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_zones_id ON zones(id)")
 
+    # Real team membership mapping used by the organization directory and team filters.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS team_members (
+            team_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            assigned_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (team_id, user_id),
+            FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id)")
+
     c.execute("CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id, membership_status, role)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_locations_organization ON locations(organization_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id)")
