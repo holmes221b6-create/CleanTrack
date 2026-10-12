@@ -12,6 +12,7 @@ from app.models.operation_log import OperationLog
 from app.models.organization import Organization
 from app.models.task_evidence import TaskEvidence
 from app.models.team import Team
+from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.zone import Zone
 
@@ -27,6 +28,7 @@ __all__ = [
     "Organization",
     "TaskEvidence",
     "Team",
+    "TeamMember",
     "User",
     "Zone",
 ]
