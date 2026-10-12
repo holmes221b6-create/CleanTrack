@@ -1,3 +1,4 @@
+import os
 
 
 from flask import Flask, jsonify
@@ -51,9 +52,16 @@ def create_app(config_class=Config):
 
     @app.get("/api/health")
     def health():
+        registered_routes = {rule.rule for rule in app.url_map.iter_rules()}
         return jsonify({
             "status": "ok",
             "service": "CleanTrack API",
+            "revision": os.getenv("RENDER_GIT_COMMIT", os.getenv("GIT_COMMIT", "unknown")),
+            "organization_api_registered": (
+                "/api/organizations/current" in registered_routes
+                and "/api/organizations/members" in registered_routes
+                and "/api/organizations/directory-options" in registered_routes
+            ),
         }), 200
 
     @app.get("/api/health/db")
