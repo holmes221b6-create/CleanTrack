@@ -167,6 +167,20 @@ def register():
     }), 201
 
 
+@auth_bp.get("/me")
+def current_user():
+    try:
+        verify_jwt_in_request()
+        user_id = get_jwt_identity()
+        user = db.session.get(User, int(user_id))
+        if user is None:
+            return json_error("User not found.", 404)
+        return jsonify({"user": user.to_dict()}), 200
+    except Exception:
+        # No valid login cookie means the browser has no active session.
+        return json_error("Authentication required.", 401)
+
+
 @auth_bp.post("/login")
 def login():
     data = request.get_json(silent=True) or {}
