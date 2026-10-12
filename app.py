@@ -399,7 +399,7 @@ def me():
     conn = get_db()
     user = row_to_dict(conn.execute("""
         SELECT u.id, u.name, u.email, u.phone, u.role, u.location_id,
-               u.organization_id, u.membership_status, u.created_at,
+               u.organization_id, u.membership_status, u.is_active, u.created_at,
                o.name AS organization_name
         FROM users u LEFT JOIN organizations o ON o.id=u.organization_id
         WHERE u.id=?
