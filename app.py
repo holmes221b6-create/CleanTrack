@@ -1331,8 +1331,8 @@ def get_users():
 
     conn = get_db()
 
-    # Staff should not access the user directory
-    if role == "staff":
+    # Only an Admin or a Supervisor may access the staff directory.
+    if role not in ("admin", "supervisor"):
         conn.close()
         return jsonify(error="Access denied"), 403
 
@@ -1357,7 +1357,7 @@ def get_users():
     # Supervisor can only see staff in their own location
     if role == "supervisor":
         supervisor = conn.execute(
-            "SELECT location_id FROM users WHERE id=?",
+            "SELECT location_id, organization_id FROM users WHERE id=?",
             (uid,)
         ).fetchone()
 
@@ -1367,6 +1367,9 @@ def get_users():
 
         q += " AND location_id=? AND role='staff'"
         params.append(supervisor["location_id"])
+        if supervisor["organization_id"]:
+            q += " AND organization_id=?"
+            params.append(supervisor["organization_id"])
 
     # Optional filters
     requested_role = request.args.get("role")
@@ -1407,6 +1410,14 @@ def create_user():
     if not org_id:
         conn.close()
         return jsonify(error="Create your organization before adding staff."), 409
+    if d.get("location_id"):
+        valid_location = conn.execute(
+            "SELECT id FROM locations WHERE id=? AND organization_id=?",
+            (d.get("location_id"), org_id)
+        ).fetchone()
+        if not valid_location:
+            conn.close()
+            return jsonify(error="Choose a location in your organization."), 400
     conn.execute("""
     INSERT INTO users
     (id, name, email, notification_email, phone, password_hash, role, location_id,
@@ -1435,6 +1446,14 @@ def update_user(uid):
     d = request.get_json() or {}
 
     conn = get_db()
+    org_id = _current_user_organization(conn, get_jwt_identity())
+    target = conn.execute(
+        "SELECT id FROM users WHERE id=? AND organization_id=?",
+        (uid, org_id)
+    ).fetchone() if org_id else None
+    if not target:
+        conn.close()
+        return jsonify(error="Member not found in your organization."), 404
 
     # Prevent duplicate email addresses
     if d.get("email"):
