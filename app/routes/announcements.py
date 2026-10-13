@@ -84,7 +84,13 @@ def _can_view(user, item, include_drafts=False):
         scheduled = scheduled.replace(tzinfo=timezone.utc)
     is_live = status == "published" or (status == "scheduled" and scheduled and scheduled <= now)
     if not is_live:
-        return include_drafts and item.created_by_id == user.id
+        return (
+            include_drafts
+            and user.role == "Supervisor"
+            and item.created_by_id == user.id
+            and item.audience_scope == "team"
+            and item.team_id in _team_ids(user)
+        )
     if item.expires_at:
         expires = item.expires_at if item.expires_at.tzinfo else item.expires_at.replace(tzinfo=timezone.utc)
         if expires <= now:
@@ -190,7 +196,7 @@ def _process_due_schedules(org_id):
         Announcement.scheduled_at.isnot(None),
         Announcement.scheduled_at <= now,
         Announcement.archived_at.is_(None),
-    ).all()
+    ).with_for_update(skip_locked=True).all()
     if not rows:
         return
     for item in rows:
@@ -211,7 +217,7 @@ def _process_escalations(org_id):
         Announcement.escalate_to_admin.is_(True),
         Announcement.escalated_at.is_(None),
         Announcement.archived_at.is_(None),
-    ).all()
+    ).with_for_update(skip_locked=True).all()
     changed = False
     admins = User.query.filter_by(organization_id=org_id, role="Admin", account_status="active").all()
     for item in rows:
