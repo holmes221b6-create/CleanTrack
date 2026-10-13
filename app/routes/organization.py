@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import case, func
 
 from app.extensions import db
 from app.models.organization import Organization
+from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.models.team import Team
 from app.models.team_member import TeamMember
@@ -60,8 +62,112 @@ def _organization_payload(organization):
     data["stats"] = _stats_for_organization(organization.id)
     return data
 
+def _record_organization_audit(actor, organization, action, details):
+    entry = AuditLog(
+        actor_id=actor.id if actor else None,
+        organization_id=organization.id,
+        action=action,
+        resource_type="Organization",
+        resource_id=str(organization.id),
+        details=details,
+        ip_address=request.remote_addr,
+        user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+    )
+    db.session.add(entry)
 
-@organization_bp.route("/current", methods=["GET", "POST"])
+
+@organization_bp.post("/current/archive")
+@roles_required("Admin")
+def archive_current_organization():
+    admin = get_current_user()
+    organization = _organization_for_admin(admin)
+    if organization is None:
+        return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+    if organization.status == "archived":
+        return jsonify({"error": "This organization is already archived."}), 409
+
+    data = request.get_json(silent=True) or {}
+    if str(data.get("confirm_name") or "").strip() != organization.name:
+        return jsonify({"error": "Type the exact organization name to confirm archiving."}), 400
+
+    previous_status = organization.status
+    organization.status = "archived"
+    _record_organization_audit(admin, organization, "organization.archived", {
+        "previous_status": previous_status,
+        "new_status": "archived",
+        "message": "Organization archived by an Admin. Operational access is suspended; records are retained.",
+    })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Organization could not be archived."}), 500
+
+    return jsonify({
+        "message": "Organization archived. Records have been retained and normal operational access is suspended.",
+        "organization": _organization_payload(organization),
+    }), 200
+
+
+@organization_bp.post("/current/restore")
+@roles_required("Admin")
+def restore_current_organization():
+    admin = get_current_user()
+    organization = _organization_for_admin(admin)
+    if organization is None:
+        return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+    if organization.status != "archived":
+        return jsonify({"error": "This organization is not archived."}), 409
+
+    organization.status = "active"
+    _record_organization_audit(admin, organization, "organization.restored", {
+        "previous_status": "archived",
+        "new_status": "active",
+        "message": "Organization restored by an Admin.",
+    })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Organization could not be restored."}), 500
+
+    return jsonify({
+        "message": "Organization restored. Normal access is available again.",
+        "organization": _organization_payload(organization),
+    }), 200
+
+
+@organization_bp.get("/audit-log")
+@roles_required("Admin")
+def organization_audit_log():
+    admin = get_current_user()
+    if not admin or not admin.organization_id:
+        return jsonify(events=[], count=0), 200
+
+    try:
+        limit = int(request.args.get("limit", "25"))
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 100))
+
+    rows = (
+        db.session.query(AuditLog, User.full_name, User.email)
+        .outerjoin(User, User.id == AuditLog.actor_id)
+        .filter(AuditLog.organization_id == admin.organization_id)
+        .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    events = []
+    for entry, actor_name, actor_email in rows:
+        events.append({
+            **entry.to_dict(),
+            "actor_name": actor_name or actor_email or "Unknown account",
+        })
+    return jsonify(events=events, count=len(events)), 200
+
+
+@organization_bp.route("/current", methods=["GET", "POST", "PATCH"])
 @roles_required("Admin")
 def current_organization():
     admin = get_current_user()
