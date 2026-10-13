@@ -1,5 +1,6 @@
 
 from functools import wraps
+from datetime import datetime, timezone
 
 from flask import jsonify, request
 from flask_jwt_extended import get_jwt, verify_jwt_in_request
@@ -24,7 +25,20 @@ def get_current_user():
 
     user = db.session.get(User, user_id)
 
-    if user is None or user.account_status != "active":
+    if user is None:
+        return None
+
+    if user.account_status == "termination_pending":
+        effective = user.termination_effective_at
+        if effective is not None and effective.tzinfo is None:
+            effective = effective.replace(tzinfo=timezone.utc)
+        if effective is not None and effective > datetime.now(timezone.utc):
+            return user
+        user.account_status = "terminated"
+        db.session.commit()
+        return None
+
+    if user.account_status != "active":
         return None
 
     return user
