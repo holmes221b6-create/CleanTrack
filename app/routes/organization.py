@@ -8,6 +8,7 @@ from app.extensions import db
 from app.models.organization import Organization
 from app.models.audit_log import AuditLog
 from app.models.user import User
+from app.models.invitation import Invitation
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.location import Location
@@ -577,4 +578,118 @@ def set_member_teams(member_id):
         "message": "Team assignments saved.",
         "member_id": member_id,
         "team_ids": team_ids,
+    }), 200
+
+
+@organization_bp.get("/staff")
+@roles_required("Admin")
+def list_organization_staff():
+    """Return organization-scoped people and their real account/termination status."""
+    admin = get_current_user()
+    staff = User.query.filter(
+        User.organization_id == admin.organization_id,
+        User.role.in_(("Supervisor", "Employee")),
+        User.account_status.in_(("active", "suspended", "termination_pending", "terminated")),
+    ).order_by(User.full_name.asc()).limit(1000).all()
+
+    now = datetime.now(timezone.utc)
+    pending_invites = Invitation.query.filter_by(
+        organization_id=admin.organization_id,
+        status="pending",
+    ).all()
+    pending_invite_count = sum(
+        1 for invitation in pending_invites
+        if invitation.expires_at is not None
+        and (invitation.expires_at.replace(tzinfo=timezone.utc)
+             if invitation.expires_at.tzinfo is None
+             else invitation.expires_at) > now
+    )
+
+    return jsonify({
+        "staff": [member.to_dict() for member in staff],
+        "summary": {
+            "active": sum(1 for member in staff if member.account_status == "active"),
+            "termination_pending": sum(1 for member in staff if member.account_status == "termination_pending"),
+            "suspended": sum(1 for member in staff if member.account_status == "suspended"),
+            "terminated": sum(1 for member in staff if member.account_status == "terminated"),
+            "pending_invitations": pending_invite_count,
+        },
+    }), 200
+
+
+@organization_bp.post("/members/<int:member_id>/termination")
+@roles_required("Admin")
+def schedule_member_termination(member_id):
+    admin = get_current_user()
+    member = db.session.get(User, member_id)
+    if (
+        member is None
+        or member.organization_id != admin.organization_id
+        or member.role not in {"Supervisor", "Employee"}
+    ):
+        return jsonify({"error": "Organization member not found."}), 404
+    if member.account_status == "termination_pending":
+        return jsonify({"error": "Termination is already scheduled for this member."}), 409
+    if member.account_status != "active":
+        return jsonify({"error": "Only active members can be scheduled for termination."}), 409
+
+    requested_at = datetime.now(timezone.utc)
+    effective_at = requested_at + timedelta(days=7)
+    member.account_status = "termination_pending"
+    member.termination_requested_at = requested_at
+    member.termination_effective_at = effective_at
+    _record_organization_audit(admin, db.session.get(Organization, admin.organization_id),
+        "organization.member_termination_scheduled", {
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "member_email": member.email,
+            "requested_at": requested_at.isoformat(),
+            "effective_at": effective_at.isoformat(),
+            "grace_period_days": 7,
+            "message": "Member remains active during the seven-day termination grace period.",
+        })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Termination could not be scheduled."}), 500
+    return jsonify({
+        "message": "Termination scheduled. The member keeps access during the seven-day grace period.",
+        "staff_member": member.to_dict(),
+    }), 200
+
+
+@organization_bp.post("/members/<int:member_id>/termination/cancel")
+@roles_required("Admin")
+def cancel_member_termination(member_id):
+    admin = get_current_user()
+    member = db.session.get(User, member_id)
+    if (
+        member is None
+        or member.organization_id != admin.organization_id
+        or member.role not in {"Supervisor", "Employee"}
+    ):
+        return jsonify({"error": "Organization member not found."}), 404
+    if member.account_status != "termination_pending":
+        return jsonify({"error": "This member does not have a pending termination."}), 409
+
+    previous_effective_at = member.termination_effective_at.isoformat() if member.termination_effective_at else None
+    member.account_status = "active"
+    member.termination_requested_at = None
+    member.termination_effective_at = None
+    _record_organization_audit(admin, db.session.get(Organization, admin.organization_id),
+        "organization.member_termination_cancelled", {
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "member_email": member.email,
+            "previous_effective_at": previous_effective_at,
+        })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Pending termination could not be cancelled."}), 500
+    return jsonify({
+        "message": "Pending termination cancelled. The member remains active.",
+        "staff_member": member.to_dict(),
     }), 200
