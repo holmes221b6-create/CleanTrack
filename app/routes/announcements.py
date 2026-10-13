@@ -299,10 +299,12 @@ def _apply_payload(item, user, data, is_create=False):
         raise ValueError("Title is required and must be 200 characters or fewer.")
     if not isinstance(message, str) or not message.strip() or len(message.strip()) > 12000:
         raise ValueError("Message is required and must be 12,000 characters or fewer.")
-    kind = str(data.get("announcement_type", item.announcement_type if item else "announcement")).lower()
+    kind_default = (item.announcement_type if item else None) or "announcement"
+    kind = str(data.get("announcement_type") or kind_default).lower()
     if kind not in ALLOWED_TYPES:
         raise ValueError("Choose announcement, alert, or instruction.")
-    audience = str(data.get("audience_scope", item.audience_scope if item else ("organization" if user.role == "Admin" else "team"))).lower()
+    audience_default = (item.audience_scope if item else None) or ("organization" if user.role == "Admin" else "team")
+    audience = str(data.get("audience_scope") or audience_default).lower()
     if audience not in ALLOWED_AUDIENCES:
         raise ValueError("Choose a supported target audience.")
     if user.role == "Supervisor" and audience != "team":
@@ -315,9 +317,16 @@ def _apply_payload(item, user, data, is_create=False):
         severity = str(data.get("severity", item.severity if item else "medium")).lower()
         if severity not in ALLOWED_SEVERITIES:
             raise ValueError("Choose a valid severity.")
-    team_id, location_id, zone_id = _validate_target(user, data, audience)
+    target_data = {
+        "team_id": item.team_id if item else None,
+        "target_location_id": item.target_location_id if item else None,
+        "target_zone_id": item.target_zone_id if item else None,
+    }
+    target_data.update(data)
+    team_id, location_id, zone_id = _validate_target(user, target_data, audience)
 
-    requested_status = str(data.get("status", item.status if item else "published")).lower()
+    requested_default = (item.status if item else None) or "published"
+    requested_status = str(data.get("status") or requested_default).lower()
     if requested_status not in ALLOWED_STATUSES:
         raise ValueError("Choose draft, publish now, or schedule.")
     scheduled_at = _parse_dt(data.get("scheduled_at", item.scheduled_at.isoformat() if item and item.scheduled_at else None), "Scheduled time")
