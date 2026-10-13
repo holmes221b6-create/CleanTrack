@@ -253,8 +253,21 @@ def _team_data(team, admin, include_directory=False):
 def teams_collection():
     admin = get_current_user()
     if request.method == "GET":
-        teams = Team.query.filter_by(organization_id=admin.organization_id).order_by(Team.name.asc()).all()
-        return jsonify({"teams": [_team_data(team, admin)["team"] for team in teams]}), 200
+        organization_teams = Team.query.filter_by(
+            organization_id=admin.organization_id
+        ).order_by(Team.name.asc()).all()
+        # Keep the summary collection backwards-compatible while exposing
+        # real activity, workload and eight-week trend data for the Admin overview.
+        insights = [_team_data(team, admin) for team in organization_teams]
+        return jsonify({
+            "teams": [item["team"] for item in insights],
+            "insights": [{
+                "team_id": item["team"]["id"],
+                "activity": item["activity"][:12],
+                "performance": item["performance"],
+                "operations": item["operations"],
+            } for item in insights],
+        }), 200
 
     data = request.get_json(silent=True) or {}
     name, description, capacity = data.get("name"), data.get("description", ""), data.get("capacity")
@@ -274,16 +287,27 @@ def teams_collection():
     if duplicate:
         return jsonify({"error": "A team with this name already exists."}), 409
     team = Team(name=name, description=description or None, organization_id=admin.organization_id, capacity=capacity)
-    db.session.add(team)
-    db.session.flush()
-    _audit(admin, team, "team.created", {"name": name, "description": description, "capacity": capacity, "status": "active"})
-    _notify_admins(admin, team, "Team created", f'{admin.full_name} created the team "{team.name}".')
     try:
+        db.session.add(team)
+        db.session.flush()
+        _audit(admin, team, "team.created", {
+            "name": name, "description": description,
+            "capacity": capacity, "status": "active",
+        })
+        _notify_admins(
+            admin, team, "Team created",
+            f'{admin.full_name} created the team "{team.name}".',
+        )
+        # Build the response before commit so serialization errors cannot
+        # make a successful insert look like a failed create request.
+        team_payload = _team_data(team, admin)["team"]
         db.session.commit()
     except Exception:
         db.session.rollback()
-        return jsonify({"error": "Team could not be created."}), 500
-    return jsonify({"message": "Team created successfully.", "team": _team_data(team, admin)["team"]}), 201
+        from flask import current_app
+        current_app.logger.exception("Team creation failed for organization %s", admin.organization_id)
+        return jsonify({"error": "Team could not be created. Check the team details and try again."}), 500
+    return jsonify({"message": "Team created successfully.", "team": team_payload}), 201
 
 
 @teams_bp.route("/<int:team_id>", methods=["GET", "PATCH"])
