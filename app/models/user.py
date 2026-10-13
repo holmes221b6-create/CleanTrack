@@ -48,6 +48,9 @@ class User(db.Model):
         onupdate=utc_now,
     )
 
+    termination_requested_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    termination_effective_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
@@ -73,5 +76,13 @@ class User(db.Model):
                 self.created_at.isoformat()
                 if self.created_at
                 else None
+            ),
+            "termination_requested_at": (
+                self.termination_requested_at.isoformat()
+                if self.termination_requested_at else None
+            ),
+            "termination_effective_at": (
+                self.termination_effective_at.isoformat()
+                if self.termination_effective_at else None
             ),
         }
