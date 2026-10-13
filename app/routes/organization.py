@@ -191,10 +191,10 @@ def current_organization():
         if organization.status == "archived":
             return jsonify({"error": "Restore the organization before editing its settings."}), 423
 
-        allowed = ("name", "description", "avatar_url", "contact_email", "policy_text")
+        allowed = ("name", "description", "avatar_url", "contact_email", "policy_text", "whatsapp_supervisors_group_url")
         changes = {}
         errors = []
-        limits = {"name": 150, "description": 5000, "avatar_url": 500, "contact_email": 254, "policy_text": 12000}
+        limits = {"name": 150, "description": 5000, "avatar_url": 500, "contact_email": 254, "policy_text": 12000, "whatsapp_supervisors_group_url": 500}
         for field in allowed:
             if field not in data:
                 continue
@@ -211,6 +211,11 @@ def current_organization():
             if field == "name" and len(value) < 2:
                 errors.append("Organization name must contain at least two characters.")
                 continue
+            if field == "whatsapp_supervisors_group_url" and value:
+                parsed = urlparse(value)
+                if parsed.scheme != "https" or parsed.netloc.lower() != "chat.whatsapp.com" or not parsed.path.strip("/"):
+                    errors.append("Supervisor WhatsApp group links must use https://chat.whatsapp.com/ followed by the group invite code.")
+                    continue
             if field == "avatar_url" and value:
                 parsed = urlparse(value)
                 if parsed.scheme not in ("https", "http") or not parsed.netloc:
@@ -584,18 +589,26 @@ def set_member_teams(member_id):
 @organization_bp.get("/staff")
 @roles_required("Admin")
 def list_organization_staff():
-    """Return organization-scoped people and their real account/termination status."""
+    """Return an organization-scoped supervisor directory and true staff totals."""
     admin = get_current_user()
+    if not admin or not admin.organization_id:
+        return jsonify(staff=[], supervisors=[], summary={
+            "total_staff": 0, "supervisors": 0, "employees": 0,
+            "active": 0, "inactive": 0, "termination_pending": 0,
+            "suspended": 0, "terminated": 0, "active_supervisors": 0,
+            "inactive_supervisors": 0, "active_employees": 0,
+            "inactive_employees": 0, "pending_invitations": 0,
+        }), 200
+
+    organization_id = admin.organization_id
     staff = User.query.filter(
-        User.organization_id == admin.organization_id,
+        User.organization_id == organization_id,
         User.role.in_(("Supervisor", "Employee")),
         User.account_status.in_(("active", "suspended", "termination_pending", "terminated")),
-    ).order_by(User.full_name.asc()).limit(1000).all()
-
+    ).order_by(func.lower(User.full_name)).limit(1000).all()
     now = datetime.now(timezone.utc)
     pending_invites = Invitation.query.filter_by(
-        organization_id=admin.organization_id,
-        status="pending",
+        organization_id=organization_id, status="pending",
     ).all()
     pending_invite_count = sum(
         1 for invitation in pending_invites
@@ -605,15 +618,125 @@ def list_organization_staff():
              else invitation.expires_at) > now
     )
 
+    member_ids = [member.id for member in staff]
+    team_map = {member_id: {} for member_id in member_ids}
+    location_map = {member_id: {} for member_id in member_ids}
+    zone_map = {member_id: {} for member_id in member_ids}
+    task_map = {member_id: {"total_tasks": 0, "completed_tasks": 0,
+                            "missed_tasks": 0, "current_workload": 0}
+                for member_id in member_ids}
+
+    if member_ids:
+        team_rows = (
+            db.session.query(TeamMember.user_id, Team.id, Team.name)
+            .join(Team, Team.id == TeamMember.team_id)
+            .filter(
+                TeamMember.user_id.in_(member_ids),
+                Team.organization_id == organization_id,
+                Team.status == "active",
+            ).all()
+        )
+        for member_id, team_id, team_name in team_rows:
+            team_map[member_id][str(team_id)] = team_name
+
+        assignment_rows = (
+            db.session.query(
+                Operation.assigned_to_id,
+                Location.id, Location.name,
+                Zone.id, Zone.name,
+            )
+            .outerjoin(Location, Location.id == Operation.location_id)
+            .outerjoin(Zone, Zone.id == Operation.zone_id)
+            .filter(
+                Operation.organization_id == organization_id,
+                Operation.assigned_to_id.in_(member_ids),
+            ).distinct().all()
+        )
+        for member_id, location_id, location_name, zone_id, zone_name in assignment_rows:
+            if location_id is not None and location_name:
+                location_map[member_id][str(location_id)] = location_name
+            if zone_id is not None and zone_name:
+                zone_map[member_id][str(zone_id)] = zone_name
+
+        period_start = now - timedelta(days=30)
+        task_rows = (
+            db.session.query(
+                Operation.assigned_to_id.label("member_id"),
+                func.count(Operation.id).label("total_tasks"),
+                func.sum(case(
+                    (Operation.status.in_(("Approved", "Completed")), 1),
+                    else_=0,
+                )).label("completed_tasks"),
+                func.sum(case(
+                    (Operation.overdue.is_(True) |
+                     Operation.status.in_(("Rejected", "Missed", "Overdue")), 1),
+                    else_=0,
+                )).label("missed_tasks"),
+                func.sum(case(
+                    (Operation.status.notin_(("Approved", "Completed", "Cancelled", "Canceled", "Missed")), 1),
+                    else_=0,
+                )).label("current_workload"),
+            )
+            .filter(
+                Operation.organization_id == organization_id,
+                Operation.assigned_to_id.in_(member_ids),
+                Operation.created_at >= period_start,
+                Operation.created_at <= now,
+            )
+            .group_by(Operation.assigned_to_id).all()
+        )
+        for row in task_rows:
+            task_map[row.member_id] = {
+                "total_tasks": int(row.total_tasks or 0),
+                "completed_tasks": int(row.completed_tasks or 0),
+                "missed_tasks": int(row.missed_tasks or 0),
+                "current_workload": int(row.current_workload or 0),
+            }
+            total = int(row.total_tasks or 0)
+            task_map[row.member_id]["compliance_pct"] = (
+                round(100.0 * int(row.completed_tasks or 0) / total, 1)
+                if total else None
+            )
+
+    serialized = []
+    for member in staff:
+        record = member.to_dict()
+        record["team_ids"] = list(team_map[member.id].keys())
+        record["team_names"] = list(team_map[member.id].values())
+        record["location_names"] = list(location_map[member.id].values())
+        record["location_ids"] = list(location_map[member.id].keys())
+        record["zone_names"] = list(zone_map[member.id].values())
+        record["zone_ids"] = list(zone_map[member.id].keys())
+        record.update(task_map[member.id])
+        if "compliance_pct" not in record:
+            record["compliance_pct"] = None
+        serialized.append(record)
+
+    active = sum(1 for member in staff if member.account_status == "active")
+    inactive_statuses = {"suspended", "terminated"}
+    is_inactive = lambda member: member.account_status in inactive_statuses
+    supervisors = [record for record in serialized if str(record.get("role", "")).lower() == "supervisor"]
+    employees = [record for record in serialized if str(record.get("role", "")).lower() == "employee"]
+
     return jsonify({
-        "staff": [member.to_dict() for member in staff],
+        "staff": serialized,
+        "supervisors": supervisors,
         "summary": {
-            "active": sum(1 for member in staff if member.account_status == "active"),
+            "total_staff": len(staff),
+            "supervisors": len(supervisors),
+            "employees": len(employees),
+            "active": active,
+            "inactive": sum(1 for member in staff if is_inactive(member)),
             "termination_pending": sum(1 for member in staff if member.account_status == "termination_pending"),
             "suspended": sum(1 for member in staff if member.account_status == "suspended"),
             "terminated": sum(1 for member in staff if member.account_status == "terminated"),
+            "active_supervisors": sum(1 for member in staff if member.role.lower() == "supervisor" and member.account_status == "active"),
+            "inactive_supervisors": sum(1 for member in staff if member.role.lower() == "supervisor" and is_inactive(member)),
+            "active_employees": sum(1 for member in staff if member.role.lower() == "employee" and member.account_status == "active"),
+            "inactive_employees": sum(1 for member in staff if member.role.lower() == "employee" and is_inactive(member)),
             "pending_invitations": pending_invite_count,
         },
+        "workload_period_days": 30,
     }), 200
 
 
