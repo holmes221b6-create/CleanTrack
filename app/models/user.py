@@ -17,6 +17,8 @@ class User(db.Model):
     email = db.Column(db.String(254), unique=True, nullable=False, index=True)
     full_name = db.Column(db.String(120), nullable=False)
     phone = db.Column(db.String(30), nullable=True)
+    avatar_url = db.Column(db.String(500), nullable=True)
+    preferences = db.Column(db.JSON, nullable=False, default=dict)
 
     password_hash = db.Column(db.String(255), nullable=False)
 
@@ -63,6 +65,8 @@ class User(db.Model):
             "email": self.email,
             "full_name": self.full_name,
             "phone": self.phone,
+            "avatar_url": self.avatar_url,
+            "preferences": self.preferences or {},
             "role": self.role,
             "account_status": self.account_status,
             "email_verified": self.email_verified,
