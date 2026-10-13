@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 
 
 from flask import Flask, jsonify
@@ -19,6 +20,9 @@ from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
 from app.routes.operations import operations_bp
 from app.routes.organization import organization_bp
+
+from app.models.audit_log import AuditLog
+from app.models.user import User
 
 
 def create_app(config_class=Config):
@@ -83,6 +87,39 @@ def create_app(config_class=Config):
     app.register_blueprint(zones_bp)
     app.register_blueprint(operations_bp)
     app.register_blueprint(organization_bp)
+
+    @app.before_request
+    def _finalize_due_member_terminations():
+        # Finalize elapsed seven-day termination schedules on the first server
+        # request after their deadline, without deleting historical records.
+        try:
+            now = datetime.now(timezone.utc)
+            due_members = User.query.filter(
+                User.account_status == "termination_pending",
+                User.termination_effective_at.isnot(None),
+                User.termination_effective_at <= now,
+            ).all()
+            for member in due_members:
+                member.account_status = "terminated"
+                db.session.add(AuditLog(
+                    actor_id=None,
+                    organization_id=member.organization_id,
+                    action="organization.member_termination_completed",
+                    resource_type="User",
+                    resource_id=str(member.id),
+                    details={
+                        "member_id": member.id,
+                        "member_name": member.full_name,
+                        "email": member.email,
+                        "termination_effective_at": member.termination_effective_at.isoformat() if member.termination_effective_at else None,
+                        "message": "Termination grace period elapsed. Account access was disabled; historical records were retained.",
+                    },
+                ))
+            if due_members:
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Could not finalize due member terminations.")
 
     @app.get("/api/health")
     def health():
