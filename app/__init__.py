@@ -40,6 +40,17 @@ def create_app(config_class=Config):
         # db.create_all() creates missing tables but does not add new columns.
         with db.engine.begin() as connection:
             tables = set(inspect(connection).get_table_names())
+            if "users" in tables:
+                user_columns = {item["name"] for item in inspect(connection).get_columns("users")}
+                termination_columns = {
+                    "termination_requested_at": "TIMESTAMP WITH TIME ZONE",
+                    "termination_effective_at": "TIMESTAMP WITH TIME ZONE",
+                }
+                for column, sql_type in termination_columns.items():
+                    if column not in user_columns:
+                        connection.execute(text(
+                            f"ALTER TABLE users ADD COLUMN {column} {sql_type}"
+                        ))
             if "organizations" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("organizations")}
                 additive_columns = {
