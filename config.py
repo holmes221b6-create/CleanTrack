@@ -29,9 +29,21 @@ class Config:
     JWT_TOKEN_LOCATION = ["cookies"]
     JWT_ACCESS_COOKIE_NAME = "cleantrack_access"
     JWT_REFRESH_COOKIE_NAME = "cleantrack_refresh"
-    JWT_COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+    # The SPA and API run on separate Render hostnames. Force Secure
+    # cross-origin cookies in Render so browsers send the session to the API.
+    _is_render = (
+        os.getenv("RENDER", "").lower() == "true"
+        or bool(os.getenv("RENDER_EXTERNAL_URL"))
+    )
+    JWT_COOKIE_SECURE = (
+        True if _is_render
+        else os.getenv("COOKIE_SECURE", "false").lower() == "true"
+    )
     JWT_COOKIE_HTTPONLY = True
-    JWT_COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "Lax")
+    JWT_COOKIE_SAMESITE = (
+        "None" if _is_render
+        else os.getenv("COOKIE_SAMESITE", "Lax")
+    )
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=30)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=14)
     JWT_COOKIE_CSRF_PROTECT = True
