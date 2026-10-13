@@ -216,6 +216,14 @@ def current_user():
         return json_error("Authentication required.", 401)
 
 
+@auth_bp.post("/logout")
+def logout():
+    """Clear the authenticated browser session cookies."""
+    response = jsonify({"message": "Logged out successfully."})
+    unset_jwt_cookies(response)
+    return response, 200
+
+
 @auth_bp.post("/login")
 def login():
     data = request.get_json(silent=True) or {}
