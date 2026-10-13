@@ -618,8 +618,8 @@ def list_receipts(announcement_id):
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
     if item is None:
         return jsonify({"error": "Announcement not found."}), 404
-    if user.role == "Supervisor" and (item.created_by_id != user.id or item.team_id not in _team_ids(user)):
-        return jsonify({"error": "Supervisors can review receipts only for their own team announcements."}), 403
+    if user.role == "Supervisor" and (item.audience_scope != "team" or item.team_id not in _team_ids(user)):
+        return jsonify({"error": "Supervisors can review receipts only for announcements targeted to their assigned teams."}), 403
     rows = AnnouncementReceipt.query.filter_by(announcement_id=item.id).join(User, User.id == AnnouncementReceipt.user_id).order_by(User.full_name.asc()).all()
     return jsonify({"announcement_id": item.id, "requires_acknowledgement": item.requires_acknowledgement, "receipts": [row.to_dict() for row in rows]}), 200
 
@@ -631,8 +631,8 @@ def resolve_alert(announcement_id):
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
     if item is None or item.announcement_type != "alert":
         return jsonify({"error": "Operational alert not found."}), 404
-    if user.role == "Supervisor" and (item.created_by_id != user.id or item.team_id not in _team_ids(user)):
-        return jsonify({"error": "Supervisors can resolve alerts they issued for assigned teams."}), 403
+    if user.role == "Supervisor" and (item.audience_scope != "team" or item.team_id not in _team_ids(user)):
+        return jsonify({"error": "Supervisors can resolve alerts targeted to their assigned teams."}), 403
     was_resolved = item.alert_status == "resolved"
     item.alert_status = "resolved"
     item.resolved_at = item.resolved_at or _now()
