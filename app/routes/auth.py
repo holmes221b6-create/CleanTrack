@@ -41,6 +41,9 @@ def register():
     organization_code = str(data.get("organization_code") or "").strip()
     phone = str(data.get("phone") or "").strip()
     invitation_token = str(data.get("invitation_token") or "").strip()
+    request_message = str(data.get("message") or "").strip()
+    if len(request_message) > 1000:
+        return json_error("Your message must be 1,000 characters or fewer.", 400)
 
     if not full_name or not email or not password:
         return json_error("Full name, email, and password are required.", 400)
@@ -121,7 +124,7 @@ def register():
             organization_id=organization.id,
             requested_role=role,
             status="pending",
-            message=("Submitted through an Admin invitation link." if invitation else None),
+            message=(request_message or ("Submitted through an Admin invitation link." if invitation else None)),
         )
         db.session.add(membership_request)
         db.session.flush()
