@@ -62,6 +62,7 @@ def create_app(config_class=Config):
                     "avatar_url": "VARCHAR(500)",
                     "contact_email": "VARCHAR(254)",
                     "policy_text": "TEXT",
+                    "whatsapp_supervisors_group_url": "VARCHAR(500)",
                 }
                 for column, sql_type in additive_columns.items():
                     if column not in columns:
