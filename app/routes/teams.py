@@ -4,6 +4,7 @@ import io
 import re
 import zipfile
 from xml.sax.saxutils import escape
+from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, request, make_response
 from sqlalchemy import func, or_
@@ -358,6 +359,25 @@ def team_detail(team_id):
         if capacity != team.capacity:
             changes["capacity"] = {"before": team.capacity, "after": capacity}
             team.capacity = capacity
+    if "whatsapp_group_url" in data:
+        raw_url = data["whatsapp_group_url"]
+        if raw_url is not None and not isinstance(raw_url, str):
+            return jsonify({"error": "WhatsApp group invite URL must be text."}), 400
+        group_url = (raw_url or "").strip() or None
+        if group_url:
+            parsed = urlparse(group_url)
+            if (
+                len(group_url) > 500
+                or parsed.scheme != "https"
+                or parsed.hostname != "chat.whatsapp.com"
+                or not parsed.path.strip("/")
+                or parsed.username
+                or parsed.password
+            ):
+                return jsonify({"error": "Use a valid invite URL beginning with https://chat.whatsapp.com/."}), 400
+        if group_url != team.whatsapp_group_url:
+            changes["whatsapp_group_url"] = {"before": team.whatsapp_group_url, "after": group_url}
+            team.whatsapp_group_url = group_url
     if changes:
         _audit(admin, team, "team.updated", changes)
         _notify_admins(admin, team, "Team updated", f'{admin.full_name} updated "{team.name}".')
