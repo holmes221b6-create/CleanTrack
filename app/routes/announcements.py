@@ -445,6 +445,11 @@ def list_announcements():
         can_view = _can_view(user, item, include_drafts=(user.role == "Supervisor"))
         if not can_view:
             continue
+        # Materialize real unread receipt rows for current recipients of
+        # legacy and newly-active announcements; read/ack timestamps stay null
+        # until the user actually takes the corresponding action.
+        if item.status == "published":
+            changed = _ensure_receipts(item) or changed
         is_recipient = _is_target_recipient(user, item)
         receipt = None
         if is_recipient and user.id != item.created_by_id:
