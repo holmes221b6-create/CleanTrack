@@ -317,7 +317,7 @@ def supervisor_team_scope():
     ).order_by(func.lower(Location.name)).all()
     zones = Zone.query.filter(
         Zone.organization_id == supervisor.organization_id,
-        Zone.id.in_(zone_ids) if zone_ids else db.false(),
+        Zone.id.in_(zone_ids) if zone_ids else false(),
     ).order_by(func.lower(Zone.name)).all()
 
     return jsonify({
