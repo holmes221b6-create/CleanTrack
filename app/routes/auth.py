@@ -196,6 +196,8 @@ def current_user():
         user = db.session.get(User, int(user_id))
         if user is None:
             return json_error("User not found.", 404)
+        if user.account_status not in {"active", "termination_pending"}:
+            return json_error("Your account is no longer active.", 403)
 
         if request.method == "PATCH":
             data = request.get_json(silent=True) or {}
@@ -268,7 +270,7 @@ def login():
         if user is None or not user.check_password(password):
             return json_error("Invalid email or password.", 401)
 
-        if user.account_status != "active":
+        if user.account_status not in {"active", "termination_pending"}:
             return json_error(
                 "Your account is pending approval or unavailable.",
                 403,
