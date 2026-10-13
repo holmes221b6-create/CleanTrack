@@ -23,6 +23,7 @@ class Team(db.Model):
     )
 
     status = db.Column(db.String(20), nullable=False, default="active")
+    capacity = db.Column(db.Integer, nullable=True, default=None)
 
     created_at = db.Column(
         db.DateTime(timezone=True),
@@ -56,6 +57,7 @@ class Team(db.Model):
             "description": self.description,
             "organization_id": self.organization_id,
             "status": self.status,
+            "capacity": self.capacity,
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at
