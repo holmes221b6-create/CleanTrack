@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import case, func
+from sqlalchemy import case, false, func
 
 from app.extensions import db
 from app.models.organization import Organization
@@ -313,7 +313,7 @@ def supervisor_team_scope():
         )
     locations = Location.query.filter(
         Location.organization_id == supervisor.organization_id,
-        Location.id.in_(location_ids) if location_ids else db.false(),
+        Location.id.in_(location_ids) if location_ids else false(),
     ).order_by(func.lower(Location.name)).all()
     zones = Zone.query.filter(
         Zone.organization_id == supervisor.organization_id,
