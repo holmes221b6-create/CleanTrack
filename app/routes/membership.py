@@ -5,6 +5,7 @@ from app.extensions import db
 from app.models.membership_request import MembershipRequest
 from app.models.user import User
 from app.models.audit_log import AuditLog
+from app.models.notification import Notification
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -103,6 +104,17 @@ def review_membership_request(request_id):
     membership_request.review_message = review_message or None
     membership_request.reviewed_by_id = admin.id
     membership_request.reviewed_at = db.func.now()
+
+    if decision == "approve":
+        db.session.add(Notification(
+            recipient_id=applicant.id,
+            organization_id=admin.organization_id,
+            title="Membership request approved",
+            message="Your request to join the organization was approved. You can now sign in to CleanTrack.",
+            notification_type="membership_decision",
+            resource_type="MembershipRequest",
+            resource_id=str(membership_request.id),
+        ))
 
     db.session.add(AuditLog(
         actor_id=admin.id,
