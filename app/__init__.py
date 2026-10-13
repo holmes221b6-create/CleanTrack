@@ -57,6 +57,14 @@ def create_app(config_class=Config):
                         connection.execute(text(
                             f"ALTER TABLE users ADD COLUMN {column} {sql_type}"
                         ))
+            if "teams" in tables:
+                team_columns = {item["name"] for item in inspect(connection).get_columns("teams")}
+                if "capacity" not in team_columns:
+                    connection.execute(text("ALTER TABLE teams ADD COLUMN capacity INTEGER"))
+            if "zones" in tables:
+                zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
+                if "team_id" not in zone_columns:
+                    connection.execute(text("ALTER TABLE zones ADD COLUMN team_id INTEGER REFERENCES teams(id)"))
             if "organizations" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("organizations")}
                 additive_columns = {
