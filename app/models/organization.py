@@ -28,6 +28,11 @@ class Organization(db.Model):
         default=generate_organization_code,
     )
 
+    description = db.Column(db.Text, nullable=True)
+    avatar_url = db.Column(db.String(500), nullable=True)
+    contact_email = db.Column(db.String(254), nullable=True)
+    policy_text = db.Column(db.Text, nullable=True)
+
     status = db.Column(db.String(20), nullable=False, default="active")
     plan = db.Column(db.String(30), nullable=False, default="Free/Demo")
 
@@ -55,6 +60,10 @@ class Organization(db.Model):
             "id": self.id,
             "name": self.name,
             "organization_code": self.organization_code,
+            "description": self.description,
+            "avatar_url": self.avatar_url,
+            "contact_email": self.contact_email,
+            "policy_text": self.policy_text,
             "status": self.status,
             "plan": self.plan,
             "created_at": (
