@@ -10,3 +10,4 @@ email-validator
 gunicorn
 psycopg[binary]
 pytest
+APScheduler>=3.10,<4.0
