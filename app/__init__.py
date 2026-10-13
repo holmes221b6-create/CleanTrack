@@ -12,6 +12,8 @@ import app.models  # noqa: F401
 
 from app.routes.auth import auth_bp
 from app.routes.membership import membership_bp
+from app.routes.invitations import invitations_bp
+from app.routes.notifications import notifications_bp
 from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
@@ -63,6 +65,8 @@ def create_app(config_class=Config):
     # Register API routes.
     app.register_blueprint(auth_bp)
     app.register_blueprint(membership_bp)
+    app.register_blueprint(invitations_bp)
+    app.register_blueprint(notifications_bp)
     app.register_blueprint(teams_bp)
     app.register_blueprint(locations_bp)
     app.register_blueprint(zones_bp)
