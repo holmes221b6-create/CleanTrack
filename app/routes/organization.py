@@ -549,10 +549,23 @@ def set_member_teams(member_id):
     if len(teams) != len(team_ids):
         return jsonify({"error": "One or more teams do not belong to your organization."}), 400
 
+    previous_teams = [
+        {"id": row.team_id, "name": row.team.name}
+        for row in TeamMember.query.filter_by(user_id=member_id).all()
+    ]
+    next_teams = [{"id": team.id, "name": team.name} for team in teams]
+
     try:
         TeamMember.query.filter_by(user_id=member_id).delete(synchronize_session=False)
         for team in teams:
             db.session.add(TeamMember(team_id=team.id, user_id=member_id))
+        _record_organization_audit(admin, db.session.get(Organization, admin.organization_id),
+            "organization.member_teams_updated", {
+                "member_id": member_id,
+                "member_name": member.full_name,
+                "previous_teams": previous_teams,
+                "new_teams": next_teams,
+            })
         db.session.commit()
     except Exception:
         db.session.rollback()
