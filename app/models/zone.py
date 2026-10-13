@@ -27,6 +27,12 @@ class Zone(db.Model):
         nullable=False,
         index=True,
     )
+    team_id = db.Column(
+        db.Integer,
+        db.ForeignKey("teams.id"),
+        nullable=True,
+        index=True,
+    )
 
     status = db.Column(db.String(20), nullable=False, default="active")
 
@@ -60,6 +66,7 @@ class Zone(db.Model):
             "description": self.description,
             "organization_id": self.organization_id,
             "location_id": self.location_id,
+            "team_id": self.team_id,
             "status": self.status,
             "created_at": (
                 self.created_at.isoformat()
