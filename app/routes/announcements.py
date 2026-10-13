@@ -674,7 +674,10 @@ def upload_attachments(announcement_id):
         total += len(data)
         if total > MAX_TOTAL_ATTACH_BYTES:
             return jsonify({"error": "Attachments must total 20 MB or less per upload."}), 413
-        category = "voice" if content_type.startswith("audio/") else "image" if content_type.startswith("image/") else "file"
+        audio_extensions = {".mp3", ".wav", ".ogg", ".webm", ".m4a"}
+        category = "voice" if content_type.startswith("audio/") or ext in audio_extensions else "image" if content_type.startswith("image/") else "file"
+        if category == "voice" and user.role == "Admin" and item.audience_scope != "supervisors":
+            return jsonify({"error": "Admin voice notes are available for announcements targeted to all supervisors. Use text or a document for other audiences."}), 400
         accepted.append((name, content_type, category, data))
     if not accepted:
         return jsonify({"error": "No valid files were selected."}), 400
