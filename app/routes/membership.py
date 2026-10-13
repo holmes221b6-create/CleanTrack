@@ -4,6 +4,7 @@ from flask_jwt_extended import verify_jwt_in_request
 from app.extensions import db
 from app.models.membership_request import MembershipRequest
 from app.models.user import User
+from app.models.audit_log import AuditLog
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -98,6 +99,25 @@ def review_membership_request(request_id):
     membership_request.review_message = review_message or None
     membership_request.reviewed_by_id = admin.id
     membership_request.reviewed_at = db.func.now()
+
+    db.session.add(AuditLog(
+        actor_id=admin.id,
+        organization_id=admin.organization_id,
+        action="organization.membership_request_" + decision + "d",
+        resource_type="MembershipRequest",
+        resource_id=str(membership_request.id),
+        details={
+            "request_id": membership_request.id,
+            "member_id": applicant.id,
+            "member_name": applicant.full_name,
+            "member_email": applicant.email,
+            "requested_role": membership_request.requested_role,
+            "decision": decision,
+            "review_message": review_message or None,
+        },
+        ip_address=request.remote_addr,
+        user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+    ))
 
     try:
         db.session.commit()
