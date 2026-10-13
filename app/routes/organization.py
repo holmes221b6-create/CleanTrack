@@ -187,6 +187,8 @@ def current_organization():
     if request.method == "PATCH":
         if organization is None:
             return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+        if organization.status == "archived":
+            return jsonify({"error": "Restore the organization before editing its settings."}), 423
 
         allowed = ("name", "description", "avatar_url", "contact_email", "policy_text")
         changes = {}
