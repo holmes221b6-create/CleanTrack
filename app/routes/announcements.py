@@ -100,6 +100,10 @@ def _can_view(user, item, include_drafts=False):
     if item.audience_scope == "supervisors":
         return user.role == "Supervisor"
     if item.audience_scope == "team":
+        # Supervisors publish team messages to employees. Another supervisor
+        # should not see a peer's targeted employee notice by team membership alone.
+        if user.role == "Supervisor" and item.created_by_id != user.id and item.creator and item.creator.role == "Supervisor":
+            return False
         return item.team_id in _team_ids(user)
     return False
 
@@ -111,10 +115,13 @@ def _audience_users(item):
     if item.audience_scope == "supervisors":
         return query.filter_by(role="Supervisor").all()
     if item.audience_scope == "team":
-        return (query.join(TeamMember, TeamMember.user_id == User.id)
-                .filter(TeamMember.team_id == item.team_id).all())
+        query = query.join(TeamMember, TeamMember.user_id == User.id).filter(
+            TeamMember.team_id == item.team_id
+        )
+        if item.creator and item.creator.role == "Supervisor":
+            query = query.filter(User.role == "Employee")
+        return query.all()
     return []
-
 
 
 def _is_target_recipient(user, item):
@@ -125,6 +132,8 @@ def _is_target_recipient(user, item):
     if item.audience_scope == "supervisors":
         return user.role == "Supervisor"
     if item.audience_scope == "team":
+        if item.creator and item.creator.role == "Supervisor" and user.role != "Employee":
+            return False
         return item.team_id in _team_ids(user)
     return False
 
