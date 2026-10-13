@@ -2,7 +2,7 @@ import os
 from datetime import datetime, timezone
 
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from sqlalchemy import inspect, text
 
 from config import Config
@@ -15,7 +15,7 @@ from app.routes.auth import auth_bp
 from app.routes.membership import membership_bp
 from app.routes.invitations import invitations_bp
 from app.routes.notifications import notifications_bp
-from app.routes.announcements import announcements_bp
+from app.routes.announcements import announcements_bp, _process_due_schedules, _process_escalations\nfrom app.services.permissions import get_current_user
 from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
@@ -154,6 +154,24 @@ def create_app(config_class=Config):
         except Exception:
             db.session.rollback()
             app.logger.exception("Could not finalize due member terminations.")
+
+    @app.before_request
+    def _process_due_announcements_and_escalations():
+        # Run due communication checks during ordinary authenticated activity.
+        # This avoids requiring the announcements screen itself to stay open.
+        if not request.path.startswith("/api/") or request.path.startswith("/api/health"):
+            return None
+        try:
+            user = get_current_user()
+            if user is not None and user.organization_id:
+                _process_due_schedules(user.organization_id)
+                _process_escalations(user.organization_id)
+        except Exception:
+            # Anonymous/login requests and expired sessions should continue to
+            # their normal handler. Do not turn a missed scheduler check into a
+            # failed unrelated API request.
+            db.session.rollback()
+        return None
 
     @app.get("/api/health")
     def health():
