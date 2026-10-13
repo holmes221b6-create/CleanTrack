@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import (
     create_access_token,
     create_refresh_token,
+    get_jwt,
     get_jwt_identity,
     set_access_cookies,
     set_refresh_cookies,
@@ -21,6 +22,24 @@ auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
 def json_error(message, status_code):
     return jsonify({"error": message}), status_code
+
+
+@auth_bp.get("/csrf")
+def csrf_token():
+    """Return the current access-cookie CSRF token to the authenticated SPA.
+
+    The cookie is host-only for the API domain, so JavaScript on the separate
+    frontend domain cannot read it directly. The frontend then sends this
+    value in X-CSRF-TOKEN for protected write requests.
+    """
+    try:
+        verify_jwt_in_request()
+        token = get_jwt().get("csrf")
+        if not token:
+            return json_error("A valid session CSRF token is unavailable.", 401)
+        return jsonify({"csrf_token": token}), 200
+    except Exception:
+        return json_error("Authentication required.", 401)
 
 
 @auth_bp.post("/register")
