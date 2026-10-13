@@ -276,6 +276,55 @@ def current_organization():
     }), 201
 
 
+@organization_bp.get("/team-scope")
+@roles_required("Supervisor")
+def supervisor_team_scope():
+    supervisor = get_current_user()
+    if not supervisor or not supervisor.organization_id:
+        return jsonify(teams=[], locations=[], zones=[]), 200
+
+    team_rows = (
+        db.session.query(Team.id, Team.name)
+        .join(TeamMember, TeamMember.team_id == Team.id)
+        .filter(
+            TeamMember.user_id == supervisor.id,
+            Team.organization_id == supervisor.organization_id,
+            Team.status == "active",
+        )
+        .order_by(func.lower(Team.name))
+        .all()
+    )
+    assigned_team_ids = [row.id for row in team_rows]
+    operations = Operation.query.filter(
+        Operation.organization_id == supervisor.organization_id,
+        Operation.assigned_to_id == supervisor.id,
+    ).all()
+    location_ids = {item.location_id for item in operations if item.location_id is not None}
+    zone_ids = {item.zone_id for item in operations if item.zone_id is not None}
+    if assigned_team_ids:
+        location_ids.update(
+            row[0] for row in db.session.query(Location.id)
+            .filter(
+                Location.organization_id == supervisor.organization_id,
+                Location.team_id.in_(assigned_team_ids),
+            ).all()
+        )
+    locations = Location.query.filter(
+        Location.organization_id == supervisor.organization_id,
+        Location.id.in_(location_ids) if location_ids else db.false(),
+    ).order_by(func.lower(Location.name)).all()
+    zones = Zone.query.filter(
+        Zone.organization_id == supervisor.organization_id,
+        Zone.id.in_(zone_ids) if zone_ids else db.false(),
+    ).order_by(func.lower(Zone.name)).all()
+
+    return jsonify({
+        "teams": [{"id": row.id, "name": row.name} for row in team_rows],
+        "locations": [{"id": item.id, "name": item.name} for item in locations],
+        "zones": [{"id": item.id, "name": item.name, "location_id": item.location_id} for item in zones],
+    }), 200
+
+
 @organization_bp.get("/directory-options")
 @roles_required("Admin")
 def directory_options():
