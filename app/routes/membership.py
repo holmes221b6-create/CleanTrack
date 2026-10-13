@@ -19,29 +19,33 @@ membership_bp = Blueprint(
 @roles_required("Admin")
 def list_membership_requests():
     admin = get_current_user()
+    requested_status = str(request.args.get("status", "pending") or "pending").strip().lower()
+    allowed_statuses = {"pending", "approved", "rejected", "all"}
+    if requested_status not in allowed_statuses:
+        return jsonify({"error": "Status must be pending, approved, rejected, or all."}), 400
 
-    requests_list = (
-        MembershipRequest.query
-        .filter_by(
-            organization_id=admin.organization_id,
-            status="pending",
-        )
-        .order_by(MembershipRequest.created_at.asc())
-        .all()
-    )
+    query = MembershipRequest.query.filter_by(organization_id=admin.organization_id)
+    if requested_status != "all":
+        query = query.filter_by(status=requested_status)
+    requests_list = query.order_by(MembershipRequest.created_at.desc()).limit(500).all()
 
     return jsonify({
         "membership_requests": [
             {
                 **membership_request.to_dict(),
-                "applicant": (
-                    membership_request.user.to_dict()
-                    if membership_request.user
-                    else None
-                ),
+                "applicant": ({
+                    **membership_request.user.to_dict(),
+                    "phone": membership_request.user.phone,
+                } if membership_request.user else None),
+                "reviewer": ({
+                    "id": membership_request.reviewer.id,
+                    "name": membership_request.reviewer.full_name,
+                    "email": membership_request.reviewer.email,
+                } if membership_request.reviewer else None),
             }
             for membership_request in requests_list
-        ]
+        ],
+        "status_filter": requested_status,
     }), 200
 
 
