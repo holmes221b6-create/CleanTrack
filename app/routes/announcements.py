@@ -165,11 +165,25 @@ def _ensure_receipts(item):
 
 
 def _send_notice(recipient, item, notification_type):
+    # Notifications are delivery events, not a duplicate feed of the announcement
+    # text. The user opens the scoped announcement page for the full content.
+    if notification_type == "escalated_alert":
+        title = f"Alert escalated: {item.title}"
+        message = (
+            f"A {item.severity} operational alert requires Admin review. "
+            "Open Announcements & Alerts to review the details."
+        )
+    elif notification_type == "operational_alert":
+        title = f"Operational alert: {item.title}"
+        message = "A new operational alert is available. Open Announcements & Alerts for details."
+    else:
+        title = f"New announcement: {item.title}"
+        message = "A new announcement or instruction was published. Open the announcement page to read it."
     db.session.add(Notification(
         recipient_id=recipient.id,
         organization_id=item.organization_id,
-        title=item.title[:160],
-        message=item.message[:1000],
+        title=title[:160],
+        message=message[:1000],
         notification_type=notification_type[:50],
         resource_type="Announcement",
         resource_id=str(item.id),
