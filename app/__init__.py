@@ -15,6 +15,7 @@ from app.routes.auth import auth_bp
 from app.routes.membership import membership_bp
 from app.routes.invitations import invitations_bp
 from app.routes.notifications import notifications_bp
+from app.routes.announcements import announcements_bp
 from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
@@ -34,14 +35,11 @@ def create_app(config_class=Config):
     jwt.init_app(app)
     limiter.init_app(app)
 
-    # Ensure tables exist for a newly provisioned database. This creates
-    # missing tables but does not alter existing tables; use migrations for
-    # future schema changes.
+    # Create missing tables, then apply idempotent additive changes for the
+    # existing PostgreSQL schema. User-uploaded announcement bytes stay in
+    # protected database tables rather than an ephemeral Render filesystem.
     with app.app_context():
         db.create_all()
-
-        # Additive migration for organizations already present in the live DB.
-        # db.create_all() creates missing tables but does not add new columns.
         with db.engine.begin() as connection:
             tables = set(inspect(connection).get_table_names())
             if "users" in tables:
@@ -54,9 +52,7 @@ def create_app(config_class=Config):
                 }
                 for column, sql_type in termination_columns.items():
                     if column not in user_columns:
-                        connection.execute(text(
-                            f"ALTER TABLE users ADD COLUMN {column} {sql_type}"
-                        ))
+                        connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} {sql_type}"))
             if "teams" in tables:
                 team_columns = {item["name"] for item in inspect(connection).get_columns("teams")}
                 if "capacity" not in team_columns:
@@ -76,9 +72,34 @@ def create_app(config_class=Config):
                 }
                 for column, sql_type in additive_columns.items():
                     if column not in columns:
-                        connection.execute(text(
-                            f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"
-                        ))
+                        connection.execute(text(f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"))
+            if "announcements" in tables:
+                columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
+                additive_columns = {
+                    "target_location_id": "INTEGER REFERENCES locations(id)",
+                    "target_zone_id": "INTEGER REFERENCES zones(id)",
+                    "audience_scope": "VARCHAR(20) NOT NULL DEFAULT 'organization'",
+                    "severity": "VARCHAR(16) NOT NULL DEFAULT 'info'",
+                    "status": "VARCHAR(20) NOT NULL DEFAULT 'published'",
+                    "alert_status": "VARCHAR(20) NOT NULL DEFAULT 'open'",
+                    "is_pinned": "BOOLEAN NOT NULL DEFAULT FALSE",
+                    "requires_acknowledgement": "BOOLEAN NOT NULL DEFAULT FALSE",
+                    "escalate_to_admin": "BOOLEAN NOT NULL DEFAULT FALSE",
+                    "escalation_after_minutes": "INTEGER",
+                    "escalated_at": "TIMESTAMP WITH TIME ZONE",
+                    "resolved_at": "TIMESTAMP WITH TIME ZONE",
+                    "resolved_by_id": "INTEGER REFERENCES users(id)",
+                    "scheduled_at": "TIMESTAMP WITH TIME ZONE",
+                    "archived_at": "TIMESTAMP WITH TIME ZONE",
+                }
+                for column, sql_type in additive_columns.items():
+                    if column not in columns:
+                        connection.execute(text(f"ALTER TABLE announcements ADD COLUMN {column} {sql_type}"))
+                # Preserve the publish/draft state of legacy announcement rows.
+                connection.execute(text(
+                    "UPDATE announcements SET status = CASE WHEN published = TRUE THEN 'published' ELSE 'draft' END "
+                    "WHERE status IS NULL OR status = ''"
+                ))
 
     cors.init_app(
         app,
@@ -93,6 +114,7 @@ def create_app(config_class=Config):
     app.register_blueprint(membership_bp)
     app.register_blueprint(invitations_bp)
     app.register_blueprint(notifications_bp)
+    app.register_blueprint(announcements_bp)
     app.register_blueprint(teams_bp)
     app.register_blueprint(locations_bp)
     app.register_blueprint(zones_bp)
@@ -144,6 +166,10 @@ def create_app(config_class=Config):
                 and "/api/organizations/members" in registered_routes
                 and "/api/organizations/directory-options" in registered_routes
             ),
+            "announcements_api_registered": (
+                "/api/announcements" in registered_routes
+                and "/api/announcements/options" in registered_routes
+            ),
         }), 200
 
     @app.get("/api/health/db")
@@ -151,18 +177,10 @@ def create_app(config_class=Config):
         try:
             with db.engine.connect() as connection:
                 connection.exec_driver_sql("SELECT 1")
-
-            return jsonify({
-                "status": "ok",
-                "database": "connected",
-            }), 200
-
+            return jsonify({"status": "ok", "database": "connected"}), 200
         except Exception:
             app.logger.exception("Database health check failed")
-            return jsonify({
-                "status": "error",
-                "database": "unavailable",
-            }), 503
+            return jsonify({"status": "error", "database": "unavailable"}), 503
 
     @app.errorhandler(404)
     def not_found(_error):
@@ -174,8 +192,6 @@ def create_app(config_class=Config):
 
     @app.errorhandler(500)
     def internal_error(_error):
-        return jsonify({
-            "error": "An internal server error occurred"
-        }), 500
+        return jsonify({"error": "An internal server error occurred"}), 500
 
     return app
