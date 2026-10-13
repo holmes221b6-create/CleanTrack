@@ -57,6 +57,8 @@ def create_app(config_class=Config):
                 team_columns = {item["name"] for item in inspect(connection).get_columns("teams")}
                 if "capacity" not in team_columns:
                     connection.execute(text("ALTER TABLE teams ADD COLUMN capacity INTEGER"))
+                if "whatsapp_group_url" not in team_columns:
+                    connection.execute(text("ALTER TABLE teams ADD COLUMN whatsapp_group_url VARCHAR(500)"))
             if "zones" in tables:
                 zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
                 if "team_id" not in zone_columns:
