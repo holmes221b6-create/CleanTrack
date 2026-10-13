@@ -183,6 +183,71 @@ def current_organization():
         return jsonify(organization=payload, stats=payload["stats"]), 200
 
     data = request.get_json(silent=True) or {}
+
+    if request.method == "PATCH":
+        if organization is None:
+            return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+
+        allowed = ("name", "description", "avatar_url", "contact_email", "policy_text")
+        changes = {}
+        errors = []
+        limits = {"name": 150, "description": 5000, "avatar_url": 500, "contact_email": 254, "policy_text": 12000}
+        for field in allowed:
+            if field not in data:
+                continue
+            value = data[field]
+            if value is None:
+                value = ""
+            if not isinstance(value, str):
+                errors.append(f"{field} must be text.")
+                continue
+            value = value.strip()
+            if len(value) > limits[field]:
+                errors.append(f"{field} must be {limits[field]} characters or fewer.")
+                continue
+            if field == "name" and len(value) < 2:
+                errors.append("Organization name must contain at least two characters.")
+                continue
+            if field == "avatar_url" and value:
+                parsed = urlparse(value)
+                if parsed.scheme not in ("https", "http") or not parsed.netloc:
+                    errors.append("Avatar URL must be a valid http:// or https:// URL.")
+                    continue
+            if field == "contact_email" and value and ("@" not in value or "." not in value.rsplit("@", 1)[-1]):
+                errors.append("Enter a valid organization contact email address.")
+                continue
+            old_value = getattr(organization, field)
+            new_value = value if field == "name" else (value or None)
+            if old_value != new_value:
+                changes[field] = {"from": old_value, "to": new_value}
+
+        if errors:
+            return jsonify({"error": " ".join(errors)}), 400
+        if not changes:
+            return jsonify({
+                "message": "No organization settings changed.",
+                "organization": _organization_payload(organization),
+            }), 200
+
+        for field, values in changes.items():
+            setattr(organization, field, values["to"])
+        _record_organization_audit(admin, organization, "organization.settings_updated", {
+            "changes": changes,
+            "changed_fields": list(changes.keys()),
+        })
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            return jsonify({"error": "Organization settings could not be saved."}), 500
+
+        payload = _organization_payload(organization)
+        return jsonify({
+            "message": "Organization settings saved.",
+            "organization": payload,
+            "stats": payload["stats"],
+        }), 200
+
     name = data.get("name") or data.get("organization_name") or ""
     if not isinstance(name, str) or len(name.strip()) < 2:
         return jsonify({"error": "Enter an organization name with at least two characters."}), 400
