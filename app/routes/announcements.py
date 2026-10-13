@@ -481,6 +481,22 @@ def list_announcements():
                 db.session.add(receipt)
                 changed = True
         data = item.to_dict(include_receipts=user.role == "Admin")
+        if user.role == "Admin":
+            effective_status = data.get("status")
+            audience_rows = _audience_users(item) if effective_status == "published" else []
+            current_recipient_ids = {
+                person.id for person in audience_rows
+                if person.id != item.created_by_id
+            }
+            current_receipts = [
+                row for row in item.receipts
+                if row.user_id in current_recipient_ids
+            ]
+            data["receipt_summary"] = {
+                "recipient_count": len(current_recipient_ids),
+                "read_count": sum(1 for row in current_receipts if row.read_at is not None),
+                "acknowledged_count": sum(1 for row in current_receipts if row.acknowledged_at is not None),
+            }
         if receipt:
             state = "acknowledged" if receipt.acknowledged_at else "read" if receipt.read_at else "unread"
             data["my_receipt"] = {"read_at": receipt.read_at.isoformat() if receipt.read_at else None, "acknowledged_at": receipt.acknowledged_at.isoformat() if receipt.acknowledged_at else None, "state": state}
