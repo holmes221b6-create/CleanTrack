@@ -293,7 +293,7 @@ def current_user():
                             if not isinstance(setting, bool):
                                 return json_error(f"{section} preferences must be true or false.", 400)
                         elif key == "exportFormat":
-                            if setting not in {"csv", "xlsx", "json", "pdf"}:
+                            if not isinstance(setting, str) or setting not in {"csv", "xlsx", "json", "pdf"}:
                                 return json_error("Invalid export format preference.", 400)
                         elif key == "dateRange":
                             if str(setting) not in {"7", "30", "90", "365"}:
