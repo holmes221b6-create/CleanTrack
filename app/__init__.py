@@ -75,6 +75,7 @@ def create_app(config_class=Config):
                         connection.execute(text(f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"))
             if "announcements" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
+                had_status = "status" in columns
                 additive_columns = {
                     "target_location_id": "INTEGER REFERENCES locations(id)",
                     "target_zone_id": "INTEGER REFERENCES zones(id)",
@@ -96,10 +97,10 @@ def create_app(config_class=Config):
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE announcements ADD COLUMN {column} {sql_type}"))
                 # Preserve the publish/draft state of legacy announcement rows.
-                connection.execute(text(
-                    "UPDATE announcements SET status = CASE WHEN published = TRUE THEN 'published' ELSE 'draft' END "
-                    "WHERE status IS NULL OR status = ''"
-                ))
+                if not had_status:
+                    connection.execute(text(
+                        "UPDATE announcements SET status = CASE WHEN published = TRUE THEN 'published' ELSE 'draft' END"
+                    ))
 
     cors.init_app(
         app,
