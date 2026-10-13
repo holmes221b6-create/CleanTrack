@@ -191,6 +191,18 @@ def current_user():
                 if len(phone) > 30:
                     return json_error("Phone must be 30 characters or fewer.", 400)
                 user.phone = phone or None
+            if "current_password" in data or "new_password" in data:
+                current_password = data.get("current_password")
+                new_password = data.get("new_password")
+                if not isinstance(current_password, str) or not current_password:
+                    return json_error("Current password is required.", 400)
+                if not user.check_password(current_password):
+                    return json_error("Current password is incorrect.", 400)
+                if not isinstance(new_password, str) or len(new_password) < 8:
+                    return json_error("New password must be at least 8 characters long.", 400)
+                if len(new_password) > 128:
+                    return json_error("New password is too long.", 400)
+                user.set_password(new_password)
             try:
                 db.session.commit()
             except Exception:
