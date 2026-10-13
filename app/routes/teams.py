@@ -294,13 +294,19 @@ def teams_collection():
             "name": name, "description": description,
             "capacity": capacity, "status": "active",
         })
-        _notify_admins(
-            admin, team, "Team created",
-            f'{admin.full_name} created the team "{team.name}".',
-        )
-        # Build the response before commit so serialization errors cannot
-        # make a successful insert look like a failed create request.
-        team_payload = _team_data(team, admin)["team"]
+        # Notifications are helpful but must never block team creation.
+        # Isolate them in a savepoint so a notification issue rolls back only
+        # the notification writes, not the team or its audit record.
+        try:
+            with db.session.begin_nested():
+                _notify_admins(
+                    admin, team, "Team created",
+                    f'{admin.full_name} created the team "{team.name}".',
+                )
+        except Exception:
+            from flask import current_app
+            current_app.logger.exception("Could not create team notifications for team %s", team.id)
+        team_payload = team.to_dict()
         db.session.commit()
     except Exception:
         db.session.rollback()
