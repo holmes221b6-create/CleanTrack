@@ -194,6 +194,9 @@ def create_app(config_class=Config):
                 "/api/announcements" in registered_routes
                 and "/api/announcements/options" in registered_routes
             ),
+            "announcements_scheduler_running": bool(
+                getattr(app.extensions.get("cleantrack_announcement_scheduler"), "running", False)
+            ),
         }), 200
 
     @app.get("/api/health/db")
