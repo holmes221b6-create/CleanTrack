@@ -164,6 +164,19 @@ def _ensure_receipts(item):
     return changed
 
 
+def _reset_current_audience_receipts(item):
+    # A materially edited or re-published announcement is a new reading
+    # version. Current recipients must read/acknowledge that version again.
+    target_ids = {
+        person.id for person in _audience_users(item)
+        if person.id != item.created_by_id
+    }
+    for receipt in AnnouncementReceipt.query.filter_by(announcement_id=item.id).all():
+        if receipt.user_id in target_ids:
+            receipt.read_at = None
+            receipt.acknowledged_at = None
+
+
 def _send_notice(recipient, item, notification_type):
     # Notifications are delivery events, not a duplicate feed of the announcement
     # text. The user opens the scoped announcement page for the full content.
@@ -191,10 +204,13 @@ def _send_notice(recipient, item, notification_type):
 
 
 def _publish(item, actor=None):
+    needs_fresh_receipts = not bool(item.published_at)
     item.status = "published"
     item.published = True
     item.published_at = _now()
     item.scheduled_at = None
+    if needs_fresh_receipts:
+        _reset_current_audience_receipts(item)
     users = _audience_users(item)
     for recipient in users:
         if recipient.id != item.created_by_id:
@@ -595,8 +611,6 @@ def update_announcement(announcement_id):
             if just_published:
                 item.published_at = _now()
                 item.published = True
-            # Ensure newly-targeted members receive their own persisted receipt.
-            _ensure_receipts(item)
             after = {
                 "title": item.title, "message": item.message, "status": item.status,
                 "announcement_type": item.announcement_type, "severity": item.severity,
@@ -612,6 +626,10 @@ def update_announcement(announcement_id):
                 "requires_acknowledgement", "expires_at",
             }
             materially_changed = any(before[key] != after[key] for key in notify_fields)
+            if just_published or (was_published and materially_changed):
+                _reset_current_audience_receipts(item)
+            # Ensure newly-targeted members receive their own persisted receipt.
+            _ensure_receipts(item)
             if just_published or (was_published and materially_changed):
                 for recipient in _audience_users(item):
                     if recipient.id != user.id:
