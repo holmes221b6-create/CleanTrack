@@ -241,6 +241,9 @@ def _process_escalations(org_id):
             db.session.commit()
         except Exception:
             db.session.rollback()
+    else:
+        # Release row locks acquired for alerts that are not due to escalate.
+        db.session.rollback()
 
 
 def _validate_target(user, data, audience):
