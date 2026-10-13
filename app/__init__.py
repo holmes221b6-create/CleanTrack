@@ -15,7 +15,8 @@ from app.routes.auth import auth_bp
 from app.routes.membership import membership_bp
 from app.routes.invitations import invitations_bp
 from app.routes.notifications import notifications_bp
-from app.routes.announcements import announcements_bp, _process_due_schedules, _process_escalations\nfrom app.services.permissions import get_current_user
+from app.routes.announcements import announcements_bp, _process_due_schedules, _process_escalations
+from app.services.permissions import get_current_user
 from app.services.announcement_scheduler import start_announcement_scheduler
 from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
