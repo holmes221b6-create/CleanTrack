@@ -233,6 +233,12 @@ def login():
                 403,
             )
 
+        if user.organization is not None and user.organization.status == "archived" and user.role != "Admin":
+            return json_error(
+                "This organization is archived. Contact its Admin before signing in again.",
+                403,
+            )
+
         access_token = create_access_token(
             identity=str(user.id),
             additional_claims={"user_id": user.id},
