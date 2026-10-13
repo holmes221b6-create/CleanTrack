@@ -226,6 +226,88 @@ def current_user():
                 if len(new_password) > 128:
                     return json_error("New password is too long.", 400)
                 user.set_password(new_password)
+
+            if "avatar_url" in data:
+                avatar_url = data.get("avatar_url")
+                if avatar_url is not None and not isinstance(avatar_url, str):
+                    return json_error("Avatar URL must be text.", 400)
+                avatar_url = (avatar_url or "").strip()
+                if len(avatar_url) > 500 or (
+                    avatar_url and not avatar_url.startswith(("https://", "http://"))
+                ):
+                    return json_error("Avatar URL must be an HTTP(S) URL of at most 500 characters.", 400)
+                user.avatar_url = avatar_url or None
+
+            if "preferences" in data:
+                incoming = data.get("preferences")
+                if not isinstance(incoming, dict) or len(str(incoming)) > 20000:
+                    return json_error("Preferences must be a valid settings object.", 400)
+                allowed = {
+                    "language", "dateFormat", "timeFormat", "timeZone",
+                    "currency", "theme", "notifications", "reports", "privacy",
+                }
+                if any(key not in allowed for key in incoming):
+                    return json_error("One or more preference fields are not supported.", 400)
+
+                cleaned = {}
+                choices = {
+                    "language": {"en", "es", "ar", "hi", "ur", "zh"},
+                    "dateFormat": {"YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD Mon YYYY"},
+                    "timeFormat": {"12", "24"},
+                    "theme": {"light", "dark"},
+                    "currency": {
+                        "USD", "EUR", "GBP", "INR", "CNY", "JPY", "KRW", "AED",
+                        "SAR", "QAR", "KWD", "SGD", "AUD", "CAD", "CHF", "NZD",
+                        "HKD", "THB", "IDR", "MYR", "PHP", "VND", "BDT", "PKR",
+                        "LKR", "NPR", "ZAR", "NGN", "KES", "EGP", "TRY", "BRL",
+                        "MXN", "ARS", "CLP", "COP", "PLN", "SEK", "NOK", "DKK", "RUB",
+                    },
+                }
+                for key, options in choices.items():
+                    if key in incoming:
+                        value = incoming[key]
+                        if not isinstance(value, str) or value not in options:
+                            return json_error(f"Invalid {key} preference.", 400)
+                        cleaned[key] = value
+                if "timeZone" in incoming:
+                    zone = incoming["timeZone"]
+                    if not isinstance(zone, str) or not 1 <= len(zone) <= 100:
+                        return json_error("Invalid time zone preference.", 400)
+                    cleaned["timeZone"] = zone
+
+                nested_rules = {
+                    "notifications": {"inApp", "taskUpdates", "announcements", "security", "email"},
+                    "reports": {"exportFormat", "dateRange", "includeArchived"},
+                    "privacy": {"restricted", "restrictedVisibility"},
+                }
+                for section, keys in nested_rules.items():
+                    if section not in incoming:
+                        continue
+                    value = incoming[section]
+                    if not isinstance(value, dict) or any(key not in keys for key in value):
+                        return json_error(f"Invalid {section} preferences.", 400)
+                    current = user.preferences.get(section, {}) if isinstance(user.preferences, dict) else {}
+                    merged = dict(current) if isinstance(current, dict) else {}
+                    for key, setting in value.items():
+                        if section in {"notifications", "privacy"}:
+                            if not isinstance(setting, bool):
+                                return json_error(f"{section} preferences must be true or false.", 400)
+                        elif key == "exportFormat":
+                            if setting not in {"csv", "xlsx", "json", "pdf"}:
+                                return json_error("Invalid export format preference.", 400)
+                        elif key == "dateRange":
+                            if str(setting) not in {"7", "30", "90", "365"}:
+                                return json_error("Invalid report date range preference.", 400)
+                            setting = str(setting)
+                        elif key == "includeArchived" and not isinstance(setting, bool):
+                            return json_error("Include archived must be true or false.", 400)
+                        merged[key] = setting
+                    cleaned[section] = merged
+
+                merged_preferences = dict(user.preferences) if isinstance(user.preferences, dict) else {}
+                merged_preferences.update(cleaned)
+                user.preferences = merged_preferences
+
             try:
                 db.session.commit()
             except Exception:
