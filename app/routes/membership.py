@@ -103,7 +103,7 @@ def review_membership_request(request_id):
     db.session.add(AuditLog(
         actor_id=admin.id,
         organization_id=admin.organization_id,
-        action="organization.membership_request_" + decision + "d",
+        action="organization.membership_request_" + ("approved" if decision == "approve" else "rejected"),
         resource_type="MembershipRequest",
         resource_id=str(membership_request.id),
         details={
