@@ -534,19 +534,56 @@ def update_announcement(announcement_id):
         return jsonify({"error": "Announcement not found."}), 404
     if user.role == "Supervisor" and (item.created_by_id != user.id or item.team_id not in _team_ids(user)):
         return jsonify({"error": "Supervisors can edit only their own announcements for assigned teams."}), 403
-    before = {"title": item.title, "status": item.status, "severity": item.severity, "is_pinned": item.is_pinned, "audience_scope": item.audience_scope}
+    before = {
+        "title": item.title, "message": item.message, "status": item.status,
+        "announcement_type": item.announcement_type, "severity": item.severity,
+        "is_pinned": item.is_pinned, "audience_scope": item.audience_scope,
+        "team_id": item.team_id, "target_location_id": item.target_location_id,
+        "target_zone_id": item.target_zone_id,
+        "requires_acknowledgement": item.requires_acknowledgement,
+        "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+    }
     data = request.get_json(silent=True) or {}
     try:
         old_status = item.status
+        was_published = old_status == "published" and bool(item.published_at)
         _apply_payload(item, user, data)
-        if item.status == "published" and (old_status != "published" or not item.published_at):
-            item.published_at = _now()
-            item.published = True
-            for recipient in _audience_users(item):
-                if recipient.id != user.id:
-                    _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
+        if item.status == "published":
+            just_published = old_status != "published" or not item.published_at
+            if just_published:
+                item.published_at = _now()
+                item.published = True
+            # Ensure newly-targeted members receive their own persisted receipt.
             _ensure_receipts(item)
-        _audit(user, "announcement.updated", item, {"before": before, "after": {"title": item.title, "status": item.status, "severity": item.severity, "is_pinned": item.is_pinned, "audience_scope": item.audience_scope}})
+            after = {
+                "title": item.title, "message": item.message, "status": item.status,
+                "announcement_type": item.announcement_type, "severity": item.severity,
+                "is_pinned": item.is_pinned, "audience_scope": item.audience_scope,
+                "team_id": item.team_id, "target_location_id": item.target_location_id,
+                "target_zone_id": item.target_zone_id,
+                "requires_acknowledgement": item.requires_acknowledgement,
+                "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+            }
+            notify_fields = {
+                "title", "message", "announcement_type", "severity", "audience_scope",
+                "team_id", "target_location_id", "target_zone_id",
+                "requires_acknowledgement", "expires_at",
+            }
+            materially_changed = any(before[key] != after[key] for key in notify_fields)
+            if just_published or (was_published and materially_changed):
+                for recipient in _audience_users(item):
+                    if recipient.id != user.id:
+                        _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
+        after = {
+            "title": item.title, "message": item.message, "status": item.status,
+            "announcement_type": item.announcement_type, "severity": item.severity,
+            "is_pinned": item.is_pinned, "audience_scope": item.audience_scope,
+            "team_id": item.team_id, "target_location_id": item.target_location_id,
+            "target_zone_id": item.target_zone_id,
+            "requires_acknowledgement": item.requires_acknowledgement,
+            "expires_at": item.expires_at.isoformat() if item.expires_at else None,
+        }
+        _audit(user, "announcement.updated", item, {"before": before, "after": after})
         db.session.commit()
     except PermissionError as exc:
         db.session.rollback()
@@ -641,6 +678,7 @@ def list_receipts(announcement_id):
     if user.role == "Supervisor" and (item.audience_scope != "team" or item.team_id not in _team_ids(user)):
         return jsonify({"error": "Supervisors can review receipts only for announcements targeted to their assigned teams."}), 403
     rows = AnnouncementReceipt.query.filter_by(announcement_id=item.id).join(User, User.id == AnnouncementReceipt.user_id).order_by(User.full_name.asc()).all()
+    rows = [row for row in rows if row.user_id != item.created_by_id and _is_target_recipient(row.user, item)]
     return jsonify({"announcement_id": item.id, "requires_acknowledgement": item.requires_acknowledgement, "receipts": [row.to_dict() for row in rows]}), 200
 
 
