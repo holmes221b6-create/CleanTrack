@@ -1,7 +1,8 @@
-
 """CleanTrack database models."""
 
 from app.models.announcement import Announcement
+from app.models.announcement_attachment import AnnouncementAttachment
+from app.models.announcement_receipt import AnnouncementReceipt
 from app.models.audit_log import AuditLog
 from app.models.invitation import Invitation
 from app.models.location import Location
@@ -18,6 +19,8 @@ from app.models.zone import Zone
 
 __all__ = [
     "Announcement",
+    "AnnouncementAttachment",
+    "AnnouncementReceipt",
     "AuditLog",
     "Invitation",
     "Location",
