@@ -96,7 +96,7 @@ def create_app(config_class=Config):
         try:
             now = datetime.now(timezone.utc)
             due_members = User.query.filter(
-                User.account_status == "termination_pending",
+                User.account_status.in_(("termination_pending", "suspended")),
                 User.termination_effective_at.isnot(None),
                 User.termination_effective_at <= now,
             ).all()
@@ -113,7 +113,7 @@ def create_app(config_class=Config):
                         "member_name": member.full_name,
                         "email": member.email,
                         "termination_effective_at": member.termination_effective_at.isoformat() if member.termination_effective_at else None,
-                        "message": "Termination grace period elapsed. Account access was disabled; historical records were retained.",
+                        "message": "Termination deadline elapsed. Account access was disabled; historical records were retained.",
                     },
                 ))
             if due_members:
