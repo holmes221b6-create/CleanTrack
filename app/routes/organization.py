@@ -816,3 +816,99 @@ def cancel_member_termination(member_id):
         "message": "Pending termination cancelled. The member remains active.",
         "staff_member": member.to_dict(),
     }), 200
+
+
+@organization_bp.post("/members/<int:member_id>/suspend")
+@roles_required("Admin")
+def suspend_organization_member():
+    admin = get_current_user()
+    member = User.query.filter_by(
+        id=member_id,
+        organization_id=admin.organization_id,
+    ).first()
+    if member is None or member.role not in {"Supervisor", "Employee"}:
+        return jsonify({"error": "Organization member not found."}), 404
+    if member.account_status == "suspended":
+        return jsonify({"error": "This member is already suspended."}), 409
+    if member.account_status not in {"active", "termination_pending"}:
+        return jsonify({"error": "Only active or termination-pending members can be suspended."}), 409
+
+    data = request.get_json(silent=True) or {}
+    reason = data.get("reason")
+    if not isinstance(reason, str) or len(reason.strip()) < 10:
+        return jsonify({"error": "Enter a documented reason with at least 10 characters for immediate suspension."}), 400
+    reason = reason.strip()
+    if len(reason) > 1000:
+        return jsonify({"error": "Suspension reason must be 1000 characters or fewer."}), 400
+
+    previous_status = member.account_status
+    member.account_status = "suspended"
+    _record_organization_audit(
+        admin, db.session.get(Organization, admin.organization_id),
+        "organization.member_suspended", {
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "member_email": member.email,
+            "reason": reason,
+            "previous_status": previous_status,
+            "new_status": "suspended",
+            "scope": "Immediate account/API access suspension",
+            "termination_effective_at": member.termination_effective_at.isoformat() if member.termination_effective_at else None,
+            "message": "Member access suspended immediately by an Admin with a documented reason.",
+        },
+    )
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Member could not be suspended."}), 500
+    return jsonify({
+        "message": "Member access has been suspended immediately. The action and reason were recorded in the organization audit trail.",
+        "staff_member": member.to_dict(),
+    }), 200
+
+
+@organization_bp.post("/members/<int:member_id>/suspend/restore")
+@roles_required("Admin")
+def restore_suspended_organization_member():
+    admin = get_current_user()
+    member = User.query.filter_by(
+        id=member_id,
+        organization_id=admin.organization_id,
+    ).first()
+    if member is None or member.role not in {"Supervisor", "Employee"}:
+        return jsonify({"error": "Organization member not found."}), 404
+    if member.account_status != "suspended":
+        return jsonify({"error": "This member is not suspended."}), 409
+
+    old_status = member.account_status
+    deadline = member.termination_effective_at
+    if deadline is not None and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    pending_termination = (
+        member.termination_requested_at is not None
+        and deadline is not None
+        and deadline > datetime.now(timezone.utc)
+    )
+    member.account_status = "termination_pending" if pending_termination else "active"
+    _record_organization_audit(
+        admin, db.session.get(Organization, admin.organization_id),
+        "organization.member_suspension_lifted", {
+            "member_id": member.id,
+            "member_name": member.full_name,
+            "member_email": member.email,
+            "previous_status": old_status,
+            "new_status": member.account_status,
+            "termination_effective_at": member.termination_effective_at.isoformat() if member.termination_effective_at else None,
+            "message": "Admin restored member access after a recorded suspension.",
+        },
+    )
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Member access could not be restored."}), 500
+    return jsonify({
+        "message": "Member access restored. " + ("The scheduled termination remains in effect." if pending_termination else "The member is active."),
+        "staff_member": member.to_dict(),
+    }), 200
