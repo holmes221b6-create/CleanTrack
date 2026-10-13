@@ -49,6 +49,8 @@ def create_app(config_class=Config):
                 termination_columns = {
                     "termination_requested_at": "TIMESTAMP WITH TIME ZONE",
                     "termination_effective_at": "TIMESTAMP WITH TIME ZONE",
+                    "avatar_url": "VARCHAR(500)",
+                    "preferences": "JSON",
                 }
                 for column, sql_type in termination_columns.items():
                     if column not in user_columns:
