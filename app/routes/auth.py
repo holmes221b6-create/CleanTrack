@@ -25,145 +25,163 @@ def json_error(message, status_code):
 
 @auth_bp.post("/register")
 def register():
-    data = request.get_json(silent=True) or {}
+    from datetime import datetime, timezone
+    import hashlib
 
-    full_name = data.get("full_name", "").strip()
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
-    role = data.get("role", "").strip().capitalize()
-    print("REGISTER DEBUG - incoming role:", repr(data.get("role")))
-    print("REGISTER DEBUG - normalized role:", repr(role))
-    organization_name = data.get("organization_name", "").strip()
-    organization_code = data.get("organization_code", "").strip()
+    from app.models.audit_log import AuditLog
+    from app.models.invitation import Invitation
+    from app.models.notification import Notification
+
+    data = request.get_json(silent=True) or {}
+    full_name = str(data.get("full_name") or "").strip()
+    email = str(data.get("email") or "").strip().lower()
+    password = str(data.get("password") or "")
+    role = str(data.get("role") or "").strip().capitalize()
+    organization_name = str(data.get("organization_name") or "").strip()
+    organization_code = str(data.get("organization_code") or "").strip()
+    phone = str(data.get("phone") or "").strip()
+    invitation_token = str(data.get("invitation_token") or "").strip()
 
     if not full_name or not email or not password:
-        return json_error(
-            "Full name, email, and password are required.",
-            400,
-        )
-
+        return json_error("Full name, email, and password are required.", 400)
+    if len(full_name) < 2 or len(full_name) > 120:
+        return json_error("Full name must contain 2 to 120 characters.", 400)
+    if len(email) > 254 or len(phone) > 30:
+        return json_error("Email or phone number is too long.", 400)
+    if not isinstance(data.get("accept_terms", True), bool):
+        return json_error("Invalid terms acceptance value.", 400)
     if role not in {"Admin", "Supervisor", "Employee"}:
         return json_error("A valid role is required.", 400)
-
     if len(password) < 8:
-        return json_error(
-            "Password must be at least 8 characters long.",
-            400,
-        )
+        return json_error("Password must be at least 8 characters long.", 400)
 
-    existing_user = User.query.filter(
-        func.lower(User.email) == email
-    ).first()
-
-    if existing_user:
-        return json_error(
-            "An account with this email already exists.",
-            409,
-        )
+    if User.query.filter(func.lower(User.email) == email).first():
+        return json_error("An account with this email already exists.", 409)
 
     organization = None
+    invitation = None
 
-    if role == "Admin":
+    if invitation_token:
+        if role not in {"Supervisor", "Employee"}:
+            return json_error("Invitation links can only be used for Supervisor or Employee accounts.", 400)
+        token_hash = hashlib.sha256(invitation_token.encode("utf-8")).hexdigest()
+        invitation = Invitation.query.filter_by(token_hash=token_hash).first()
+        if invitation is None or invitation.status != "pending":
+            return json_error("This invitation link is invalid, cancelled, or already used.", 400)
+        expiry = invitation.expires_at
+        now = datetime.now(timezone.utc)
+        if expiry is not None:
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry <= now:
+                return json_error("This invitation link has expired. Ask the Admin for a new link.", 410)
+        if invitation.email.lower() != email:
+            return json_error("Use the email address this invitation was issued to.", 400)
+        if invitation.role != role:
+            return json_error("Choose the role specified in this invitation.", 400)
+        organization = invitation.organization
+        if organization is None or organization.status != "active":
+            return json_error("This organization is not accepting membership requests.", 400)
+    elif role == "Admin":
         if not organization_name:
-            return json_error(
-                "Organization name is required for Admin registration.",
-                400,
-            )
-
+            return json_error("Organization name is required for Admin registration.", 400)
         organization = Organization.query.filter(
             func.lower(Organization.name) == organization_name.lower()
         ).first()
-
         if organization:
-            return json_error(
-                "This organization already exists. Ask its Admin for "
-                "a membership code.",
-                409,
-            )
-
+            return json_error("This organization already exists. Ask its Admin for a membership code.", 409)
         organization = Organization(name=organization_name)
         db.session.add(organization)
         db.session.flush()
-
-        user = User(
-            full_name=full_name,
-            email=email,
-            role="Admin",
-            organization_id=organization.id,
-            account_status="active",
-            email_verified=False,
-        )
-
-        user.set_password(password)
-        db.session.add(user)
-
     else:
         if not organization_code:
-            return json_error(
-                "Organization code is required.",
-                400,
-            )
-
-        organization = Organization.query.filter_by(
-            organization_code=organization_code
-        ).first()
-
+            return json_error("Organization code is required.", 400)
+        organization = Organization.query.filter_by(organization_code=organization_code).first()
         if organization is None:
             return json_error("Invalid organization code.", 400)
-
         if organization.status != "active":
-            return json_error(
-                "This organization is not accepting membership requests.",
-                400,
-            )
+            return json_error("This organization is not accepting membership requests.", 400)
 
-        user = User(
-            full_name=full_name,
-            email=email,
-            role=role,
-            organization_id=organization.id,
-            account_status="pending",
-            email_verified=False,
-        )
+    user = User(
+        full_name=full_name,
+        email=email,
+        phone=phone or None,
+        role=role,
+        organization_id=organization.id,
+        account_status="active" if role == "Admin" else "pending",
+        email_verified=False,
+    )
+    user.set_password(password)
+    db.session.add(user)
+    db.session.flush()
 
-        user.set_password(password)
-        db.session.add(user)
-        db.session.flush()
-
+    if role != "Admin":
         membership_request = MembershipRequest(
             user_id=user.id,
             organization_id=organization.id,
             requested_role=role,
             status="pending",
+            message=("Submitted through an Admin invitation link." if invitation else None),
         )
         db.session.add(membership_request)
+        db.session.flush()
+
+        if invitation:
+            invitation.status = "accepted"
+            invitation.accepted_at = datetime.now(timezone.utc)
+
+        db.session.add(AuditLog(
+            actor_id=user.id,
+            organization_id=organization.id,
+            action="organization.membership_request_submitted",
+            resource_type="MembershipRequest",
+            resource_id=str(membership_request.id),
+            details={
+                "request_id": membership_request.id,
+                "member_id": user.id,
+                "member_name": user.full_name,
+                "member_email": user.email,
+                "requested_role": role,
+                "invitation_id": invitation.id if invitation else None,
+            },
+            ip_address=request.remote_addr,
+            user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+        ))
+
+        admins = User.query.filter_by(
+            organization_id=organization.id,
+            role="Admin",
+            account_status="active",
+        ).all()
+        for admin in admins:
+            db.session.add(Notification(
+                recipient_id=admin.id,
+                organization_id=organization.id,
+                title="New membership request",
+                message=f"{user.full_name} requested to join as {role}. Review the request on the Invitations page.",
+                notification_type="membership_request",
+                resource_type="MembershipRequest",
+                resource_id=str(membership_request.id),
+            ))
 
     try:
         db.session.commit()
     except Exception:
         db.session.rollback()
-        return json_error(
-            "Registration could not be completed.",
-            500,
-        )
+        return json_error("Registration could not be completed.", 500)
 
     if role == "Admin":
         return jsonify({
-            "message": (
-                "Admin account created. Email verification has not yet "
-                "been configured."
-            ),
+            "message": "Admin account created. Email verification has not yet been configured.",
             "user": user.to_dict(),
             "organization_code": organization.organization_code,
         }), 201
 
     return jsonify({
-        "message": (
-            "Membership request submitted. An Admin must approve it "
-            "before you can sign in."
-        ),
+        "message": "Membership request submitted. An Admin must approve it before you can sign in. Email notifications are not configured, but the request is in the Admin's Invitations page.",
         "user": user.to_dict(),
         "membership_request": membership_request.to_dict(),
+        "membership_status": "pending",
     }), 201
 
 
