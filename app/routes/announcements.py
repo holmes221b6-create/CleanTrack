@@ -110,6 +110,19 @@ def _audience_users(item):
     return []
 
 
+
+def _is_target_recipient(user, item):
+    if user.organization_id != item.organization_id or user.account_status != "active":
+        return False
+    if item.audience_scope == "organization":
+        return True
+    if item.audience_scope == "supervisors":
+        return user.role == "Supervisor"
+    if item.audience_scope == "team":
+        return item.team_id in _team_ids(user)
+    return False
+
+
 def _audit(actor, action, item, details=None):
     db.session.add(AuditLog(
         actor_id=actor.id if actor else None,
@@ -429,26 +442,30 @@ def list_announcements():
     changed = False
     result = []
     for item in rows:
-        if _can_view(user, item, include_drafts=(user.role == "Supervisor")) and item.status not in {"draft", "scheduled"}:
+        can_view = _can_view(user, item, include_drafts=(user.role == "Supervisor"))
+        if not can_view:
+            continue
+        is_recipient = _is_target_recipient(user, item)
+        receipt = None
+        if is_recipient and user.id != item.created_by_id:
             receipt = AnnouncementReceipt.query.filter_by(announcement_id=item.id, user_id=user.id).first()
-            if receipt is None and user.id != item.created_by_id:
+            is_published = item.status == "published" or (
+                item.status == "scheduled" and item.scheduled_at and
+                (item.scheduled_at.replace(tzinfo=timezone.utc) if item.scheduled_at.tzinfo is None else item.scheduled_at) <= _now()
+            )
+            if receipt is None and is_published:
                 receipt = AnnouncementReceipt(announcement_id=item.id, user_id=user.id)
                 db.session.add(receipt)
                 changed = True
-            data = item.to_dict(include_receipts=user.role == "Admin")
-            if receipt:
-                data["my_receipt"] = {"read_at": receipt.read_at.isoformat() if receipt.read_at else None, "acknowledged_at": receipt.acknowledged_at.isoformat() if receipt.acknowledged_at else None, "state": receipt.state if hasattr(receipt, "state") else ("acknowledged" if receipt.acknowledged_at else "read" if receipt.read_at else "unread")}
-            else:
-                data["my_receipt"] = {"state": "issued" if item.created_by_id == user.id else "unread", "read_at": None, "acknowledged_at": None}
-            result.append(data)
-        elif user.role == "Admin":
-            data = item.to_dict(include_receipts=True)
-            data["my_receipt"] = {"state": "issued" if item.created_by_id == user.id else "unread"}
-            result.append(data)
-        elif user.role == "Supervisor" and item.created_by_id == user.id:
-            data = item.to_dict()
-            data["my_receipt"] = {"state": "issued"}
-            result.append(data)
+        data = item.to_dict(include_receipts=user.role == "Admin")
+        if receipt:
+            state = "acknowledged" if receipt.acknowledged_at else "read" if receipt.read_at else "unread"
+            data["my_receipt"] = {"read_at": receipt.read_at.isoformat() if receipt.read_at else None, "acknowledged_at": receipt.acknowledged_at.isoformat() if receipt.acknowledged_at else None, "state": state}
+        else:
+            data["my_receipt"] = {"state": "issued" if item.created_by_id == user.id else "oversight" if user.role == "Admin" and not is_recipient else "unread", "read_at": None, "acknowledged_at": None}
+        data["can_mark_read"] = bool(is_recipient and user.id != item.created_by_id and item.status == "published")
+        data["can_acknowledge"] = bool(data["can_mark_read"] and item.requires_acknowledgement)
+        result.append(data)
     if changed:
         db.session.commit()
     return jsonify({"announcements": result}), 200
@@ -551,6 +568,8 @@ def mark_read(announcement_id):
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
     if item is None or not _can_view(user, item, include_drafts=(user.role == "Supervisor" and item.created_by_id == user.id)):
         return jsonify({"error": "Announcement not found."}), 404
+    if not _is_target_recipient(user, item) or item.created_by_id == user.id:
+        return jsonify({"error": "Read receipts are available only to intended recipients."}), 403
     if item.status in {"draft", "scheduled"} and item.created_by_id != user.id:
         return jsonify({"error": "This announcement has not been published yet."}), 409
     receipt = AnnouncementReceipt.query.filter_by(announcement_id=item.id, user_id=user.id).first()
@@ -574,6 +593,8 @@ def acknowledge(announcement_id):
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
     if item is None or not _can_view(user, item):
         return jsonify({"error": "Announcement not found."}), 404
+    if not _is_target_recipient(user, item) or item.created_by_id == user.id:
+        return jsonify({"error": "Only intended recipients can acknowledge this announcement."}), 403
     if not item.requires_acknowledgement:
         return jsonify({"error": "Acknowledgement is not required for this announcement."}), 409
     receipt = AnnouncementReceipt.query.filter_by(announcement_id=item.id, user_id=user.id).first()
