@@ -167,7 +167,7 @@ def register():
     }), 201
 
 
-@auth_bp.get("/me")
+@auth_bp.route("/me", methods=["GET", "PATCH"])
 def current_user():
     try:
         verify_jwt_in_request()
@@ -175,8 +175,31 @@ def current_user():
         user = db.session.get(User, int(user_id))
         if user is None:
             return json_error("User not found.", 404)
+
+        if request.method == "PATCH":
+            data = request.get_json(silent=True) or {}
+            if "full_name" in data:
+                full_name = data.get("full_name")
+                if not isinstance(full_name, str) or not 2 <= len(full_name.strip()) <= 120:
+                    return json_error("Full name must contain 2 to 120 characters.", 400)
+                user.full_name = full_name.strip()
+            if "phone" in data:
+                phone = data.get("phone")
+                if phone is not None and not isinstance(phone, str):
+                    return json_error("Phone must be text.", 400)
+                phone = (phone or "").strip()
+                if len(phone) > 30:
+                    return json_error("Phone must be 30 characters or fewer.", 400)
+                user.phone = phone or None
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+                return json_error("Personal settings could not be saved.", 500)
+
         return jsonify({"user": user.to_dict()}), 200
     except Exception:
+        db.session.rollback()
         # No valid login cookie means the browser has no active session.
         return json_error("Authentication required.", 401)
 
