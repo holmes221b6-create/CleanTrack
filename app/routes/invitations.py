@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import func
 from app.extensions import db
 from app.models.audit_log import AuditLog
 from app.models.invitation import Invitation, generate_invitation_token
@@ -107,6 +108,10 @@ def create_invitation():
         return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
     if organization.status != "active":
         return jsonify({"error": "Restore the organization before sending invitations."}), 423
+
+    existing_user = User.query.filter(func.lower(User.email) == email).first()
+    if existing_user is not None:
+        return jsonify({"error": "This email already has a CleanTrack account. Use the existing account/membership workflow instead of creating a new-account invitation."}), 409
 
     active_invite = Invitation.query.filter_by(
         organization_id=organization.id,
