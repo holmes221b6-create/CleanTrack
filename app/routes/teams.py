@@ -15,6 +15,7 @@ from app.models.user import User
 from app.models.location import Location
 from app.models.zone import Zone
 from app.models.operation import Operation
+from app.models.operation_log import OperationLog
 from app.models.audit_log import AuditLog
 from app.models.notification import Notification
 from app.services.permissions import get_current_user, roles_required
@@ -183,7 +184,34 @@ def _team_data(team, admin, include_directory=False):
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(100).all()
     activity = [{
         **row.to_dict(), "actor_name": row.actor.full_name if row.actor else "System",
+        "event_source": "team",
     } for row in audit_rows]
+    operation_ids = [item["id"] for item in serialized_operations]
+    if operation_ids:
+        operation_history = (
+            OperationLog.query.filter(OperationLog.operation_id.in_(operation_ids))
+            .order_by(OperationLog.created_at.desc(), OperationLog.id.desc())
+            .limit(100).all()
+        )
+        for row in operation_history:
+            activity.append({
+                "id": row.id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "actor_name": row.actor.full_name if row.actor else "System",
+                "action": "task." + str(row.action),
+                "resource_type": "Operation",
+                "resource_id": str(row.operation_id),
+                "event_source": "task",
+                "details": {
+                    "task_title": row.operation.title if row.operation else "Task",
+                    "operation_id": row.operation_id,
+                    "previous_status": row.previous_status,
+                    "new_status": row.new_status,
+                    "message": row.message,
+                },
+            })
+    activity.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    activity = activity[:100]
 
     payload = {
         "team": team_summary, "members": members,
@@ -446,6 +474,24 @@ def assign_locations(team_id):
                 old_team = _team_or_404(old_id, admin)
                 if old_team:
                     _audit(admin, old_team, "team.location_reassigned", {"location_id": row.id, "location_name": row.name, "before_team_id": old_id, "after_team_id": team.id})
+            # A zone explicitly assigned to the previous team follows its
+            # location when an Admin moves that location to another team.
+            # Zone records and operation history remain intact.
+            for zone in Zone.query.filter_by(
+                organization_id=admin.organization_id, location_id=row.id
+            ).all():
+                if zone.team_id and zone.team_id != team.id:
+                    previous_zone_team_id = zone.team_id
+                    zone.team_id = team.id
+                    zone_change = {
+                        "zone_id": zone.id, "zone_name": zone.name,
+                        "before_team_id": previous_zone_team_id, "after_team_id": team.id,
+                        "reason": "parent location reassigned",
+                    }
+                    changes.append(zone_change)
+                    previous_zone_team = _team_or_404(previous_zone_team_id, admin)
+                    if previous_zone_team:
+                        _audit(admin, previous_zone_team, "team.zone_reassigned", zone_change)
     if changes:
         _audit(admin, team, "team.locations_updated", {"changes": changes})
         _notify_admins(admin, team, "Team locations updated", f'{admin.full_name} updated locations assigned to "{team.name}".')
