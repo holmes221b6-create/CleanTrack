@@ -2,6 +2,7 @@ import os
 
 
 from flask import Flask, jsonify
+from sqlalchemy import inspect, text
 
 from config import Config
 from app.extensions import cors, db, jwt, limiter, migrate
@@ -32,6 +33,24 @@ def create_app(config_class=Config):
     # future schema changes.
     with app.app_context():
         db.create_all()
+
+        # Additive migration for organizations already present in the live DB.
+        # db.create_all() creates missing tables but does not add new columns.
+        with db.engine.begin() as connection:
+            tables = set(inspect(connection).get_table_names())
+            if "organizations" in tables:
+                columns = {item["name"] for item in inspect(connection).get_columns("organizations")}
+                additive_columns = {
+                    "description": "TEXT",
+                    "avatar_url": "VARCHAR(500)",
+                    "contact_email": "VARCHAR(254)",
+                    "policy_text": "TEXT",
+                }
+                for column, sql_type in additive_columns.items():
+                    if column not in columns:
+                        connection.execute(text(
+                            f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"
+                        ))
 
     cors.init_app(
         app,
