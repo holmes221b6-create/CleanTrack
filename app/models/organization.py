@@ -32,6 +32,7 @@ class Organization(db.Model):
     avatar_url = db.Column(db.String(500), nullable=True)
     contact_email = db.Column(db.String(254), nullable=True)
     policy_text = db.Column(db.Text, nullable=True)
+    whatsapp_supervisors_group_url = db.Column(db.String(500), nullable=True)
 
     status = db.Column(db.String(20), nullable=False, default="active")
     plan = db.Column(db.String(30), nullable=False, default="Free/Demo")
@@ -64,6 +65,7 @@ class Organization(db.Model):
             "avatar_url": self.avatar_url,
             "contact_email": self.contact_email,
             "policy_text": self.policy_text,
+            "whatsapp_supervisors_group_url": self.whatsapp_supervisors_group_url,
             "status": self.status,
             "plan": self.plan,
             "created_at": (
