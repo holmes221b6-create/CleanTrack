@@ -1,11 +1,12 @@
 
 from functools import wraps
 
-from flask import jsonify
+from flask import jsonify, request
 from flask_jwt_extended import get_jwt, verify_jwt_in_request
 
 from app.extensions import db
 from app.models.user import User
+from app.models.organization import Organization
 
 
 VALID_ROLES = {"Admin", "Supervisor", "Employee"}
@@ -50,6 +51,22 @@ def roles_required(*allowed_roles):
 
             if user.role not in allowed_roles:
                 return jsonify({"error": "Permission denied"}), 403
+
+            # An archived organization is read-only and cannot use operational
+            # endpoints. Keep a narrow Admin recovery path for viewing/updating
+            # its profile, restoring it, and reading its audit history.
+            if user.organization_id:
+                organization = db.session.get(Organization, user.organization_id)
+                if organization is not None and organization.status == "archived":
+                    recovery_paths = {
+                        "/api/organizations/current",
+                        "/api/organizations/current/restore",
+                        "/api/organizations/audit-log",
+                    }
+                    if not (user.role == "Admin" and request.path in recovery_paths):
+                        return jsonify({
+                            "error": "This organization is archived. An Admin must restore it before normal access can resume."
+                        }), 423
 
             return view_function(*args, **kwargs)
 
