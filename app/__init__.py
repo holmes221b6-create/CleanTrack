@@ -97,10 +97,12 @@ def create_app(config_class=Config):
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE announcements ADD COLUMN {column} {sql_type}"))
                 # Preserve the publish/draft state of legacy announcement rows.
-                if not had_status:
-                    connection.execute(text(
-                        "UPDATE announcements SET status = CASE WHEN published = TRUE THEN 'published' ELSE 'draft' END"
-                    ))
+                # Repair legacy rows if the first additive deployment ran
+                # with a default status before draft/published reconciliation.
+                connection.execute(text(
+                    "UPDATE announcements SET status = CASE WHEN published = TRUE THEN 'published' ELSE 'draft' END "
+                    "WHERE (status = 'published' AND published = FALSE) OR status IS NULL OR status = ''"
+                ))
 
     cors.init_app(
         app,
