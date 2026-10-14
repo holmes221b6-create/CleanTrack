@@ -3,6 +3,7 @@ from sqlalchemy import func
 
 from app.extensions import db
 from app.models.location import Location
+from app.models.audit_log import AuditLog
 from app.models.team import Team
 from app.services.permissions import get_current_user, roles_required
 
@@ -103,6 +104,24 @@ def locations_collection():
     db.session.add(location)
 
     try:
+        db.session.flush()
+        db.session.add(AuditLog(
+            actor_id=admin.id,
+            organization_id=admin.organization_id,
+            action="location.created",
+            resource_type="Location",
+            resource_id=str(location.id),
+            details={
+                "name": location.name,
+                "address": location.address,
+                "description": location.description,
+                "team_id": location.team_id,
+                "latitude": location.latitude,
+                "longitude": location.longitude,
+            },
+            ip_address=request.remote_addr,
+            user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+        ))
         db.session.commit()
     except Exception:
         db.session.rollback()
