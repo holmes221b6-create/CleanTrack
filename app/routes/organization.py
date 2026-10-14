@@ -7,6 +7,7 @@ from sqlalchemy import case, false, func
 from app.extensions import db
 from app.models.organization import Organization
 from app.models.audit_log import AuditLog
+from app.services.audit_retention import audit_cutoff, purge_expired_audit_logs
 from app.models.user import User
 from app.models.invitation import Invitation
 from app.models.team import Team
@@ -142,6 +143,10 @@ def restore_current_organization():
 @roles_required("Admin")
 def organization_audit_log():
     admin = get_current_user()
+    try:
+        purge_expired_audit_logs()
+    except Exception:
+        db.session.rollback()
     if not admin or not admin.organization_id:
         return jsonify(events=[], count=0), 200
 
@@ -154,7 +159,7 @@ def organization_audit_log():
     rows = (
         db.session.query(AuditLog, User.full_name, User.email)
         .outerjoin(User, User.id == AuditLog.actor_id)
-        .filter(AuditLog.organization_id == admin.organization_id)
+        .filter(AuditLog.organization_id == admin.organization_id, AuditLog.created_at >= audit_cutoff())
         .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
         .limit(limit)
         .all()
