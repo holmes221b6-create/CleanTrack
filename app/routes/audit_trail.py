@@ -127,6 +127,20 @@ def _display(entry, actor_name=None, actor_email=None, actor_role=None):
     )
     before = details.get("before")
     after = details.get("after")
+    if before is None:
+        field_changes = {
+            key: value.get("before") for key, value in details.items()
+            if isinstance(value, dict) and "before" in value
+        }
+        if field_changes:
+            before = field_changes
+    if after is None:
+        field_changes = {
+            key: value.get("after") for key, value in details.items()
+            if isinstance(value, dict) and "after" in value
+        }
+        if field_changes:
+            after = field_changes
     if before is None and "previous_status" in details:
         before = {"status": details.get("previous_status")}
     if after is None and "new_status" in details:
@@ -240,9 +254,21 @@ def audit_trail():
         limit = max(1, min(request.args.get("limit", default=50, type=int), 200))
         offset = max(0, min(request.args.get("offset", default=0, type=int), 1000000))
         rows = _rows_for_query(query, limit=limit, offset=offset)
+        actor_rows = (
+            query.order_by(None)
+            .with_entities(AuditLog.actor_id, User.full_name, User.email, User.role)
+            .distinct()
+            .order_by(User.full_name.asc())
+            .limit(500)
+            .all()
+        )
+        actors = [
+            {"id": actor_id, "label": name or email or "Unknown account", "role": actor_role}
+            for actor_id, name, email, actor_role in actor_rows if actor_id is not None
+        ]
         return jsonify(
             entries=rows, count=len(rows), total=total, limit=limit, offset=offset,
-            retention_days=7, cutoff=audit_cutoff().isoformat()
+            actors=actors, retention_days=7, cutoff=audit_cutoff().isoformat()
         ), 200
     except Exception:
         db.session.rollback()
