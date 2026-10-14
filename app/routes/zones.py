@@ -4,6 +4,7 @@ from sqlalchemy import func
 from app.extensions import db
 from app.models.location import Location
 from app.models.zone import Zone
+from app.models.audit_log import AuditLog
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -92,6 +93,22 @@ def zones_collection():
     db.session.add(zone)
 
     try:
+        db.session.flush()
+        db.session.add(AuditLog(
+            actor_id=admin.id,
+            organization_id=admin.organization_id,
+            action="zone.created",
+            resource_type="Zone",
+            resource_id=str(zone.id),
+            details={
+                "name": zone.name,
+                "description": zone.description,
+                "location_id": location.id,
+                "location_name": location.name,
+            },
+            ip_address=request.remote_addr,
+            user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+        ))
         db.session.commit()
     except Exception:
         db.session.rollback()
