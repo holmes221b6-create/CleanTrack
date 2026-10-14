@@ -73,6 +73,7 @@ def refresh_access_token():
             additional_claims={"user_id": user.id},
         )
         response = jsonify({"message": "Session refreshed.", "token": access_token})
+        response.headers["Cache-Control"] = "no-store"
         set_access_cookies(response, access_token)
         return response, 200
     except Exception:
@@ -432,6 +433,7 @@ def login():
             "token": access_token,
             "refresh_token": refresh_token,
         })
+        response.headers["Cache-Control"] = "no-store"
         set_access_cookies(response, access_token)
         set_refresh_cookies(response, refresh_token)
         return response, 200
