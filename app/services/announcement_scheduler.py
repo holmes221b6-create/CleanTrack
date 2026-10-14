@@ -3,6 +3,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from app.extensions import db
 from app.models.organization import Organization
 from app.routes.announcements import _process_due_schedules, _process_escalations
+from app.services.audit_retention import purge_expired_audit_logs
 
 
 def start_announcement_scheduler(app):
@@ -38,6 +39,26 @@ def start_announcement_scheduler(app):
         trigger="interval",
         seconds=30,
         id="cleantrack-announcement-dispatch",
+        max_instances=1,
+        coalesce=True,
+        replace_existing=True,
+    )
+
+    def purge_audit_records():
+        with app.app_context():
+            try:
+                purge_expired_audit_logs()
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("Seven-day audit retention cleanup failed.")
+            finally:
+                db.session.remove()
+
+    scheduler.add_job(
+        purge_audit_records,
+        trigger="interval",
+        seconds=300,
+        id="cleantrack-audit-retention",
         max_instances=1,
         coalesce=True,
         replace_existing=True,
