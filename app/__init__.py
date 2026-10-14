@@ -23,6 +23,8 @@ from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
 from app.routes.operations import operations_bp
 from app.routes.organization import organization_bp
+from app.routes.audit_trail import audit_trail_bp
+from app.services.audit_retention import purge_expired_audit_logs
 
 from app.models.audit_log import AuditLog
 from app.models.user import User
@@ -127,6 +129,7 @@ def create_app(config_class=Config):
     app.register_blueprint(zones_bp)
     app.register_blueprint(operations_bp)
     app.register_blueprint(organization_bp)
+    app.register_blueprint(audit_trail_bp)
 
     @app.before_request
     def _finalize_due_member_terminations():
@@ -179,6 +182,15 @@ def create_app(config_class=Config):
             db.session.rollback()
         return None
 
+    # Purge expired audit entries at startup; the recurring job also purges
+    # them during normal service operation, and audit reads purge defensively.
+    with app.app_context():
+        try:
+            purge_expired_audit_logs()
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Could not purge expired audit records at startup.")
+
     @app.get("/api/health")
     def health():
         registered_routes = {rule.rule for rule in app.url_map.iter_rules()}
@@ -191,6 +203,7 @@ def create_app(config_class=Config):
                 and "/api/organizations/members" in registered_routes
                 and "/api/organizations/directory-options" in registered_routes
             ),
+            "audit_trail_api_registered": "/api/audit-trail" in registered_routes,
             "announcements_api_registered": (
                 "/api/announcements" in registered_routes
                 and "/api/announcements/options" in registered_routes
