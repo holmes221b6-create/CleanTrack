@@ -42,6 +42,43 @@ def csrf_token():
         return json_error("Authentication required.", 401)
 
 
+
+@auth_bp.get("/refresh")
+def refresh_access_token():
+    """Renew an expired access cookie using the still-valid refresh cookie."""
+    try:
+        verify_jwt_in_request(refresh=True)
+        identity = get_jwt_identity()
+        try:
+            user_id = int(identity)
+        except (TypeError, ValueError):
+            return json_error("Session expired. Please sign in again.", 401)
+
+        user = db.session.get(User, user_id)
+        if user is None or user.account_status not in {"active", "termination_pending"}:
+            return json_error("Account is unavailable. Please sign in again.", 401)
+
+        if (
+            user.organization is not None
+            and user.organization.status == "archived"
+            and user.role != "Admin"
+        ):
+            return json_error(
+                "This organization is archived. Contact its Admin before signing in again.",
+                403,
+            )
+
+        access_token = create_access_token(
+            identity=str(user.id),
+            additional_claims={"user_id": user.id},
+        )
+        response = jsonify({"message": "Session refreshed."})
+        set_access_cookies(response, access_token)
+        return response, 200
+    except Exception:
+        return json_error("Session expired. Please sign in again.", 401)
+
+
 @auth_bp.post("/register")
 def register():
     from datetime import datetime, timezone
