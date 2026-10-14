@@ -47,7 +47,7 @@ def csrf_token():
 def refresh_access_token():
     """Renew an expired access cookie using the still-valid refresh cookie."""
     try:
-        verify_jwt_in_request(refresh=True)
+        verify_jwt_in_request(refresh=True, locations=["headers", "cookies"])
         identity = get_jwt_identity()
         try:
             user_id = int(identity)
@@ -72,7 +72,7 @@ def refresh_access_token():
             identity=str(user.id),
             additional_claims={"user_id": user.id},
         )
-        response = jsonify({"message": "Session refreshed."})
+        response = jsonify({"message": "Session refreshed.", "token": access_token})
         set_access_cookies(response, access_token)
         return response, 200
     except Exception:
@@ -429,6 +429,8 @@ def login():
         response = jsonify({
             "message": "Login successful.",
             "user": user.to_dict(),
+            "token": access_token,
+            "refresh_token": refresh_token,
         })
         set_access_cookies(response, access_token)
         set_refresh_cookies(response, refresh_token)
