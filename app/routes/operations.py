@@ -7,6 +7,7 @@ from app.extensions import db
 from app.models.operation import Operation
 from app.models.operation_log import OperationLog
 from app.models.audit_log import AuditLog
+from app.services.audit_retention import audit_cutoff, purge_expired_audit_logs
 from app.models.user import User
 from app.models.team import Team
 from app.models.location import Location
@@ -332,10 +333,14 @@ def operation_history(operation_id):
 @roles_required("Admin")
 def organization_audit_history():
     admin = get_current_user()
+    try:
+        purge_expired_audit_logs()
+    except Exception:
+        db.session.rollback()
 
     logs = (
         AuditLog.query
-        .filter_by(organization_id=admin.organization_id)
+        .filter(AuditLog.organization_id == admin.organization_id, AuditLog.created_at >= audit_cutoff())
         .order_by(AuditLog.created_at.desc())
         .limit(100)
         .all()
