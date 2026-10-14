@@ -26,7 +26,8 @@ class Config:
         "JWT_SECRET_KEY",
         "dev-only-change-this-before-deployment",
     )
-    JWT_TOKEN_LOCATION = ["cookies"]
+    # Prefer explicit Bearer tokens for the SPA; cookies remain a fallback.
+    JWT_TOKEN_LOCATION = ["headers", "cookies"]
     JWT_ACCESS_COOKIE_NAME = "cleantrack_access"
     JWT_REFRESH_COOKIE_NAME = "cleantrack_refresh"
     # The SPA and API run on separate Render hostnames. Force Secure
