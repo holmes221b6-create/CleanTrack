@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request, make_response
-from sqlalchemy import cast, func, or_, String
+from sqlalchemy import cast, func, or_, String, false
 
 from app.extensions import db
 from app.models.audit_log import AuditLog
@@ -49,7 +49,7 @@ def _scoped_query(user):
             Operation.organization_id == user.organization_id,
             or_(
                 Operation.assigned_to_id == user.id,
-                Operation.team_id.in_(team_ids) if team_ids else db.false()
+                Operation.team_id.in_(team_ids) if team_ids else false()
             )
         )
         return query.filter(
@@ -262,7 +262,7 @@ def export_audit_trail():
         return error
 
     try:
-        rows = _rows_for_query(query, limit=20000)
+        rows = _rows_for_query(query)
         export_format = (request.args.get("format") or "csv").lower()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         if export_format == "json":
