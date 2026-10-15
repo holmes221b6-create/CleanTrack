@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
+from io import BytesIO
+from uuid import uuid4
+from mimetypes import guess_type
 
-from flask import Blueprint, jsonify, request, has_request_context
+from flask import Blueprint, jsonify, request, has_request_context, send_file
 from sqlalchemy import func, or_
 
 from app.extensions import db
@@ -13,6 +16,8 @@ from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.location import Location
 from app.models.zone import Zone
+from app.models.task_evidence import TaskEvidence
+from werkzeug.utils import secure_filename
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -396,7 +401,91 @@ def get_operation(operation_id):
     history = OperationLog.query.filter_by(operation_id=operation.id).order_by(OperationLog.created_at.asc()).all()
     result = operation.to_dict()
     result["history"] = [entry.to_dict() for entry in history]
+    evidence = TaskEvidence.query.filter_by(operation_id=operation.id).order_by(TaskEvidence.created_at.asc()).all()
+    result["evidence"] = [entry.to_dict() for entry in evidence]
     return jsonify({"operation": result}), 200
+
+
+@operations_bp.post("/<int:operation_id>/evidence")
+@roles_required("Admin", "Supervisor", "Employee")
+def upload_operation_evidence(operation_id):
+    user = get_current_user()
+    operation = db.session.get(Operation, operation_id)
+    if not _visible(operation, user):
+        return jsonify({"error": "Operation not found or evidence upload is not permitted."}), 404
+    if user.role == "Employee" and operation.assigned_to_id != user.id:
+        return jsonify({"error": "Only the current assignee can upload execution evidence."}), 403
+    if user.role == "Supervisor" and not _can_manage(operation, user) and operation.assigned_to_id != user.id:
+        return jsonify({"error": "You cannot upload evidence for this operation."}), 403
+    if operation.status.lower() not in {"in progress", "submitted", "completed", "approved", "verified"}:
+        return jsonify({"error": "Start the work before attaching execution evidence."}), 409
+
+    uploaded = request.files.get("file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "Choose a file to upload."}), 400
+    filename = secure_filename(uploaded.filename)[:255]
+    if not filename:
+        return jsonify({"error": "The file name is not valid."}), 400
+    content = uploaded.stream.read((8 * 1024 * 1024) + 1)
+    if not content:
+        return jsonify({"error": "The selected file is empty."}), 400
+    if len(content) > 8 * 1024 * 1024:
+        return jsonify({"error": "Evidence files must be 8 MB or smaller."}), 413
+
+    file_type = (guess_type(filename)[0] or "").lower()
+    allowed_types = {
+        "image/jpeg", "image/png", "image/webp",
+        "application/pdf", "text/plain",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    if file_type not in allowed_types:
+        return jsonify({"error": "Use a JPG, PNG, WebP, PDF, TXT, DOC, or DOCX evidence file."}), 400
+
+    evidence = TaskEvidence(
+        operation_id=operation.id,
+        uploaded_by_id=user.id,
+        evidence_type="photo" if file_type.startswith("image/") else "document",
+        stage="execution",
+        original_filename=filename,
+        storage_key="db:operation:" + str(operation.id) + ":evidence:" + uuid4().hex,
+        content_type=file_type,
+        file_size=len(content),
+        file_data=content,
+    )
+    try:
+        db.session.add(evidence)
+        db.session.flush()
+        _log(operation, user, "evidence_uploaded", operation.status,
+             "Uploaded execution evidence: " + filename,
+             {"evidence_id": evidence.id, "evidence_type": evidence.evidence_type,
+              "stage": "execution", "file_size": evidence.file_size})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "The evidence file could not be stored."}), 500
+    return jsonify({"message": "Execution evidence uploaded.", "evidence": evidence.to_dict()}), 201
+
+
+@operations_bp.get("/<int:operation_id>/evidence/<int:evidence_id>/download")
+@roles_required("Admin", "Supervisor", "Employee")
+def download_operation_evidence(operation_id, evidence_id):
+    user = get_current_user()
+    operation = db.session.get(Operation, operation_id)
+    if not _visible(operation, user):
+        return jsonify({"error": "Operation not found."}), 404
+    evidence = TaskEvidence.query.filter_by(id=evidence_id, operation_id=operation.id).first()
+    if evidence is None:
+        return jsonify({"error": "Evidence file not found."}), 404
+    if not evidence.file_data:
+        return jsonify({"error": "This older evidence record has no stored file bytes."}), 410
+    return send_file(
+        BytesIO(evidence.file_data),
+        mimetype=evidence.content_type,
+        as_attachment=True,
+        download_name=evidence.original_filename,
+        max_age=0,
+    )
 
 
 @operations_bp.patch("/<int:operation_id>")
