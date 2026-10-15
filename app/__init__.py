@@ -18,6 +18,7 @@ from app.routes.notifications import notifications_bp
 from app.routes.announcements import announcements_bp, _process_due_schedules, _process_escalations
 from app.services.permissions import get_current_user
 from app.services.announcement_scheduler import start_announcement_scheduler
+from app.services.operation_scheduler import start_operation_scheduler
 from app.routes.teams import teams_bp
 from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
@@ -282,5 +283,6 @@ def create_app(config_class=Config):
         return jsonify({"error": "An internal server error occurred"}), 500
 
     start_announcement_scheduler(app)
+    start_operation_scheduler(app)
 
     return app
