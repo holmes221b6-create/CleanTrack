@@ -448,18 +448,18 @@ def export_team_analytics():
             writer.writerows(comparison["rows"])
         response = make_response("\ufeff" + stream.getvalue())
         response.headers["Content-Type"] = "text/csv; charset=utf-8"
-        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.csv"'
+        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-analytics-{date_stamp}.csv"'
         return response
     if file_format in {"xlsx", "excel"}:
         payload = _make_xlsx(headers, rows, comparison)
         response = make_response(payload)
         response.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.xlsx"'
+        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-analytics-{date_stamp}.xlsx"'
         return response
     if file_format == "pdf":
         payload = _make_pdf(headers, rows, report["period"], comparison)
         response = make_response(payload)
         response.headers["Content-Type"] = "application/pdf"
-        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.pdf"'
+        response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-analytics-{date_stamp}.pdf"'
         return response
     return jsonify({"error": "Unsupported export format. Use csv, xlsx, or pdf."}), 400
