@@ -9,6 +9,7 @@ from sqlalchemy import func, or_
 
 from app.extensions import db
 from app.models.operation import Operation
+from app.models.operation_execution import OperationExecution
 from app.models.operation_log import OperationLog
 from app.models.audit_log import AuditLog
 from app.services.audit_retention import audit_cutoff, purge_expired_audit_logs
@@ -452,6 +453,10 @@ def get_operation(operation_id):
     result["history"] = [entry.to_dict() for entry in history]
     evidence = TaskEvidence.query.filter_by(operation_id=operation.id).order_by(TaskEvidence.created_at.asc()).all()
     result["evidence"] = [entry.to_dict() for entry in evidence]
+    executions = OperationExecution.query.filter_by(operation_id=operation.id).order_by(
+        OperationExecution.attempt_number.asc()
+    ).all()
+    result["executions"] = [entry.to_dict() for entry in executions]
     return jsonify({"operation": result}), 200
 
 
@@ -491,8 +496,26 @@ def upload_operation_evidence(operation_id):
     if file_type not in allowed_types:
         return jsonify({"error": "Use a JPG, PNG, WebP, PDF, TXT, DOC, or DOCX evidence file."}), 400
 
+    execution = OperationExecution.query.filter_by(
+        operation_id=operation.id, performed_by_id=operation.assigned_to_id
+    ).order_by(OperationExecution.attempt_number.desc()).first()
+    if execution is None and operation.status.lower() == "in progress":
+        latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
+            operation_id=operation.id
+        ).scalar() or 0
+        execution = OperationExecution(
+            operation_id=operation.id, performed_by_id=user.id,
+            attempt_number=latest_attempt + 1, status="In Progress",
+            verification_required=bool(operation.requires_verification),
+        )
+        db.session.add(execution)
+        db.session.flush()
+    if execution is None:
+        return jsonify({"error": "Start work to open an execution record before uploading evidence."}), 409
+
     evidence = TaskEvidence(
         operation_id=operation.id,
+        execution_id=execution.id,
         uploaded_by_id=user.id,
         evidence_type="photo" if file_type.startswith("image/") else "document",
         stage="execution",
@@ -507,8 +530,8 @@ def upload_operation_evidence(operation_id):
         db.session.flush()
         _log(operation, user, "evidence_uploaded", operation.status,
              "Uploaded execution evidence: " + filename,
-             {"evidence_id": evidence.id, "evidence_type": evidence.evidence_type,
-              "stage": "execution", "file_size": evidence.file_size})
+             {"evidence_id": evidence.id, "execution_id": execution.id,
+              "evidence_type": evidence.evidence_type, "stage": "execution", "file_size": evidence.file_size})
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -802,8 +825,20 @@ def start_operation(operation_id):
         return jsonify({"error": "Only pending, assigned, or rejected work can be started."}), 409
     previous = operation.status
     operation.status = "In Progress"
+    latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
+        operation_id=operation.id
+    ).scalar() or 0
+    execution = OperationExecution(
+        operation_id=operation.id,
+        performed_by_id=user.id,
+        attempt_number=latest_attempt + 1,
+        status="In Progress",
+        verification_required=bool(operation.requires_verification),
+    )
     try:
-        _log(operation, user, "started", previous, "Work started.")
+        db.session.add(execution)
+        _log(operation, user, "started", previous, "Work started; execution attempt " + str(latest_attempt + 1) + " opened.",
+             {"execution_attempt": latest_attempt + 1})
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -822,17 +857,87 @@ def submit_operation(operation_id):
         return jsonify({"error": "Only the current assignee can submit this operation."}), 403
     if operation.status.lower() != "in progress":
         return jsonify({"error": "Only operations in progress can be submitted."}), 409
+
+    data = request.get_json(silent=True) or {}
+    notes = data.get("completion_notes", "")
+    checklist_results = data.get("checklist_results", [])
+    if not isinstance(notes, str) or len(notes) > 10000:
+        return jsonify({"error": "Completion notes must be text of at most 10,000 characters."}), 400
+    if not isinstance(checklist_results, list):
+        return jsonify({"error": "Checklist results must be a list."}), 400
+
+    expected_items = operation.checklist if isinstance(operation.checklist, list) else []
+    results_by_item = {}
+    for row in checklist_results:
+        if not isinstance(row, dict) or not isinstance(row.get("item"), str) or not isinstance(row.get("completed"), bool):
+            return jsonify({"error": "Each checklist result needs an item and a true/false completed value."}), 400
+        item = row["item"].strip()
+        if item not in expected_items or item in results_by_item:
+            return jsonify({"error": "Checklist results do not match the operation checklist."}), 400
+        results_by_item[item] = row["completed"]
+    missing = [item for item in expected_items if results_by_item.get(item) is not True]
+    if missing:
+        return jsonify({"error": "Complete every checklist item before submission: " + ", ".join(missing[:8])}), 400
+
+    execution = OperationExecution.query.filter_by(
+        operation_id=operation.id, performed_by_id=user.id, status="In Progress"
+    ).order_by(OperationExecution.attempt_number.desc()).first()
+    if execution is None:
+        # Older in-progress work can predate execution records. Preserve it by
+        # opening a first persisted execution record when it is submitted.
+        latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
+            operation_id=operation.id
+        ).scalar() or 0
+        execution = OperationExecution(
+            operation_id=operation.id,
+            performed_by_id=user.id,
+            attempt_number=latest_attempt + 1,
+            status="In Progress",
+            verification_required=bool(operation.requires_verification),
+        )
+        db.session.add(execution)
+        db.session.flush()
+
+    evidence_rows = TaskEvidence.query.filter(
+        TaskEvidence.operation_id == operation.id,
+        (TaskEvidence.execution_id == execution.id) | (TaskEvidence.execution_id.is_(None)),
+    ).all()
+    evidence_types = {row.evidence_type for row in evidence_rows}
+    required = operation.required_evidence if isinstance(operation.required_evidence, list) else []
+    missing_evidence = []
+    if "photo" in required and "photo" not in evidence_types:
+        missing_evidence.append("at least one after-completion photo")
+    if "document" in required and "document" not in evidence_types:
+        missing_evidence.append("a document or attachment")
+    if "note" in required and not notes.strip():
+        missing_evidence.append("a completion note")
+    if missing_evidence:
+        return jsonify({"error": "Required execution evidence is missing: " + ", ".join(missing_evidence) + "."}), 400
+
     previous = operation.status
     operation.submitted_at = datetime.now(timezone.utc)
     operation.status = "Submitted" if operation.requires_verification else "Completed"
+    execution.submitted_at = operation.submitted_at
+    execution.status = "Submitted" if operation.requires_verification else "Completed"
+    execution.completion_notes = notes.strip() or None
+    execution.checklist_results = [
+        {"item": item, "completed": results_by_item.get(item, False)}
+        for item in expected_items
+    ]
     try:
         _log(operation, user, "submitted" if operation.requires_verification else "completed", previous,
-             "Submitted for verification." if operation.requires_verification else "Completed without verification.")
+             "Submitted for verification." if operation.requires_verification else "Completed without verification.",
+             {"execution_id": execution.id, "completion_notes": execution.completion_notes,
+              "checklist_results": execution.checklist_results})
         db.session.commit()
     except Exception:
         db.session.rollback()
         return jsonify({"error": "Could not submit operation."}), 500
-    return jsonify({"message": "Operation submitted." if operation.requires_verification else "Operation completed.", "operation": operation.to_dict()}), 200
+    return jsonify({
+        "message": "Operation submitted for verification." if operation.requires_verification else "Operation completed.",
+        "operation": operation.to_dict(),
+        "execution": execution.to_dict(),
+    }), 200
 
 
 @operations_bp.post("/<int:operation_id>/review")
@@ -861,11 +966,22 @@ def review_operation(operation_id):
     operation.status = "Completed" if decision == "approve" else "Rejected"
     operation.review_feedback = feedback or None
     operation.reviewed_at = datetime.now(timezone.utc)
+    execution = OperationExecution.query.filter_by(
+        operation_id=operation.id, status="Submitted"
+    ).order_by(OperationExecution.attempt_number.desc()).first()
+    if execution is None:
+        return jsonify({"error": "The submission has no execution record to verify."}), 409
+    execution.status = "Completed" if decision == "approve" else "Rejected"
+    execution.verified_by_id = user.id
+    execution.verified_at = operation.reviewed_at
+    execution.review_feedback = feedback or None
     try:
         _log(operation, user, "verified" if decision == "approve" else "rejected", previous, feedback or None, {
             "reviewed_by_id": user.id,
             "reviewed_at": operation.reviewed_at.isoformat(),
             "decision": decision,
+            "execution_id": execution.id,
+            "execution_attempt": execution.attempt_number,
         })
         db.session.commit()
     except Exception:
@@ -874,6 +990,7 @@ def review_operation(operation_id):
     return jsonify({
         "message": "Operation verified and completed." if decision == "approve" else "Operation rejected. The assignee can correct the work and resubmit it.",
         "operation": operation.to_dict(),
+        "execution": execution.to_dict(),
     }), 200
 
 
@@ -892,6 +1009,8 @@ def cancel_operation(operation_id):
         return jsonify({"error": "Cancellation reason must be text."}), 400
     previous = operation.status
     operation.status = "Cancelled"
+    if operation.schedule_type == "recurring" and operation.schedule_series_id is None:
+        operation.schedule_next_run_at = None
     try:
         _log(operation, user, "cancelled", previous, reason.strip() or "Cancelled by authorized manager.")
         db.session.commit()
