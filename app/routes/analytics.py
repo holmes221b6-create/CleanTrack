@@ -552,7 +552,7 @@ def analytics_workspace():
         return bool(operation.overdue) or status == "overdue" or (due is not None and due < now)
 
     def completion_time(operation):
-        return as_utc(operation.reviewed_at or operation.submitted_at or operation.updated_at)
+        return as_utc(operation.reviewed_at or operation.submitted_at)
 
     def metrics(items):
         total = len(items)
@@ -767,7 +767,7 @@ def analytics_workspace():
             "rejection_rate": "Recorded rejections divided by recorded approval plus rejection decisions during the selected period. This is based on decision events, not current task status.",
             "completion_rate": "Currently completed tasks created during the selected period divided by tasks created during that period.",
             "on_time_rate": "Completed tasks with a due date whose recorded completion/submission/review time is at or before the due date, divided by completed tasks with a due date.",
-            "average_completion_hours": "Average elapsed hours from operation creation to the recorded completion, review, submission or update timestamp for tasks currently recorded as completed in the selected creation cohort.",
+            "average_completion_hours": "Average elapsed hours from operation creation to a recorded submission or review timestamp for tasks currently completed in the selected creation cohort. Records without a submission or review timestamp are excluded rather than estimating completion time from an unrelated update.",
             "filters": "Team assignment uses the explicit team, then the task zone's team, then the task location's team where available.",
             "time_zone": "Calendar-day boundaries and trend buckets use the selected IANA time zone: " + time_zone_name + ".",
         },
