@@ -122,7 +122,7 @@ def _build_report(admin, start_at, end_exclusive):
         is_cancelled = status in CANCELLED_STATUSES
         due_at = _to_utc(operation.due_at)
         is_overdue = not is_done and not is_cancelled and (
-            bool(operation.overdue) or (due_at is not None and due_at < now)
+            bool(operation.overdue) or status == "overdue" or (due_at is not None and due_at < now)
         )
         if is_done:
             row["completed_tasks"] += 1
