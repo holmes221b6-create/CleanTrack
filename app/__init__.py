@@ -95,6 +95,14 @@ def create_app(config_class=Config):
                     "original_assigned_to_id": "INTEGER REFERENCES users(id)",
                     "assigned_supervisor_id": "INTEGER REFERENCES users(id)",
                     "occurrence_key": "VARCHAR(180)",
+                    "schedule_next_run_at": "TIMESTAMP WITH TIME ZONE",
+                    "schedule_series_id": "INTEGER REFERENCES operations(id)",
+                    "reminder_before_minutes": "INTEGER NOT NULL DEFAULT 60",
+                    "escalate_after_minutes": "INTEGER NOT NULL DEFAULT 120",
+                    "escalate_to_admin": "BOOLEAN NOT NULL DEFAULT TRUE",
+                    "reminder_before_sent_at": "TIMESTAMP WITH TIME ZONE",
+                    "reminder_after_sent_at": "TIMESTAMP WITH TIME ZONE",
+                    "escalated_at": "TIMESTAMP WITH TIME ZONE",
                 }
                 for column, sql_type in operation_additions.items():
                     if column not in operation_columns:
@@ -245,6 +253,9 @@ def create_app(config_class=Config):
             ),
             "announcements_scheduler_running": bool(
                 getattr(app.extensions.get("cleantrack_announcement_scheduler"), "running", False)
+            ),
+            "operation_scheduler_running": bool(
+                getattr(app.extensions.get("cleantrack_operation_scheduler"), "running", False)
             ),
         }), 200
 
