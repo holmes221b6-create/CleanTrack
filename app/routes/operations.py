@@ -196,6 +196,48 @@ def operations_collection():
         category = request.args.get("category", "").strip()
         priority = request.args.get("priority", "").strip()
         search = request.args.get("q", "").strip()
+        supervisor_filter = request.args.get("supervisor_id")
+        if supervisor_filter:
+            if user.role != "Admin":
+                return jsonify({"error": "Only an Admin can open an organization-wide supervisor schedule."}), 403
+            try:
+                supervisor_id = int(supervisor_filter)
+            except ValueError:
+                return jsonify({"error": "supervisor_id must be an integer."}), 400
+            supervisor = User.query.filter_by(
+                id=supervisor_id, organization_id=user.organization_id,
+                role="Supervisor", account_status="active",
+            ).first()
+            if supervisor is None:
+                return jsonify({"error": "Supervisor not found in this organization."}), 404
+            team_ids = [
+                row[0] for row in db.session.query(TeamMember.team_id)
+                .filter(TeamMember.user_id == supervisor.id).all()
+            ]
+            clauses = [
+                Operation.assigned_supervisor_id == supervisor.id,
+                Operation.assigned_to_id == supervisor.id,
+            ]
+            if team_ids:
+                clauses.append(Operation.team_id.in_(team_ids))
+                location_ids = [
+                    row[0] for row in db.session.query(Location.id).filter(
+                        Location.organization_id == user.organization_id,
+                        Location.team_id.in_(team_ids),
+                    ).all()
+                ]
+                zone_clauses = [Zone.team_id.in_(team_ids)]
+                if location_ids:
+                    clauses.append(Operation.location_id.in_(location_ids))
+                    zone_clauses.append(Zone.location_id.in_(location_ids))
+                zone_ids = [
+                    row[0] for row in db.session.query(Zone.id).filter(
+                        Zone.organization_id == user.organization_id, or_(*zone_clauses)
+                    ).all()
+                ]
+                if zone_ids:
+                    clauses.append(Operation.zone_id.in_(zone_ids))
+            query = query.filter(or_(*clauses))
         for param, column in [
             ("team_id", Operation.team_id),
             ("location_id", Operation.location_id),
