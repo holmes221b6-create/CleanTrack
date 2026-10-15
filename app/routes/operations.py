@@ -121,6 +121,32 @@ def _log(operation, actor, action, previous_status, message=None, details=None):
     ))
 
 
+def _operation_is_overdue(operation, now=None):
+    now = now or datetime.now(timezone.utc)
+    due = operation.due_at
+    if due is None:
+        return False
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    else:
+        due = due.astimezone(timezone.utc)
+    status = str(operation.status or "").strip().lower()
+    if status in {"cancelled", "canceled"}:
+        return False
+    if status in {"submitted", "completed", "approved", "verified"}:
+        submitted = operation.submitted_at
+        if submitted is None:
+            return False
+        if submitted.tzinfo is None:
+            submitted = submitted.replace(tzinfo=timezone.utc)
+        else:
+            submitted = submitted.astimezone(timezone.utc)
+        return submitted > due
+    if status in CLOSED_STATUSES:
+        return False
+    return due < now
+
+
 def _parse_id(data, field):
     value = data.get(field)
     if value in (None, ""):
@@ -264,10 +290,7 @@ def operations_collection():
         now = datetime.now(timezone.utc)
         items = query.order_by(Operation.created_at.desc()).all()
         for item in items:
-            due = item.due_at
-            if due is not None and due.tzinfo is None:
-                due = due.replace(tzinfo=timezone.utc)
-            item.overdue = bool(due and due < now and str(item.status).lower() not in CLOSED_STATUSES)
+            item.overdue = _operation_is_overdue(item, now)
         return jsonify({"operations": [item.to_dict() for item in items], "count": len(items)}), 200
 
     if user.role not in {"Admin", "Supervisor"}:
@@ -496,6 +519,7 @@ def get_operation(operation_id):
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or you do not have access."}), 404
+    operation.overdue = _operation_is_overdue(operation)
     history = OperationLog.query.filter_by(operation_id=operation.id).order_by(OperationLog.created_at.asc()).all()
     result = operation.to_dict()
     result["history"] = [entry.to_dict() for entry in history]
