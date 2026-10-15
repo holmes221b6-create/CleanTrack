@@ -464,6 +464,12 @@ def operation_options():
         locations_query = locations_query.filter(Location.team_id.in_(team_ids)) if team_ids else locations_query.filter(Location.id == -1)
         zones_query = zones_query.filter(or_(Zone.team_id.in_(team_ids), Zone.id == -1)) if team_ids else zones_query.filter(Zone.id == -1)
     locations = locations_query.order_by(Location.name.asc()).all()
+    if user.role != "Admin":
+        visible_location_ids = [row.id for row in locations]
+        allowed_zone_clauses = [Zone.team_id.in_(team_ids)] if team_ids else []
+        if visible_location_ids:
+            allowed_zone_clauses.append(Zone.location_id.in_(visible_location_ids))
+        zones_query = zones_query.filter(or_(*allowed_zone_clauses)) if allowed_zone_clauses else zones_query.filter(Zone.id == -1)
     zones = zones_query.order_by(Zone.name.asc()).all()
 
     members_query = User.query.filter(
