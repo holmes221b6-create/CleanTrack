@@ -109,6 +109,11 @@ def create_app(config_class=Config):
                     "CREATE INDEX IF NOT EXISTS ix_operations_assigned_supervisor_id "
                     "ON operations (assigned_supervisor_id)"
                 ))
+            if "task_evidence" in tables:
+                evidence_columns = {item["name"] for item in inspect(connection).get_columns("task_evidence")}
+                if "file_data" not in evidence_columns:
+                    blob_type = "BYTEA" if connection.dialect.name == "postgresql" else "BLOB"
+                    connection.execute(text(f"ALTER TABLE task_evidence ADD COLUMN file_data {blob_type}"))
             if "announcements" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
                 had_status = "status" in columns
