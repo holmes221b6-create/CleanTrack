@@ -38,7 +38,10 @@ def _payload(location):
     data["active_operation_count"] = Operation.query.filter(
         Operation.organization_id == location.organization_id,
         or_(*operation_filter),
-        func.lower(Operation.status).notin_(CLOSED_STATUSES),
+        or_(
+            func.lower(Operation.status).notin_(CLOSED_STATUSES),
+            Operation.schedule_next_run_at.isnot(None),
+        ),
     ).count()
     return data
 
@@ -227,7 +230,7 @@ def location_detail(location_id):
             payload = _payload(location)
             if payload["active_operation_count"]:
                 return jsonify({
-                    "error": "This location still has open operations. Resolve or move them before archiving.",
+                    "error": "This location still has open operations or scheduled work. Resolve or move them before archiving.",
                     "active_operation_count": payload["active_operation_count"],
                     "operation_count": payload["operation_count"],
                     "zone_count": payload["zone_count"],
