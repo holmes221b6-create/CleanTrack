@@ -472,6 +472,62 @@ def update_operation(operation_id):
         if not isinstance(data["requires_verification"], bool):
             return jsonify({"error": "requires_verification must be true or false."}), 400
         operation.requires_verification = data["requires_verification"]
+    if any(key in data for key in ("team_id", "location_id", "zone_id")):
+        team_id = operation.team_id
+        location_id = operation.location_id
+        zone_id = operation.zone_id
+        for key, current in (("team_id", team_id), ("location_id", location_id), ("zone_id", zone_id)):
+            if key in data:
+                parsed, error = _parse_id(data, key)
+                if error:
+                    return jsonify({"error": error}), 400
+                if key == "team_id":
+                    team_id = parsed
+                elif key == "location_id":
+                    location_id = parsed
+                else:
+                    zone_id = parsed
+        scope_error = _team_context(team_id, location_id, zone_id, user)
+        if scope_error:
+            return jsonify({"error": scope_error}), 400
+        for key, attr, new_value in (
+            ("team_id", "team_id", team_id),
+            ("location_id", "location_id", location_id),
+            ("zone_id", "zone_id", zone_id),
+        ):
+            old_value = getattr(operation, attr)
+            if old_value != new_value:
+                changes[key] = {"before": old_value, "after": new_value}
+                setattr(operation, attr, new_value)
+    if "schedule_type" in data:
+        schedule_type = data["schedule_type"]
+        if schedule_type not in VALID_SCHEDULE_TYPES:
+            return jsonify({"error": "Schedule type must be manual, one_time, or recurring."}), 400
+        recurrence_rule = data.get("recurrence_rule", operation.recurrence_rule)
+        if schedule_type == "recurring":
+            if not isinstance(recurrence_rule, dict) or recurrence_rule.get("frequency") not in {"daily", "weekly", "monthly"}:
+                return jsonify({"error": "Recurring operations require a daily, weekly, or monthly recurrence rule."}), 400
+            try:
+                interval = int(recurrence_rule.get("interval", 1))
+                if not 1 <= interval <= 365:
+                    raise ValueError
+                recurrence_rule = {**recurrence_rule, "interval": interval}
+            except (TypeError, ValueError):
+                return jsonify({"error": "Recurrence interval must be between 1 and 365."}), 400
+        else:
+            recurrence_rule = None
+        if operation.schedule_type != schedule_type or operation.recurrence_rule != recurrence_rule:
+            changes["schedule"] = {"before": {"type": operation.schedule_type, "rule": operation.recurrence_rule}, "after": {"type": schedule_type, "rule": recurrence_rule}}
+            operation.schedule_type = schedule_type
+            operation.recurrence_rule = recurrence_rule
+    if "schedule_timezone" in data:
+        value = data["schedule_timezone"]
+        if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
+            return jsonify({"error": "A valid schedule time zone is required."}), 400
+        value = value.strip()
+        if operation.schedule_timezone != value:
+            changes["schedule_timezone"] = {"before": operation.schedule_timezone, "after": value}
+            operation.schedule_timezone = value
     if not changes:
         return jsonify({"message": "No changes to save.", "operation": operation.to_dict()}), 200
     try:
