@@ -92,8 +92,8 @@ def locations_collection():
         except (TypeError, ValueError):
             return jsonify({"error": "Team ID must be an integer."}), 400
         team = Team.query.filter_by(id=team_id, organization_id=admin.organization_id).first()
-        if team is None:
-            return jsonify({"error": "Team not found in your organization."}), 400
+        if team is None or team.status != "active":
+            return jsonify({"error": "Team not found or inactive in your organization."}), 400
     else:
         team_id = None
 
@@ -199,6 +199,8 @@ def location_detail(location_id):
             team = Team.query.filter_by(id=team_id, organization_id=admin.organization_id).first()
             if team is None:
                 return jsonify({"error": "Team not found in your organization."}), 400
+            if team.status != "active" and team_id != location.team_id:
+                return jsonify({"error": "New assignments can only use active teams."}), 400
             location.team_id = team_id
 
     if "latitude" in data or "longitude" in data:
@@ -237,7 +239,11 @@ def location_detail(location_id):
     if not changed:
         return jsonify({"message": "No location changes were needed.", "location": _payload(location)}), 200
     try:
-        _audit(admin, location, "location.updated", {"changes": changed})
+        action = "location.updated"
+        if "status" in changed:
+            old_status, new_status = changed["status"]["before"], changed["status"]["after"]
+            action = "location.archived" if new_status == "archived" else "location.restored" if old_status == "archived" else "location.status_changed"
+        _audit(admin, location, action, {"changes": changed})
         db.session.commit()
     except Exception:
         db.session.rollback()
