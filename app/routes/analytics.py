@@ -1,4 +1,5 @@
 from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO, StringIO
 import csv
 import re
@@ -414,6 +415,13 @@ def analytics_workspace():
     if error:
         return jsonify({"error": error[0]}), error[1]
     start_day, end_day, start_at, end_exclusive = parsed
+    time_zone_name = (request.args.get("time_zone") or "UTC").strip()
+    try:
+        report_timezone = ZoneInfo(time_zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "time_zone must be a valid IANA time-zone name."}), 400
+    start_at = datetime.combine(start_day, time.min, tzinfo=report_timezone).astimezone(timezone.utc)
+    end_exclusive = datetime.combine(end_day + timedelta(days=1), time.min, tzinfo=report_timezone).astimezone(timezone.utc)
 
     def parse_ids(parameter):
         raw_values = request.args.getlist(parameter)
@@ -608,7 +616,7 @@ def analytics_workspace():
 
     def bucket_key(value):
         utc_value = as_utc(value)
-        return bucket_start(utc_value.date()).isoformat() if utc_value is not None else None
+        return bucket_start(utc_value.astimezone(report_timezone).date()).isoformat() if utc_value is not None else None
 
     def bucket_label(key):
         day = date.fromisoformat(key)
@@ -723,6 +731,7 @@ def analytics_workspace():
     response = {
         "period": {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
         "bucket": bucket,
+        "time_zone": time_zone_name,
         "summary": {
             **summary_metrics,
             "tasks_created_in_period": summary_metrics["total_tasks"],
@@ -760,6 +769,7 @@ def analytics_workspace():
             "on_time_rate": "Completed tasks with a due date whose recorded completion/submission/review time is at or before the due date, divided by completed tasks with a due date.",
             "average_completion_hours": "Average elapsed hours from operation creation to the recorded completion, review, submission or update timestamp for tasks currently recorded as completed in the selected creation cohort.",
             "filters": "Team assignment uses the explicit team, then the task zone's team, then the task location's team where available.",
+            "time_zone": "Calendar-day boundaries and trend buckets use the selected IANA time zone: " + time_zone_name + ".",
         },
     }
     export_format = (request.args.get("format") or "").strip().lower()
