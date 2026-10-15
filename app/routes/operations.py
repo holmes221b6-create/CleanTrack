@@ -74,12 +74,31 @@ def _can_manage(operation, user):
         return True
     if user.role != "Supervisor":
         return False
+    if operation.assigned_supervisor_id == user.id or operation.assigned_to_id == user.id:
+        return True
     team_ids = _team_ids(user)
-    return (
-        operation.assigned_supervisor_id == user.id
-        or operation.assigned_to_id == user.id
-        or (operation.team_id is not None and operation.team_id in team_ids)
-    )
+    if operation.team_id is not None and operation.team_id in team_ids:
+        return True
+    if not team_ids:
+        return False
+    location_ids = {
+        row[0] for row in db.session.query(Location.id).filter(
+            Location.organization_id == user.organization_id,
+            Location.team_id.in_(team_ids),
+        ).all()
+    }
+    if operation.location_id is not None and operation.location_id in location_ids:
+        return True
+    zone_ids = {
+        row[0] for row in db.session.query(Zone.id).filter(
+            Zone.organization_id == user.organization_id,
+            or_(
+                Zone.team_id.in_(team_ids),
+                Zone.location_id.in_(location_ids) if location_ids else Zone.id == -1,
+            ),
+        ).all()
+    }
+    return operation.zone_id is not None and operation.zone_id in zone_ids
 
 
 def _visible(operation, user):
@@ -189,7 +208,7 @@ def _parse_list(data, field, max_items=40, max_length=500):
     return [item.strip() for item in value], None
 
 
-def _team_context(team_id, location_id, zone_id, user):
+def _team_context(team_id, location_id, zone_id, user, allow_area_only=False):
     team = db.session.get(Team, team_id) if team_id else None
     location = db.session.get(Location, location_id) if location_id else None
     zone = db.session.get(Zone, zone_id) if zone_id else None
@@ -207,8 +226,29 @@ def _team_context(team_id, location_id, zone_id, user):
         return "Zone does not belong to the selected team."
     if user.role == "Supervisor":
         allowed = _team_ids(user)
-        if not team_id or team_id not in allowed:
-            return "Supervisors can only manage operations in their assigned teams."
+        if team_id:
+            if team_id not in allowed:
+                return "Supervisors can only manage operations in their assigned teams."
+        elif not allow_area_only:
+            return "Supervisors must choose one of their assigned teams when creating an operation."
+        else:
+            allowed_locations = {
+                row[0] for row in db.session.query(Location.id).filter(
+                    Location.organization_id == user.organization_id,
+                    Location.team_id.in_(allowed),
+                ).all()
+            } if allowed else set()
+            allowed_zones = {
+                row[0] for row in db.session.query(Zone.id).filter(
+                    Zone.organization_id == user.organization_id,
+                    or_(
+                        Zone.team_id.in_(allowed),
+                        Zone.location_id.in_(allowed_locations) if allowed_locations else Zone.id == -1,
+                    ),
+                ).all()
+            } if allowed else set()
+            if location_id not in allowed_locations and zone_id not in allowed_zones:
+                return "Supervisors can only manage operations inside their assigned teams, locations, or zones."
     return None
 
 
@@ -752,7 +792,7 @@ def update_operation(operation_id):
                     location_id = parsed
                 else:
                     zone_id = parsed
-        scope_error = _team_context(team_id, location_id, zone_id, user)
+        scope_error = _team_context(team_id, location_id, zone_id, user, allow_area_only=True)
         if scope_error:
             return jsonify({"error": scope_error}), 400
         for key, attr, new_value in (
