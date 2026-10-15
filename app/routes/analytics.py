@@ -716,6 +716,10 @@ def analytics_workspace():
     rejection_event_count = sum(row["rejected"] for row in trends_by_key.values())
     submitted_event_count = sum(row["submitted"] for row in trends_by_key.values())
 
+    review_decision_count = approval_event_count + rejection_event_count
+    approval_rate = round(approval_event_count * 100 / review_decision_count, 1) if review_decision_count else None
+    rejection_rate = round(rejection_event_count * 100 / review_decision_count, 1) if review_decision_count else None
+
     response = {
         "period": {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
         "bucket": bucket,
@@ -724,6 +728,8 @@ def analytics_workspace():
             "tasks_created_in_period": summary_metrics["total_tasks"],
             "approval_events": approval_event_count,
             "rejection_events": rejection_event_count,
+            "approval_rate": approval_rate,
+            "rejection_rate": rejection_rate,
             "completion_events": completion_event_count,
             "submission_events": submitted_event_count,
             "team_count": len(teams),
@@ -747,7 +753,9 @@ def analytics_workspace():
         },
         "methodology": {
             "cohort": "Summary and group breakdown metrics describe work created during the selected date period, using its current recorded state.",
-            "trends": "Created work is grouped by operations.created_at. Completed, submitted, approved and rejected trends are grouped by recorded operation audit events occurring during the selected period and matching the current filters. Approval/rejection histories require those events to exist in the audit trail.",
+            "trends": "Created work is grouped by operations.created_at. Completed, submitted, approved and rejected trends are grouped by recorded operation audit events occurring during the selected period and matching the current filters. Approved verification events also count as completed events; approval is therefore a subset of completions. Approval/rejection histories require those events to exist in the audit trail.",
+            "approval_rate": "Recorded approvals divided by recorded approval plus rejection decisions during the selected period. This is based on decision events, not current task status.",
+            "rejection_rate": "Recorded rejections divided by recorded approval plus rejection decisions during the selected period. This is based on decision events, not current task status.",
             "completion_rate": "Currently completed tasks created during the selected period divided by tasks created during that period.",
             "on_time_rate": "Completed tasks with a due date whose recorded completion/submission/review time is at or before the due date, divided by completed tasks with a due date.",
             "average_completion_hours": "Average elapsed hours from operation creation to the recorded completion, review, submission or update timestamp for tasks currently recorded as completed in the selected creation cohort.",
