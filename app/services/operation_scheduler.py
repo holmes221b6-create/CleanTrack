@@ -11,6 +11,7 @@ from app.models.operation import Operation
 from app.models.operation_log import OperationLog
 from app.models.organization import Organization
 from app.models.user import User
+from app.models.team_member import TeamMember
 
 
 CLOSED = {"completed", "approved", "verified", "cancelled", "canceled"}
@@ -104,6 +105,18 @@ def _notify(organization_id, operation, recipients, title, message, notification
 
 def _operation_recipients(operation):
     ids = {value for value in (operation.assigned_to_id, operation.assigned_supervisor_id) if value}
+    if operation.team_id and not operation.assigned_supervisor_id:
+        # When the Admin assigns an employee directly to a team, notify the
+        # supervisor(s) who are actual members of that team as well.
+        team_supervisors = db.session.query(TeamMember.user_id).join(
+            User, User.id == TeamMember.user_id
+        ).filter(
+            TeamMember.team_id == operation.team_id,
+            User.organization_id == operation.organization_id,
+            User.role == "Supervisor",
+            User.account_status == "active",
+        ).all()
+        ids.update(row[0] for row in team_supervisors)
     if not ids:
         return []
     return User.query.filter(
