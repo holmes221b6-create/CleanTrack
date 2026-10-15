@@ -169,6 +169,12 @@ def _new_occurrence(series, slot, key):
 
 
 def _process_one_series(series, now):
+    # Serialize workers through the persisted series row so multiple web workers
+    # cannot create the same slot in parallel. The unique occurrence key is a
+    # second line of defence.
+    series = Operation.query.filter_by(id=series.id).populate_existing().with_for_update().first()
+    if series is None or series.schedule_next_run_at is None or as_utc(series.schedule_next_run_at) > now:
+        return
     rule = series.recurrence_rule or {}
     zone_name = series.schedule_timezone or "UTC"
     try:
@@ -261,13 +267,22 @@ def _process_reminders(organization_id, now):
         Operation.organization_id == organization_id,
         Operation.due_at.isnot(None),
     ).all()
-    for operation in candidates:
+    for candidate in candidates:
+        operation = Operation.query.filter_by(id=candidate.id).populate_existing().with_for_update().first()
+        if operation is None:
+            continue
         status = str(operation.status or "").strip().lower()
         if status in CLOSED or status == "submitted":
+            if operation.overdue:
+                operation.overdue = False
             continue
         due_at = as_utc(operation.due_at)
         if due_at is None:
             continue
+        if due_at <= now:
+            operation.overdue = True
+        elif operation.overdue:
+            operation.overdue = False
         recipients = _operation_recipients(operation)
         if not recipients:
             continue
@@ -277,7 +292,7 @@ def _process_reminders(organization_id, now):
         except (TypeError, ValueError):
             before_minutes = 60
         try:
-            escalate_minutes = max(0, min(525600, int(operation.escalate_after_minutes or 120)))
+            escalate_minutes = max(0, min(525600, int(operation.escalate_after_minutes if operation.escalate_after_minutes is not None else 120)))
         except (TypeError, ValueError):
             escalate_minutes = 120
 
@@ -292,7 +307,6 @@ def _process_reminders(organization_id, now):
                 operation.reminder_before_sent_at = now
 
         if due_at <= now:
-            operation.overdue = True
             if operation.reminder_after_sent_at is None:
                 sent = _notify(
                     organization_id, operation, recipients,
