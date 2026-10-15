@@ -551,7 +551,7 @@ def analytics_workspace():
         completed = [item for item in items if canonical_status(item) == "Completed"]
         open_items = [item for item in items if canonical_status(item) not in {"Completed", "Cancelled"}]
         overdue_items = [item for item in open_items if is_overdue_now(item)]
-        due_completed = [item for item in completed if as_utc(item.due_at) is not None]
+        due_completed = [item for item in completed if as_utc(item.due_at) is not None and completion_time(item) is not None]
         on_time = [
             item for item in due_completed
             if completion_time(item) is not None and completion_time(item) <= as_utc(item.due_at)
