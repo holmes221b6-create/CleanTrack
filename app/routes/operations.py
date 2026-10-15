@@ -587,6 +587,10 @@ def update_operation(operation_id):
             if operation.original_due_at is None:
                 operation.original_due_at = current
             operation.due_at = due_at
+            operation.reminder_before_sent_at = None
+            operation.reminder_after_sent_at = None
+            operation.escalated_at = None
+            operation.overdue = False
             changes["deadline"] = {"before": before, "after": due_at.isoformat() if due_at else None}
     for field in ("checklist", "required_evidence"):
         if field in data:
@@ -663,9 +667,48 @@ def update_operation(operation_id):
         if not isinstance(value, str) or not value.strip() or len(value.strip()) > 80:
             return jsonify({"error": "A valid schedule time zone is required."}), 400
         value = value.strip()
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            return jsonify({"error": "Choose a valid IANA time zone."}), 400
         if operation.schedule_timezone != value:
             changes["schedule_timezone"] = {"before": operation.schedule_timezone, "after": value}
             operation.schedule_timezone = value
+    for key, default, maximum in (
+        ("reminder_before_minutes", 60, 10080),
+        ("escalate_after_minutes", 120, 525600),
+    ):
+        if key in data:
+            try:
+                value = int(data[key])
+                if not 0 <= value <= maximum:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({"error": key + " is outside the allowed range."}), 400
+            old = getattr(operation, key)
+            if old != value:
+                changes[key] = {"before": old, "after": value}
+                setattr(operation, key, value)
+    if "escalate_to_admin" in data:
+        value = data["escalate_to_admin"]
+        if not isinstance(value, bool):
+            return jsonify({"error": "escalate_to_admin must be true or false."}), 400
+        if operation.escalate_to_admin != value:
+            changes["escalate_to_admin"] = {"before": operation.escalate_to_admin, "after": value}
+            operation.escalate_to_admin = value
+    if operation.schedule_type == "recurring":
+        if operation.due_at is None:
+            return jsonify({"error": "Recurring operations require a first due date and time."}), 400
+        if any(key in changes for key in ("deadline", "schedule", "schedule_timezone")):
+            try:
+                next_run = next_occurrence(operation.due_at, operation.recurrence_rule or {}, operation.schedule_timezone or "UTC")
+            except (ZoneInfoNotFoundError, ValueError):
+                return jsonify({"error": "Could not recalculate the recurring schedule. Check its time zone and rule."}), 400
+            if operation.schedule_next_run_at != next_run:
+                operation.schedule_next_run_at = next_run
+                changes["next_scheduled_occurrence"] = {"after": next_run.isoformat() if next_run else None}
+    else:
+        operation.schedule_next_run_at = None
     if not changes:
         return jsonify({"message": "No changes to save.", "operation": operation.to_dict()}), 200
     try:
