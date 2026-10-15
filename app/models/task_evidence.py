@@ -13,6 +13,7 @@ class TaskEvidence(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     operation_id = db.Column(db.Integer, db.ForeignKey("operations.id"), nullable=False, index=True)
     uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    execution_id = db.Column(db.Integer, db.ForeignKey("operation_executions.id"), nullable=True, index=True)
     evidence_type = db.Column(db.String(30), nullable=False, default="document")
     stage = db.Column(db.String(20), nullable=False, default="execution")
     original_filename = db.Column(db.String(255), nullable=False)
@@ -24,12 +25,14 @@ class TaskEvidence(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, index=True)
 
     operation = db.relationship("Operation", backref=db.backref("evidence", lazy=True))
+    execution = db.relationship("OperationExecution", backref=db.backref("evidence_files", lazy=True))
     uploader = db.relationship("User")
 
     def to_dict(self):
         return {
             "id": self.id,
             "operation_id": self.operation_id,
+            "execution_id": self.execution_id,
             "uploaded_by_id": self.uploaded_by_id,
             "uploaded_by_name": self.uploader.full_name if self.uploader else None,
             "evidence_type": self.evidence_type,
