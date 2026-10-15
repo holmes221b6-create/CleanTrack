@@ -79,6 +79,36 @@ def create_app(config_class=Config):
                 for column, sql_type in additive_columns.items():
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"))
+            if "operations" in tables:
+                operation_columns = {item["name"] for item in inspect(connection).get_columns("operations")}
+                operation_additions = {
+                    "priority": "VARCHAR(20) NOT NULL DEFAULT 'Normal'",
+                    "instructions": "TEXT",
+                    "checklist": "JSON",
+                    "required_evidence": "JSON",
+                    "estimated_minutes": "INTEGER",
+                    "requires_verification": "BOOLEAN NOT NULL DEFAULT TRUE",
+                    "schedule_type": "VARCHAR(20) NOT NULL DEFAULT 'one_time'",
+                    "recurrence_rule": "JSON",
+                    "schedule_timezone": "VARCHAR(80) NOT NULL DEFAULT 'UTC'",
+                    "original_due_at": "TIMESTAMP WITH TIME ZONE",
+                    "original_assigned_to_id": "INTEGER REFERENCES users(id)",
+                    "assigned_supervisor_id": "INTEGER REFERENCES users(id)",
+                    "occurrence_key": "VARCHAR(180)",
+                }
+                for column, sql_type in operation_additions.items():
+                    if column not in operation_columns:
+                        connection.execute(text(f"ALTER TABLE operations ADD COLUMN {column} {sql_type}"))
+                # A unique occurrence key is the persistent duplicate guard for
+                # the recurring-operation scheduler when it is enabled.
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_operations_occurrence_key "
+                    "ON operations (occurrence_key)"
+                ))
+                connection.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_operations_assigned_supervisor_id "
+                    "ON operations (assigned_supervisor_id)"
+                ))
             if "announcements" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
                 had_status = "status" in columns
