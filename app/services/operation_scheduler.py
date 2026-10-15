@@ -247,6 +247,32 @@ def _process_one_series(series, now):
 
 
 def _process_schedules(organization_id, now):
+    # Upgrade legacy recurring definitions created before the dispatcher was
+    # installed by deriving their first future slot from the stored due date.
+    legacy_series = Operation.query.filter(
+        Operation.organization_id == organization_id,
+        Operation.schedule_type == "recurring",
+        Operation.schedule_series_id.is_(None),
+        Operation.schedule_next_run_at.is_(None),
+        Operation.due_at.isnot(None),
+        Operation.recurrence_rule.isnot(None),
+    ).order_by(Operation.id.asc()).all()
+    for candidate in legacy_series:
+        try:
+            series = Operation.query.filter_by(id=candidate.id).populate_existing().with_for_update().first()
+            if series is None or series.schedule_next_run_at is not None:
+                continue
+            series.schedule_next_run_at = next_occurrence(
+                series.due_at, series.recurrence_rule or {}, series.schedule_timezone or "UTC"
+            )
+            _system_event(series, "schedule_activated",
+                          "Recurring schedule dispatcher activated this existing definition.",
+                          {"schedule_next_run_at": series.schedule_next_run_at.isoformat() if series.schedule_next_run_at else None})
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            raise
+
     series_rows = Operation.query.filter(
         Operation.organization_id == organization_id,
         Operation.schedule_type == "recurring",
