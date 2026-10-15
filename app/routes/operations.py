@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO
 from uuid import uuid4
 from mimetypes import guess_type
@@ -17,6 +18,7 @@ from app.models.team_member import TeamMember
 from app.models.location import Location
 from app.models.zone import Zone
 from app.models.task_evidence import TaskEvidence
+from app.services.operation_scheduler import next_occurrence
 from werkzeug.utils import secure_filename
 from app.services.permissions import get_current_user, roles_required
 
@@ -217,7 +219,7 @@ def operations_collection():
                 Operation.description.ilike("%" + search[:100] + "%"),
             ))
         now = datetime.now(timezone.utc)
-        items = query.order_by(Operation.created_at.desc()).limit(1000).all()
+        items = query.order_by(Operation.created_at.desc()).all()
         for item in items:
             due = item.due_at
             if due is not None and due.tzinfo is None:
@@ -303,6 +305,11 @@ def operations_collection():
     schedule_timezone = data.get("schedule_timezone", "UTC")
     if not isinstance(schedule_timezone, str) or not schedule_timezone.strip() or len(schedule_timezone) > 80:
         return jsonify({"error": "A valid schedule time zone is required."}), 400
+    schedule_timezone = schedule_timezone.strip()
+    try:
+        ZoneInfo(schedule_timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "Choose a valid IANA time zone, such as Asia/Kolkata or Europe/London."}), 400
     recurrence_rule = data.get("recurrence_rule")
     if schedule_type == "recurring":
         if not isinstance(recurrence_rule, dict) or recurrence_rule.get("frequency") not in {"daily", "weekly", "monthly"}:
@@ -311,9 +318,47 @@ def operations_collection():
             interval = int(recurrence_rule.get("interval", 1))
             if not 1 <= interval <= 365:
                 raise ValueError
-            recurrence_rule = {**recurrence_rule, "interval": interval}
+            catch_up_policy = str(recurrence_rule.get("catch_up_policy", "latest_only")).lower()
+            if catch_up_policy not in {"latest_only", "skip", "limited"}:
+                raise ValueError
+            catch_up_window_days = int(recurrence_rule.get("catch_up_window_days", 7))
+            if not 0 <= catch_up_window_days <= 365:
+                raise ValueError
+            recurrence_rule = {
+                **recurrence_rule,
+                "interval": interval,
+                "catch_up_policy": catch_up_policy,
+                "catch_up_window_days": catch_up_window_days,
+            }
         except (TypeError, ValueError):
-            return jsonify({"error": "Recurrence interval must be between 1 and 365."}), 400
+            return jsonify({"error": "Use a valid interval and catch-up policy (latest_only, skip, or limited, with a 0–365 day catch-up window)."}), 400
+        if due_at is None:
+            return jsonify({"error": "Recurring operations require the first due date and time."}), 400
+
+    def bounded_minutes(field, default, maximum):
+        value = data.get(field, default)
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return None
+        return value if 0 <= value <= maximum else None
+
+    reminder_before_minutes = bounded_minutes("reminder_before_minutes", 60, 10080)
+    escalate_after_minutes = bounded_minutes("escalate_after_minutes", 120, 525600)
+    escalate_to_admin = data.get("escalate_to_admin", True)
+    if reminder_before_minutes is None:
+        return jsonify({"error": "Pre-deadline reminder must be between 0 minutes and 7 days."}), 400
+    if escalate_after_minutes is None:
+        return jsonify({"error": "Escalation delay must be between 0 minutes and 365 days."}), 400
+    if not isinstance(escalate_to_admin, bool):
+        return jsonify({"error": "escalate_to_admin must be true or false."}), 400
+
+    schedule_next_run_at = None
+    if schedule_type == "recurring":
+        try:
+            schedule_next_run_at = next_occurrence(due_at, recurrence_rule, schedule_timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return jsonify({"error": "The recurring schedule could not be calculated. Check its time zone and recurrence rule."}), 400
 
     operation = Operation(
         title=title.strip(),
@@ -338,7 +383,11 @@ def operations_collection():
         original_due_at=due_at,
         schedule_type=schedule_type,
         recurrence_rule=recurrence_rule if schedule_type == "recurring" else None,
-        schedule_timezone=schedule_timezone.strip(),
+        schedule_timezone=schedule_timezone,
+        schedule_next_run_at=schedule_next_run_at,
+        reminder_before_minutes=reminder_before_minutes,
+        escalate_after_minutes=escalate_after_minutes,
+        escalate_to_admin=escalate_to_admin,
     )
     db.session.add(operation)
     try:
