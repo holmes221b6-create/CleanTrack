@@ -314,10 +314,11 @@ def current_user():
                     "theme": {"light", "dark"},
                     "currency": {
                         "USD", "EUR", "GBP", "INR", "CNY", "JPY", "KRW", "AED",
-                        "SAR", "QAR", "KWD", "SGD", "AUD", "CAD", "CHF", "NZD",
-                        "HKD", "THB", "IDR", "MYR", "PHP", "VND", "BDT", "PKR",
-                        "LKR", "NPR", "ZAR", "NGN", "KES", "EGP", "TRY", "BRL",
-                        "MXN", "ARS", "CLP", "COP", "PLN", "SEK", "NOK", "DKK", "RUB",
+                        "SAR", "QAR", "KWD", "BHD", "OMR", "JOD", "SGD", "AUD", "CAD", "CHF", "NZD",
+                        "HKD", "TWD", "THB", "IDR", "MYR", "PHP", "VND", "BDT", "PKR", "LKR", "NPR",
+                        "ZAR", "NGN", "KES", "EGP", "TRY", "BRL", "MXN", "ARS", "CLP", "COP", "PEN",
+                        "UYU", "DOP", "PLN", "CZK", "HUF", "RON", "SEK", "NOK", "DKK", "ISK", "RUB",
+                        "ILS", "UAH", "MAD", "GHS", "UGX", "TZS", "ETB", "KZT", "MUR",
                     },
                 }
                 for key, options in choices.items():
