@@ -567,6 +567,13 @@ def upload_operation_evidence(operation_id):
     }
     if file_type not in allowed_types:
         return jsonify({"error": "Use a JPG, PNG, WebP, PDF, TXT, DOC, or DOCX evidence file."}), 400
+    evidence_type = "photo" if file_type.startswith("image/") else "document"
+    stage = str(request.form.get("stage", "after" if evidence_type == "photo" else "execution")).strip().lower()
+    if evidence_type == "photo":
+        if stage not in {"before", "after", "general"}:
+            return jsonify({"error": "Photo stage must be before, after, or general."}), 400
+    else:
+        stage = "execution"
 
     execution = OperationExecution.query.filter_by(
         operation_id=operation.id, performed_by_id=operation.assigned_to_id
@@ -589,8 +596,8 @@ def upload_operation_evidence(operation_id):
         operation_id=operation.id,
         execution_id=execution.id,
         uploaded_by_id=user.id,
-        evidence_type="photo" if file_type.startswith("image/") else "document",
-        stage="execution",
+        evidence_type=evidence_type,
+        stage=stage,
         original_filename=filename,
         storage_key="db:operation:" + str(operation.id) + ":evidence:" + uuid4().hex,
         content_type=file_type,
@@ -603,7 +610,7 @@ def upload_operation_evidence(operation_id):
         _log(operation, user, "evidence_uploaded", operation.status,
              "Uploaded execution evidence: " + filename,
              {"evidence_id": evidence.id, "execution_id": execution.id,
-              "evidence_type": evidence.evidence_type, "stage": "execution", "file_size": evidence.file_size})
+              "evidence_type": evidence.evidence_type, "stage": evidence.stage, "file_size": evidence.file_size})
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -975,10 +982,15 @@ def submit_operation(operation_id):
         (TaskEvidence.execution_id == execution.id) | (TaskEvidence.execution_id.is_(None)),
     ).all()
     evidence_types = {row.evidence_type for row in evidence_rows}
+    photo_stages = {row.stage for row in evidence_rows if row.evidence_type == "photo"}
     required = operation.required_evidence if isinstance(operation.required_evidence, list) else []
     missing_evidence = []
     if "photo" in required and "photo" not in evidence_types:
-        missing_evidence.append("at least one after-completion photo")
+        missing_evidence.append("at least one photo")
+    if "before_photo" in required and "before" not in photo_stages:
+        missing_evidence.append("a before-work photo")
+    if "after_photo" in required and "after" not in photo_stages:
+        missing_evidence.append("an after-work photo")
     if "document" in required and "document" not in evidence_types:
         missing_evidence.append("a document or attachment")
     if "note" in required and not notes.strip():
