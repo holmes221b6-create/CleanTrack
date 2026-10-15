@@ -426,6 +426,22 @@ def operations_collection():
         except (ZoneInfoNotFoundError, ValueError):
             return jsonify({"error": "The recurring schedule could not be calculated. Check its time zone and recurrence rule."}), 400
 
+    assigned_supervisor_id = (
+        assignee.id if assignee and assignee.role == "Supervisor"
+        else (user.id if user.role == "Supervisor" else None)
+    )
+    if assigned_supervisor_id is None and assignee and assignee.role == "Employee" and team_id:
+        team_supervisors = User.query.join(
+            TeamMember, TeamMember.user_id == User.id
+        ).filter(
+            TeamMember.team_id == team_id,
+            User.organization_id == user.organization_id,
+            User.role == "Supervisor",
+            User.account_status == "active",
+        ).order_by(User.id.asc()).all()
+        if len(team_supervisors) == 1:
+            assigned_supervisor_id = team_supervisors[0].id
+
     operation = Operation(
         title=title.strip(),
         description=description.strip() or None,
@@ -444,7 +460,7 @@ def operations_collection():
         created_by_id=user.id,
         assigned_to_id=assigned_to_id,
         original_assigned_to_id=assigned_to_id,
-        assigned_supervisor_id=(assignee.id if assignee and assignee.role == "Supervisor" else (user.id if user.role == "Supervisor" else None)),
+        assigned_supervisor_id=assigned_supervisor_id,
         due_at=due_at,
         original_due_at=due_at,
         schedule_type=schedule_type,
