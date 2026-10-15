@@ -44,6 +44,14 @@ class Operation(db.Model):
     schedule_type = db.Column(db.String(20), nullable=False, default="one_time")
     recurrence_rule = db.Column(db.JSON, nullable=True)
     schedule_timezone = db.Column(db.String(80), nullable=False, default="UTC")
+    schedule_next_run_at = db.Column(db.DateTime(timezone=True), nullable=True, index=True)
+    schedule_series_id = db.Column(db.Integer, db.ForeignKey("operations.id"), nullable=True, index=True)
+    reminder_before_minutes = db.Column(db.Integer, nullable=False, default=60)
+    escalate_after_minutes = db.Column(db.Integer, nullable=False, default=120)
+    escalate_to_admin = db.Column(db.Boolean, nullable=False, default=True)
+    reminder_before_sent_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    reminder_after_sent_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    escalated_at = db.Column(db.DateTime(timezone=True), nullable=True)
     occurrence_key = db.Column(db.String(180), nullable=True, unique=True, index=True)
 
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
@@ -94,6 +102,14 @@ class Operation(db.Model):
             "schedule_type": self.schedule_type or "one_time",
             "recurrence_rule": self.recurrence_rule,
             "schedule_timezone": self.schedule_timezone or "UTC",
+            "schedule_next_run_at": self.schedule_next_run_at.isoformat() if self.schedule_next_run_at else None,
+            "schedule_series_id": self.schedule_series_id,
+            "reminder_before_minutes": self.reminder_before_minutes,
+            "escalate_after_minutes": self.escalate_after_minutes,
+            "escalate_to_admin": bool(self.escalate_to_admin),
+            "reminder_before_sent_at": self.reminder_before_sent_at.isoformat() if self.reminder_before_sent_at else None,
+            "reminder_after_sent_at": self.reminder_after_sent_at.isoformat() if self.reminder_after_sent_at else None,
+            "escalated_at": self.escalated_at.isoformat() if self.escalated_at else None,
             "occurrence_key": self.occurrence_key,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
