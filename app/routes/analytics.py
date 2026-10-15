@@ -237,7 +237,7 @@ def _export_rows(report):
     return headers, rows
 
 
-def _make_xlsx(headers, rows, comparison=None):
+def _make_xlsx(headers, rows, comparison=None, sheet_name="Team Rankings"):
     """Create an XLSX workbook with rankings and, when selected, a comparison sheet."""
     def col_name(number):
         result = ""
@@ -265,7 +265,7 @@ def _make_xlsx(headers, rows, comparison=None):
             '<sheetData>' + "".join(xml_rows) + '</sheetData></worksheet>'
         )
 
-    sheets = [("Team Rankings", headers, rows)]
+    sheets = [(str(sheet_name)[:31] or "Analytics", headers, rows)]
     if comparison:
         sheets.append(("Team Comparison", comparison["headers"], comparison["rows"]))
     sheet_parts = [worksheet_xml(sheet_headers, sheet_rows) for _name, sheet_headers, sheet_rows in sheets]
@@ -806,7 +806,7 @@ def analytics_workspace():
             file_response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-analytics-{view_name}-{stamp}.csv"'
             return file_response
 
-        payload = _make_xlsx(headers, rows)
+        payload = _make_xlsx(headers, rows, sheet_name=view_name.replace("_", " ").title())
         file_response = make_response(payload)
         file_response.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         file_response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-analytics-{view_name}-{stamp}.xlsx"'
