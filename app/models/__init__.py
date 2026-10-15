@@ -9,6 +9,7 @@ from app.models.location import Location
 from app.models.membership_request import MembershipRequest
 from app.models.notification import Notification
 from app.models.operation import Operation
+from app.models.operation_execution import OperationExecution
 from app.models.operation_log import OperationLog
 from app.models.organization import Organization
 from app.models.task_evidence import TaskEvidence
@@ -27,6 +28,7 @@ __all__ = [
     "MembershipRequest",
     "Notification",
     "Operation",
+    "OperationExecution",
     "OperationLog",
     "Organization",
     "TaskEvidence",
