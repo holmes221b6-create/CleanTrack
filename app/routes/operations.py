@@ -609,11 +609,16 @@ def update_operation(operation_id):
                 raise ValueError
         except (TypeError, ValueError):
             return jsonify({"error": "Estimated time must be between 1 minute and 7 days."}), 400
-        operation.estimated_minutes = value
+        if operation.estimated_minutes != value:
+            changes["estimated_minutes"] = {"before": operation.estimated_minutes, "after": value}
+            operation.estimated_minutes = value
     if "requires_verification" in data:
         if not isinstance(data["requires_verification"], bool):
             return jsonify({"error": "requires_verification must be true or false."}), 400
-        operation.requires_verification = data["requires_verification"]
+        value = data["requires_verification"]
+        if operation.requires_verification != value:
+            changes["requires_verification"] = {"before": operation.requires_verification, "after": value}
+            operation.requires_verification = value
     if any(key in data for key in ("team_id", "location_id", "zone_id")):
         team_id = operation.team_id
         location_id = operation.location_id
@@ -653,9 +658,18 @@ def update_operation(operation_id):
                 interval = int(recurrence_rule.get("interval", 1))
                 if not 1 <= interval <= 365:
                     raise ValueError
-                recurrence_rule = {**recurrence_rule, "interval": interval}
+                catch_up_policy = str(recurrence_rule.get("catch_up_policy", "latest_only")).lower()
+                catch_up_window_days = int(recurrence_rule.get("catch_up_window_days", 7))
+                if catch_up_policy not in {"latest_only", "skip", "limited"} or not 0 <= catch_up_window_days <= 365:
+                    raise ValueError
+                recurrence_rule = {
+                    **recurrence_rule,
+                    "interval": interval,
+                    "catch_up_policy": catch_up_policy,
+                    "catch_up_window_days": catch_up_window_days,
+                }
             except (TypeError, ValueError):
-                return jsonify({"error": "Recurrence interval must be between 1 and 365."}), 400
+                return jsonify({"error": "Use a valid interval and catch-up policy with a 0–365 day catch-up window."}), 400
         else:
             recurrence_rule = None
         if operation.schedule_type != schedule_type or operation.recurrence_rule != recurrence_rule:
