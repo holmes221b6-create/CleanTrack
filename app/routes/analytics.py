@@ -15,6 +15,7 @@ from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.location import Location
 from app.models.zone import Zone
+from app.models.audit_log import AuditLog
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -393,6 +394,367 @@ def _make_pdf(headers, rows, period, comparison=None):
         f"trailer\n<< /Size {max_id + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF".encode("ascii")
     )
     return bytes(output)
+
+
+
+
+@analytics_bp.get("/workspace")
+@roles_required("Admin")
+def analytics_workspace():
+    """Return organization-scoped analytics dimensions, trend events and breakdowns.
+
+    Trends for approvals/rejections are sourced from recorded operation audit
+    events; they are not inferred from a task's current status.
+    """
+    admin = get_current_user()
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    parsed, _unused, error = _parse_period()
+    if error:
+        return jsonify({"error": error[0]}), error[1]
+    start_day, end_day, start_at, end_exclusive = parsed
+
+    def parse_ids(parameter):
+        raw_values = request.args.getlist(parameter)
+        values = []
+        for raw in raw_values:
+            values.extend(part.strip() for part in str(raw).split(",") if part.strip())
+        if not values:
+            return [], None
+        parsed_values = []
+        for raw in values:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return None, f"{parameter} must contain numeric IDs."
+            if value <= 0:
+                return None, f"{parameter} must contain positive IDs."
+            if value not in parsed_values:
+                parsed_values.append(value)
+        return parsed_values, None
+
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        ids, message = parse_ids(key)
+        if message:
+            return jsonify({"error": message}), 400
+        selected[key] = set(ids)
+
+    bucket = (request.args.get("bucket") or "day").strip().lower()
+    if bucket not in {"day", "week", "month", "quarter", "year"}:
+        return jsonify({"error": "bucket must be day, week, month, quarter, or year."}), 400
+    task_type_filter = (request.args.get("task_type") or "").strip()
+
+    teams = Team.query.filter_by(organization_id=admin.organization_id).order_by(
+        func.lower(Team.name), Team.id
+    ).all()
+    locations = Location.query.filter_by(organization_id=admin.organization_id).order_by(
+        func.lower(Location.name), Location.id
+    ).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).order_by(
+        func.lower(Zone.name), Zone.id
+    ).all()
+    employees = User.query.filter(
+        User.organization_id == admin.organization_id,
+        User.account_status == "active",
+        User.role.in_(["Employee", "Supervisor"]),
+    ).order_by(func.lower(User.full_name), User.id).all()
+
+    team_by_id = {row.id: row for row in teams}
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    employee_by_id = {row.id: row for row in employees}
+
+    operations = Operation.query.filter_by(
+        organization_id=admin.organization_id
+    ).order_by(Operation.created_at, Operation.id).all()
+
+    def dimension_ids(operation):
+        location_id = operation.location_id
+        zone = zone_by_id.get(operation.zone_id)
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_by_id else None
+        if team_id is None and zone:
+            candidate = zone.team_id or (location_by_id.get(zone.location_id).team_id if location_by_id.get(zone.location_id) else None)
+            if candidate in team_by_id:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_by_id:
+                team_id = location.team_id
+        return team_id, location_id, operation.zone_id, operation.assigned_to_id
+
+    eligible_ops = []
+    resolved_dimensions = {}
+    for operation in operations:
+        team_id, location_id, zone_id, employee_id = dimension_ids(operation)
+        resolved_dimensions[operation.id] = {
+            "team_id": team_id,
+            "location_id": location_id,
+            "zone_id": zone_id,
+            "employee_id": employee_id,
+        }
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            continue
+        eligible_ops.append(operation)
+
+    def as_utc(value):
+        return _to_utc(value)
+
+    def in_creation_period(operation):
+        created = as_utc(operation.created_at)
+        return created is not None and start_at <= created < end_exclusive
+
+    done_statuses = {"completed", "complete", "approved", "verified", "done", "closed"}
+    cancelled_statuses = {"cancelled", "canceled", "archived"}
+    now = datetime.now(timezone.utc)
+
+    def canonical_status(operation):
+        status = str(operation.status or "Pending").strip().lower()
+        if status in done_statuses:
+            return "Completed"
+        if status in cancelled_statuses:
+            return "Cancelled"
+        if status == "rejected":
+            return "Rejected"
+        return {
+            "pending": "Pending",
+            "assigned": "Assigned",
+            "in progress": "In Progress",
+            "in_progress": "In Progress",
+            "submitted": "Submitted",
+            "overdue": "Overdue",
+        }.get(status, (status.title() if status else "Unknown"))
+
+    def is_overdue_now(operation):
+        status = str(operation.status or "").strip().lower()
+        if status in done_statuses or status in cancelled_statuses:
+            return False
+        due = as_utc(operation.due_at)
+        return bool(operation.overdue) or status == "overdue" or (due is not None and due < now)
+
+    def completion_time(operation):
+        return as_utc(operation.reviewed_at or operation.submitted_at or operation.updated_at)
+
+    def metrics(items):
+        total = len(items)
+        completed = [item for item in items if canonical_status(item) == "Completed"]
+        open_items = [item for item in items if canonical_status(item) not in {"Completed", "Cancelled"}]
+        overdue_items = [item for item in open_items if is_overdue_now(item)]
+        due_completed = [item for item in completed if as_utc(item.due_at) is not None]
+        on_time = [
+            item for item in due_completed
+            if completion_time(item) is not None and completion_time(item) <= as_utc(item.due_at)
+        ]
+        durations = []
+        for item in completed:
+            created = as_utc(item.created_at)
+            finished = completion_time(item)
+            if created is not None and finished is not None and finished >= created:
+                durations.append((finished - created).total_seconds() / 3600.0)
+        return {
+            "total_tasks": total,
+            "completed_tasks": len(completed),
+            "open_tasks": len(open_items),
+            "overdue_tasks": len(overdue_items),
+            "completion_rate": round(len(completed) * 100 / total, 1) if total else None,
+            "overdue_rate": round(len(overdue_items) * 100 / total, 1) if total else None,
+            "on_time_rate": round(len(on_time) * 100 / len(due_completed), 1) if due_completed else None,
+            "on_time_completed_tasks": len(on_time),
+            "tasks_with_due_date_completed": len(due_completed),
+            "average_completion_hours": round(sum(durations) / len(durations), 1) if durations else None,
+        }
+
+    cohort = [item for item in eligible_ops if in_creation_period(item)]
+    summary_metrics = metrics(cohort)
+    current_statuses = {}
+    for item in cohort:
+        label = canonical_status(item)
+        current_statuses[label] = current_statuses.get(label, 0) + 1
+
+    eligible_ids = [str(item.id) for item in eligible_ops]
+    audit_events = []
+    if eligible_ids:
+        audit_events = AuditLog.query.filter(
+            AuditLog.organization_id == admin.organization_id,
+            AuditLog.resource_type == "Operation",
+            AuditLog.resource_id.in_(eligible_ids),
+            AuditLog.created_at >= start_at,
+            AuditLog.created_at < end_exclusive,
+            AuditLog.action.ilike("operation.%"),
+        ).order_by(AuditLog.created_at, AuditLog.id).all()
+
+    def bucket_start(day):
+        if bucket == "week":
+            return day - timedelta(days=day.weekday())
+        if bucket == "month":
+            return day.replace(day=1)
+        if bucket == "quarter":
+            month = ((day.month - 1) // 3) * 3 + 1
+            return day.replace(month=month, day=1)
+        if bucket == "year":
+            return day.replace(month=1, day=1)
+        return day
+
+    def bucket_key(value):
+        utc_value = as_utc(value)
+        return bucket_start(utc_value.date()).isoformat() if utc_value is not None else None
+
+    def bucket_label(key):
+        day = date.fromisoformat(key)
+        if bucket == "week":
+            return "Week of " + day.strftime("%d %b %Y")
+        if bucket == "month":
+            return day.strftime("%b %Y")
+        if bucket == "quarter":
+            return f"{day.year} Q{((day.month - 1) // 3) + 1}"
+        if bucket == "year":
+            return str(day.year)
+        return day.strftime("%d %b")
+
+    bucket_dates = {}
+    day = start_day
+    while day <= end_day:
+        key = bucket_start(day).isoformat()
+        bucket_dates.setdefault(key, bucket_label(key))
+        day += timedelta(days=1)
+
+    trends_by_key = {
+        key: {"period_key": key, "label": label, "created": 0, "completed": 0, "approved": 0, "rejected": 0, "submitted": 0}
+        for key, label in bucket_dates.items()
+    }
+    for operation in eligible_ops:
+        created = as_utc(operation.created_at)
+        if created is not None and start_at <= created < end_exclusive:
+            key = bucket_key(created)
+            if key in trends_by_key:
+                trends_by_key[key]["created"] += 1
+
+    event_ids = {"created": set(), "completed": set(), "approved": set(), "rejected": set(), "submitted": set()}
+    for event in audit_events:
+        occurred = as_utc(event.created_at)
+        if occurred is None:
+            continue
+        key = bucket_key(occurred)
+        if key not in trends_by_key:
+            continue
+        action = str(event.action or "").strip().lower()
+        resource_id = str(event.resource_id or "")
+        if action.endswith(".submitted"):
+            trends_by_key[key]["submitted"] += 1
+            event_ids["submitted"].add(event.id)
+        elif action.endswith(".verified"):
+            trends_by_key[key]["approved"] += 1
+            trends_by_key[key]["completed"] += 1
+            event_ids["approved"].add(event.id)
+            event_ids["completed"].add(event.id)
+        elif action.endswith(".completed"):
+            trends_by_key[key]["completed"] += 1
+            event_ids["completed"].add(event.id)
+        elif action.endswith(".rejected"):
+            trends_by_key[key]["rejected"] += 1
+            event_ids["rejected"].add(event.id)
+
+    trend_rows = [trends_by_key[key] for key in sorted(trends_by_key)]
+
+    def make_breakdown(attribute, name_lookup, all_ids, label_lookup=None):
+        grouped = {item_id: [] for item_id in all_ids}
+        for operation in cohort:
+            dimensions = resolved_dimensions[operation.id]
+            item_id = dimensions[attribute]
+            if item_id in grouped:
+                grouped[item_id].append(operation)
+        rows = []
+        for item_id in all_ids:
+            name = name_lookup.get(item_id, "Unknown")
+            row = {"id": item_id, "name": name, **metrics(grouped.get(item_id, []))}
+            rows.append(row)
+        rows.sort(key=lambda row: (-row["total_tasks"], row["name"].casefold(), row["id"]))
+        return rows
+
+    team_breakdown = make_breakdown(
+        "team_id", {item.id: item.name for item in teams}, [item.id for item in teams]
+    )
+    location_breakdown = make_breakdown(
+        "location_id", {item.id: item.name for item in locations}, [item.id for item in locations]
+    )
+    zone_breakdown = make_breakdown(
+        "zone_id", {item.id: item.name for item in zones}, [item.id for item in zones]
+    )
+    employee_breakdown = make_breakdown(
+        "employee_id", {item.id: item.full_name for item in employees}, [item.id for item in employees]
+    )
+
+    type_names = sorted(
+        {str(item.task_type or "General").strip() or "General" for item in cohort},
+        key=str.casefold,
+    )
+    type_breakdown = []
+    for name in type_names:
+        items = [item for item in cohort if (str(item.task_type or "General").strip() or "General") == name]
+        type_breakdown.append({"name": name, **metrics(items)})
+    type_breakdown.sort(key=lambda row: (-row["total_tasks"], row["name"].casefold()))
+
+    status_rows = [
+        {"name": name, "value": count}
+        for name, count in sorted(current_statuses.items(), key=lambda pair: (-pair[1], pair[0]))
+    ]
+
+    created_cohort_ids = {item.id for item in cohort}
+    completion_event_count = sum(row["completed"] for row in trends_by_key.values())
+    approval_event_count = sum(row["approved"] for row in trends_by_key.values())
+    rejection_event_count = sum(row["rejected"] for row in trends_by_key.values())
+    submitted_event_count = sum(row["submitted"] for row in trends_by_key.values())
+
+    response = {
+        "period": {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
+        "bucket": bucket,
+        "summary": {
+            **summary_metrics,
+            "tasks_created_in_period": summary_metrics["total_tasks"],
+            "approval_events": approval_event_count,
+            "rejection_events": rejection_event_count,
+            "completion_events": completion_event_count,
+            "submission_events": submitted_event_count,
+            "team_count": len(teams),
+            "employee_count": len(employees),
+        },
+        "trends": trend_rows,
+        "breakdowns": {
+            "teams": team_breakdown,
+            "employees": employee_breakdown,
+            "locations": location_breakdown,
+            "zones": zone_breakdown,
+            "operation_types": type_breakdown,
+            "statuses": status_rows,
+        },
+        "filters": {
+            "teams": [{"id": item.id, "name": item.name, "status": item.status} for item in teams],
+            "locations": [{"id": item.id, "name": item.name} for item in locations],
+            "zones": [{"id": item.id, "name": item.name, "location_id": item.location_id} for item in zones],
+            "employees": [{"id": item.id, "name": item.full_name, "role": item.role} for item in employees],
+            "operation_types": sorted({str(item.task_type or "General").strip() or "General" for item in operations}, key=str.casefold),
+        },
+        "methodology": {
+            "cohort": "Summary and group breakdown metrics describe work created during the selected date period, using its current recorded state.",
+            "trends": "Created work is grouped by operations.created_at. Completed, submitted, approved and rejected trends are grouped by recorded operation audit events occurring during the selected period and matching the current filters. Approval/rejection histories require those events to exist in the audit trail.",
+            "completion_rate": "Currently completed tasks created during the selected period divided by tasks created during that period.",
+            "on_time_rate": "Completed tasks with a due date whose recorded completion/submission/review time is at or before the due date, divided by completed tasks with a due date.",
+            "average_completion_hours": "Average elapsed hours from operation creation to the recorded completion, review, submission or update timestamp for tasks currently recorded as completed in the selected creation cohort.",
+            "filters": "Team assignment uses the explicit team, then the task zone's team, then the task location's team where available.",
+        },
+    }
+    return jsonify(response), 200
 
 
 @analytics_bp.get("/teams")
