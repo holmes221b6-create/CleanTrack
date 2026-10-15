@@ -420,7 +420,7 @@ def operations_collection():
         zone_id=zone_id,
         created_by_id=user.id,
         assigned_to_id=assigned_to_id,
-        original_assigned_to_id=assigned_to_id or (user.id if user.role == "Supervisor" else None),
+        original_assigned_to_id=assigned_to_id,
         assigned_supervisor_id=(assignee.id if assignee and assignee.role == "Supervisor" else (user.id if user.role == "Supervisor" else None)),
         due_at=due_at,
         original_due_at=due_at,
@@ -833,7 +833,7 @@ def reassign_operation(operation_id):
     if previous_assignee == assignee.id:
         return jsonify({"message": "This person is already assigned.", "operation": operation.to_dict()}), 200
     if operation.original_assigned_to_id is None:
-        operation.original_assigned_to_id = previous_assignee
+        operation.original_assigned_to_id = previous_assignee or assignee.id
     if assignee.role == "Supervisor" and operation.assigned_supervisor_id is None:
         operation.assigned_supervisor_id = assignee.id
     operation.assigned_to_id = assignee.id
@@ -1011,8 +1011,22 @@ def review_operation(operation_id):
     execution = OperationExecution.query.filter_by(
         operation_id=operation.id, status="Submitted"
     ).order_by(OperationExecution.attempt_number.desc()).first()
-    if execution is None:
-        return jsonify({"error": "The submission has no execution record to verify."}), 409
+    if execution is None and operation.assigned_to_id:
+        # Backward compatibility for operations submitted before execution
+        # records were introduced.
+        latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
+            operation_id=operation.id
+        ).scalar() or 0
+        execution = OperationExecution(
+            operation_id=operation.id,
+            performed_by_id=operation.assigned_to_id,
+            attempt_number=latest_attempt + 1,
+            status="Submitted",
+            started_at=operation.created_at or datetime.now(timezone.utc),
+            submitted_at=operation.submitted_at or datetime.now(timezone.utc),
+            verification_required=True,
+        )
+        db.session.add(execution)
     execution.status = "Completed" if decision == "approve" else "Rejected"
     execution.verified_by_id = user.id
     execution.verified_at = operation.reviewed_at
