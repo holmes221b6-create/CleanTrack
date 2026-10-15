@@ -183,6 +183,38 @@ def _build_report(admin, start_at, end_exclusive):
     }
 
 
+def _comparison_rows(report, team_a_id, team_b_id):
+    teams = {int(item["team_id"]): item for item in report["teams"]}
+    if team_a_id not in teams or team_b_id not in teams:
+        return None
+    if team_a_id == team_b_id:
+        return None
+    team_a, team_b = teams[team_a_id], teams[team_b_id]
+    metrics = [
+        ("Members", "member_count", False),
+        ("Tasks in period", "total_tasks", False),
+        ("Completed tasks", "completed_tasks", False),
+        ("Completion rate (%)", "completion_rate", True),
+        ("Open tasks", "open_tasks", False),
+        ("Overdue tasks", "overdue_tasks", False),
+        ("Reviewed tasks", "reviewed_tasks", False),
+        ("On-time rate (%)", "on_time_rate", True),
+    ]
+    rows = []
+    for label, key, is_rate in metrics:
+        a, b = team_a[key], team_b[key]
+        delta = round(a - b, 1) if is_rate and a is not None and b is not None else (
+            (a - b) if not is_rate else ""
+        )
+        rows.append([label, "" if a is None else a, "" if b is None else b, delta])
+    return {
+        "team_a_name": team_a["team_name"],
+        "team_b_name": team_b["team_name"],
+        "headers": ["Metric", team_a["team_name"], team_b["team_name"], "A - B (rate delta: percentage points)"],
+        "rows": rows,
+    }
+
+
 def _export_rows(report):
     headers = [
         "Rank", "Team", "Team status", "Members", "Tasks in period",
@@ -204,15 +236,8 @@ def _export_rows(report):
     return headers, rows
 
 
-def _make_xlsx(headers, rows):
-    """Create a small, standards-compliant XLSX workbook using only the standard library."""
-    def cell(col, row_number, value):
-        ref = f"{col}{row_number}"
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return f'<c r="{ref}"><v>{value}</v></c>'
-        text = xml_escape("" if value is None else str(value))
-        return f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
-
+def _make_xlsx(headers, rows, comparison=None):
+    """Create an XLSX workbook with rankings and, when selected, a comparison sheet."""
     def col_name(number):
         result = ""
         while number:
@@ -220,21 +245,38 @@ def _make_xlsx(headers, rows):
             result = chr(65 + remainder) + result
         return result
 
-    all_rows = [headers] + rows
-    xml_rows = []
-    for index, row in enumerate(all_rows, start=1):
-        cells = "".join(cell(col_name(col), index, value) for col, value in enumerate(row, start=1))
-        xml_rows.append(f'<row r="{index}">{cells}</row>')
-    sheet = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
-        '<sheetData>' + "".join(xml_rows) + '</sheetData></worksheet>'
+    def cell(col, row_number, value):
+        ref = f"{col}{row_number}"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return f'<c r="{ref}"><v>{value}</v></c>'
+        text = xml_escape("" if value is None else str(value))
+        return f'<c r="{ref}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+
+    def worksheet_xml(sheet_headers, sheet_rows):
+        all_rows = [sheet_headers] + sheet_rows
+        xml_rows = []
+        for index, row in enumerate(all_rows, start=1):
+            cells = "".join(cell(col_name(col), index, value) for col, value in enumerate(row, start=1))
+            xml_rows.append(f'<row r="{index}">{cells}</row>')
+        return (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData>' + "".join(xml_rows) + '</sheetData></worksheet>'
+        )
+
+    sheets = [("Team Rankings", headers, rows)]
+    if comparison:
+        sheets.append(("Team Comparison", comparison["headers"], comparison["rows"]))
+    sheet_parts = [worksheet_xml(sheet_headers, sheet_rows) for _name, sheet_headers, sheet_rows in sheets]
+    sheet_tags = "".join(
+        f'<sheet name="{xml_escape(name)}" sheetId="{index}" r:id="rId{index}"/>'
+        for index, (name, _sheet_headers, _sheet_rows) in enumerate(sheets, start=1)
     )
     workbook = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<sheets><sheet name="Team Rankings" sheetId="1" r:id="rId1"/></sheets></workbook>'
+        '<sheets>' + sheet_tags + '</sheets></workbook>'
     )
     root_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -242,20 +284,28 @@ def _make_xlsx(headers, rows):
         '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
         '</Relationships>'
     )
+    relationship_tags = "".join(
+        f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{index}.xml"/>'
+        for index in range(1, len(sheets) + 1)
+    )
     workbook_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        '</Relationships>'
+        + relationship_tags + '</Relationships>'
+    )
+    overrides = (
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + "".join(
+            f'<Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            for index in range(1, len(sheets) + 1)
+        )
     )
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-        '</Types>'
+        + overrides + '</Types>'
     )
     stream = BytesIO()
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as workbook_zip:
@@ -263,20 +313,34 @@ def _make_xlsx(headers, rows):
         workbook_zip.writestr("_rels/.rels", root_rels)
         workbook_zip.writestr("xl/workbook.xml", workbook)
         workbook_zip.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
-        workbook_zip.writestr("xl/worksheets/sheet1.xml", sheet)
+        for index, sheet_xml in enumerate(sheet_parts, start=1):
+            workbook_zip.writestr(f"xl/worksheets/sheet{index}.xml", sheet_xml)
     return stream.getvalue()
 
-
-def _make_pdf(headers, rows, period):
+def _make_pdf(headers, rows, period, comparison=None):
     """Render a minimal multi-page PDF summary without relying on extra packages."""
     lines = [
-        "CleanTrack - Team Analytics / Team Rankings",
+        "CleanTrack - Team Analytics",
         f"Period: {period['start_date']} to {period['end_date']}",
-        "Ordered by completion rate, completed volume, then fewer overdue tasks.",
+        "Rank order: completion rate, completed-task volume, then fewer overdue tasks.",
+    ]
+    if comparison:
+        lines.extend([
+            "",
+            f"TEAM COMPARISON: {comparison['team_a_name']} vs {comparison['team_b_name']}",
+            "Metric | Team A | Team B | A minus B (rate differences are percentage points)",
+        ])
+        for row in comparison["rows"]:
+            left = "N/A" if row[1] == "" else str(row[1])
+            right = "N/A" if row[2] == "" else str(row[2])
+            diff = "N/A" if row[3] == "" else str(row[3])
+            lines.append(f"{str(row[0])[:33]:33} | {left[:14]:14} | {right[:14]:14} | {diff[:14]:14}")
+    lines.extend([
         "",
+        "TEAM RANKINGS",
         "Rank | Team | Members | Tasks | Completed | Rate | Open | Overdue | On-time rate",
         "-" * 105,
-    ]
+    ])
     for row in rows:
         name = str(row[1]).replace("|", "/")
         rate = "N/A" if row[6] == "" else f"{row[6]}%"
@@ -285,7 +349,7 @@ def _make_pdf(headers, rows, period):
             f"{row[0]:>4} | {name[:25]:25} | {row[3]:>7} | {row[4]:>5} | "
             f"{row[5]:>9} | {rate:>6} | {row[7]:>4} | {row[8]:>7} | {on_time_rate:>7}"
         )
-    lines.extend(["", "Task totals are limited to operations created in the selected date range."])
+    lines.extend(["", "Period basis: operations created during the selected date range."])
     pages = [lines[i:i + 48] for i in range(0, len(lines), 48)] or [[]]
     objects = {
         1: "<< /Type /Catalog /Pages 2 0 R >>",
@@ -359,6 +423,17 @@ def export_team_analytics():
     report = _build_report(admin, start_at, end_exclusive)
     report["period"] = {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()}
     headers, rows = _export_rows(report)
+    comparison = None
+    raw_team_a = (request.args.get("team_a") or "").strip()
+    raw_team_b = (request.args.get("team_b") or "").strip()
+    if raw_team_a or raw_team_b:
+        try:
+            team_a_id, team_b_id = int(raw_team_a), int(raw_team_b)
+        except (TypeError, ValueError):
+            return jsonify({"error": "team_a and team_b must be valid team IDs."}), 400
+        comparison = _comparison_rows(report, team_a_id, team_b_id)
+        if comparison is None:
+            return jsonify({"error": "Choose two different teams in your organization to export a comparison."}), 400
     file_format = (request.args.get("format") or "csv").strip().lower()
     date_stamp = f"{start_day.isoformat()}_to_{end_day.isoformat()}"
     if file_format == "csv":
@@ -366,18 +441,23 @@ def export_team_analytics():
         writer = csv.writer(stream)
         writer.writerow(headers)
         writer.writerows(rows)
+        if comparison:
+            writer.writerow([])
+            writer.writerow(["Team Comparison", comparison["team_a_name"], comparison["team_b_name"]])
+            writer.writerow(comparison["headers"])
+            writer.writerows(comparison["rows"])
         response = make_response("\ufeff" + stream.getvalue())
         response.headers["Content-Type"] = "text/csv; charset=utf-8"
         response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.csv"'
         return response
     if file_format in {"xlsx", "excel"}:
-        payload = _make_xlsx(headers, rows)
+        payload = _make_xlsx(headers, rows, comparison)
         response = make_response(payload)
         response.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.xlsx"'
         return response
     if file_format == "pdf":
-        payload = _make_pdf(headers, rows, report["period"])
+        payload = _make_pdf(headers, rows, report["period"], comparison)
         response = make_response(payload)
         response.headers["Content-Type"] = "application/pdf"
         response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-rankings-{date_stamp}.pdf"'
