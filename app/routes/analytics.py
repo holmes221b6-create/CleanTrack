@@ -762,6 +762,56 @@ def analytics_workspace():
             "filters": "Team assignment uses the explicit team, then the task zone's team, then the task location's team where available.",
         },
     }
+    export_format = (request.args.get("format") or "").strip().lower()
+    if export_format:
+        view_name = (request.args.get("view") or "trends").strip().lower()
+        if export_format not in {"csv", "xlsx", "excel"}:
+            return jsonify({"error": "Unsupported export format. Use csv or xlsx."}), 400
+        allowed_views = {"trends", "teams", "employees", "locations", "zones", "operation_types", "statuses"}
+        if view_name not in allowed_views:
+            return jsonify({"error": "Unsupported analytics view."}), 400
+
+        if view_name == "trends":
+            headers = ["Period", "Tasks created", "Completion events", "Approval events", "Rejection events", "Submission events"]
+            rows = [
+                [item["label"], item["created"], item["completed"], item["approved"], item["rejected"], item["submitted"]]
+                for item in response["trends"]
+            ]
+        elif view_name == "statuses":
+            headers = ["Current status", "Operations"]
+            rows = [[item["name"], item["value"]] for item in response["breakdowns"]["statuses"]]
+        else:
+            headers = [
+                "Name", "Tasks created", "Completed tasks", "Completion rate (%)",
+                "Open tasks", "Overdue tasks", "Overdue rate (%)", "On-time rate (%)",
+                "Average completion time (hours)",
+            ]
+            rows = [
+                [
+                    item["name"], item["total_tasks"], item["completed_tasks"], item["completion_rate"],
+                    item["open_tasks"], item["overdue_tasks"], item["overdue_rate"], item["on_time_rate"],
+                    item["average_completion_hours"],
+                ]
+                for item in response["breakdowns"][view_name]
+            ]
+
+        stamp = f'{start_day.isoformat()}_to_{end_day.isoformat()}'
+        if export_format == "csv":
+            stream = StringIO(newline="")
+            writer = csv.writer(stream)
+            writer.writerow(headers)
+            writer.writerows(rows)
+            file_response = make_response("\ufeff" + stream.getvalue())
+            file_response.headers["Content-Type"] = "text/csv; charset=utf-8"
+            file_response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-analytics-{view_name}-{stamp}.csv"'
+            return file_response
+
+        payload = _make_xlsx(headers, rows)
+        file_response = make_response(payload)
+        file_response.headers["Content-Type"] = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-analytics-{view_name}-{stamp}.xlsx"'
+        return file_response
+
     return jsonify(response), 200
 
 
