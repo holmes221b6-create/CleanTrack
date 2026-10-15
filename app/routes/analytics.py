@@ -173,7 +173,7 @@ def _build_report(admin, start_at, end_exclusive):
         },
         "summary": {
             "team_count": len(teams),
-            "tasks_in_period": len(operations),
+            "tasks_in_period": sum(item["total_tasks"] for item in rows),
             "unassigned_tasks": unassigned_operations,
             "completed_tasks": sum(item["completed_tasks"] for item in rows),
             "open_tasks": sum(item["open_tasks"] for item in rows),
