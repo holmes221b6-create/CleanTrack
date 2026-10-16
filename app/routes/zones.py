@@ -647,6 +647,66 @@ def get_zone_floor_plan(zone_id):
     return response
 
 
+@zones_bp.get("/<int:zone_id>/floor-plan/boundary")
+@roles_required("Admin", "Supervisor", "Employee")
+def get_zone_floor_plan_boundary(zone_id):
+    user = get_current_user()
+    zone = _zone_or_none(zone_id, user)
+    if zone is None:
+        return jsonify({"error": "Zone not found in your organization."}), 404
+    if not _can_access_floor_plan(user, zone):
+        return jsonify({"error": "You are not assigned to this zone. The private floor plan is not available to your account."}), 403
+    plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    if plan is None:
+        return jsonify({"error": "No floor plan has been uploaded for this zone."}), 404
+    return jsonify({"floor_plan": _floor_plan_metadata(plan), "boundary": plan.boundary}), 200
+
+
+@zones_bp.patch("/<int:zone_id>/floor-plan/boundary")
+@roles_required("Admin")
+def save_zone_floor_plan_boundary(zone_id):
+    admin = get_current_user()
+    zone = _zone_or_none(zone_id, admin)
+    if zone is None:
+        return jsonify({"error": "Zone not found in your organization."}), 404
+    plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    if plan is None:
+        return jsonify({"error": "Upload a floor plan before drawing its operational boundary."}), 404
+    data = request.get_json(silent=True) or {}
+    points = data.get("points")
+    if points is None:
+        plan.boundary = None
+    else:
+        if not isinstance(points, list) or len(points) < 3 or len(points) > 500:
+            return jsonify({"error": "An indoor boundary needs between 3 and 500 points."}), 400
+        checked = []
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                return jsonify({"error": "Each boundary point must contain normalized x and y coordinates."}), 400
+            x, y = point
+            if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                return jsonify({"error": "Boundary coordinates must be numbers."}), 400
+            if not 0 <= x <= 1 or not 0 <= y <= 1:
+                return jsonify({"error": "Indoor boundary coordinates must be between 0 and 1."}), 400
+            checked.append([round(float(x), 6), round(float(y), 6)])
+        if checked[0] == checked[-1]:
+            checked.pop()
+        if len(checked) < 3 or len(set((p[0], p[1]) for p in checked)) < 3:
+            return jsonify({"error": "An indoor boundary needs at least three distinct points."}), 400
+        plan.boundary = {"type": "IndoorPolygon", "points": checked}
+    try:
+        _audit(admin, zone, "zone.indoor_boundary_updated", {
+            "floor_plan": plan.filename,
+            "boundary": plan.boundary,
+        })
+        _notify_admins(admin, zone, "Indoor zone boundary updated", f'{admin.full_name} updated the indoor boundary for zone "{zone.name}".')
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Indoor boundary could not be saved."}), 500
+    return jsonify({"message": "Indoor boundary saved and audited.", "boundary": plan.boundary}), 200
+
+
 @zones_bp.delete("/<int:zone_id>/floor-plan")
 @roles_required("Admin")
 def delete_zone_floor_plan(zone_id):
