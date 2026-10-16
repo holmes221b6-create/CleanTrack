@@ -92,6 +92,8 @@ class Zone(db.Model):
             "location_team_id": self.location.team_id if self.location else None,
             "team_id": self.team_id,
             "team_name": self.team.name if self.team else None,
+            "supervisor_id": self.supervisor_id,
+            "supervisor_name": self.supervisor.full_name if self.supervisor else None,
             "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
