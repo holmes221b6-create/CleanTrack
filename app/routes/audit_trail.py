@@ -1,4 +1,5 @@
 import csv
+import html
 import io
 import json
 from datetime import datetime, timedelta, timezone
@@ -115,8 +116,33 @@ def _outcome(entry):
     return "Recorded"
 
 
+def _decode_audit_value(value, depth=0):
+    """Normalize legacy HTML-escaped audit payloads before returning JSON to clients."""
+    if depth > 10 or value is None:
+        return value
+    if isinstance(value, str):
+        decoded = value
+        for _ in range(6):
+            next_value = html.unescape(decoded)
+            if next_value == decoded:
+                break
+            decoded = next_value
+        stripped = decoded.strip()
+        if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
+            try:
+                return _decode_audit_value(json.loads(stripped), depth + 1)
+            except (TypeError, ValueError):
+                pass
+        return decoded
+    if isinstance(value, dict):
+        return {str(_decode_audit_value(key, depth + 1)): _decode_audit_value(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decode_audit_value(item, depth + 1) for item in value]
+    return value
+
 def _display(entry, actor_name=None, actor_email=None, actor_role=None):
-    details = entry.details if isinstance(entry.details, dict) else {}
+    normalized_details = _decode_audit_value(entry.details)
+    details = normalized_details if isinstance(normalized_details, dict) else {}
     resource = entry.resource_type or "Record"
     resource_id = entry.resource_id or ""
     affected = (
@@ -147,13 +173,14 @@ def _display(entry, actor_name=None, actor_email=None, actor_role=None):
         after = {"status": details.get("new_status")}
     return {
         **entry.to_dict(),
+        "details": details,
         "actor_name": actor_name or actor_email or ("System" if entry.actor_id is None else "Unknown account"),
         "actor_email": actor_email,
         "actor_role": actor_role,
         "affected_record": str(affected),
         "outcome": _outcome(entry),
-        "before": before,
-        "after": after
+        "before": _decode_audit_value(before),
+        "after": _decode_audit_value(after)
     }
 
 
