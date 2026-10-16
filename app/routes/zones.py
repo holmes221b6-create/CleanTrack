@@ -195,6 +195,7 @@ def zones_collection():
     description = data.get("description", "")
     location_id = data.get("location_id")
     team_id = data.get("team_id")
+    supervisor_id = data.get("supervisor_id")
     floor_label = data.get("floor_label", "")
     try:
         boundary = _validate_boundary(data.get("boundary"))
@@ -238,6 +239,24 @@ def zones_collection():
     else:
         team_id = None
 
+    if supervisor_id in (None, ""):
+        supervisor_id = None
+    else:
+        try:
+            if isinstance(supervisor_id, bool):
+                raise ValueError()
+            supervisor_id = int(supervisor_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Supervisor ID must be an integer."}), 400
+        supervisor = User.query.filter_by(
+            id=supervisor_id,
+            organization_id=admin.organization_id,
+            role="Supervisor",
+            account_status="active",
+        ).first()
+        if supervisor is None:
+            return jsonify({"error": "Choose an active Supervisor in your organization."}), 400
+
     duplicate = Zone.query.filter(
         Zone.organization_id == admin.organization_id,
         Zone.location_id == location_id,
@@ -253,6 +272,7 @@ def zones_collection():
         boundary=boundary,
         location_id=location.id,
         team_id=team_id,
+        supervisor_id=supervisor_id,
         qr_token=uuid4().hex,
         organization_id=admin.organization_id,
         status="active",
@@ -281,7 +301,7 @@ def zone_detail(zone_id):
         return jsonify({"zone": _zone_payload(zone, include_people=True, include_operations=True)}), 200
 
     data = request.get_json(silent=True) or {}
-    allowed = {"name", "description", "location_id", "team_id", "status", "floor_label", "boundary", "qr_enabled", "qr_expires_at", "regenerate_qr"}
+    allowed = {"name", "description", "location_id", "team_id", "supervisor_id", "status", "floor_label", "boundary", "qr_enabled", "qr_expires_at", "regenerate_qr"}
     unknown = set(data) - allowed
     if unknown:
         return jsonify({"error": "Unsupported field(s): " + ", ".join(sorted(unknown))}), 400
@@ -373,6 +393,27 @@ def zone_detail(zone_id):
                 return jsonify({"error": "The parent location belongs to another team. Reassign the location first."}), 409
             zone.team_id = team_id
 
+    if "supervisor_id" in data:
+        value = data["supervisor_id"]
+        if value in (None, ""):
+            zone.supervisor_id = None
+        else:
+            try:
+                if isinstance(value, bool):
+                    raise ValueError()
+                supervisor_id = int(value)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Supervisor ID must be an integer."}), 400
+            supervisor = User.query.filter_by(
+                id=supervisor_id,
+                organization_id=admin.organization_id,
+                role="Supervisor",
+                account_status="active",
+            ).first()
+            if supervisor is None:
+                return jsonify({"error": "Choose an active Supervisor in your organization."}), 400
+            zone.supervisor_id = supervisor_id
+
     if "boundary" in data:
         try:
             zone.boundary = _validate_boundary(data.get("boundary"))
@@ -451,6 +492,8 @@ def zone_detail(zone_id):
         action = "zone.boundary_updated"
     elif "team_id" in changed:
         action = "zone.team_assignment_changed"
+    elif "supervisor_id" in changed:
+        action = "zone.supervisor_assignment_changed"
     elif "location_id" in changed:
         action = "zone.location_changed"
     else:
@@ -516,7 +559,7 @@ def resolve_zone_qr(qr_token):
         organization_id=user.organization_id,
         zone_id=zone.id,
     ).all()
-    is_assigned = user.role == "Admin" or bool(
+    is_assigned = user.role == "Admin" or zone.supervisor_id == user.id or bool(
         (zone.team_id or (location.team_id if location else None)) in team_ids
     ) or any(op.assigned_to_id == user.id or op.assigned_supervisor_id == user.id for op in assigned_ops)
     base = {
@@ -529,6 +572,8 @@ def resolve_zone_qr(qr_token):
             "location_name": location.name if location else None,
             "team_id": zone.team_id or (location.team_id if location else None),
             "team_name": zone.team.name if zone.team else (location.team.name if location and location.team else None),
+            "supervisor_id": zone.supervisor_id,
+            "supervisor_name": zone.supervisor.full_name if zone.supervisor else None,
         },
         "is_assigned": is_assigned,
     }
@@ -543,7 +588,7 @@ def resolve_zone_qr(qr_token):
         visible = assigned_ops
     elif user.role == "Supervisor":
         effective_team_id = zone.team_id or (location.team_id if location else None)
-        visible = assigned_ops if effective_team_id in team_ids else [
+        visible = assigned_ops if zone.supervisor_id == user.id or effective_team_id in team_ids else [
             op for op in assigned_ops
             if op.team_id in team_ids or op.assigned_supervisor_id == user.id or op.assigned_to_id == user.id
         ]
