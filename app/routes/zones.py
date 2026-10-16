@@ -408,10 +408,9 @@ def zone_detail(zone_id):
                 id=supervisor_id,
                 organization_id=admin.organization_id,
                 role="Supervisor",
-                account_status="active",
             ).first()
-            if supervisor is None:
-                return jsonify({"error": "Choose an active Supervisor in your organization."}), 400
+            if supervisor is None or (supervisor.account_status != "active" and supervisor_id != zone.supervisor_id):
+                return jsonify({"error": "New zone assignments require an active Supervisor in your organization."}), 400
             zone.supervisor_id = supervisor_id
 
     if "boundary" in data:
