@@ -49,7 +49,9 @@ class Config:
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=14)
     JWT_COOKIE_CSRF_PROTECT = True
 
-    MAX_CONTENT_LENGTH = 10 * 1024 * 1024
+    # Allow the existing 20 MB announcement-attachment batch limit plus multipart overhead.
+    # Individual zone floor-plan uploads are independently capped at 10 MB.
+    MAX_CONTENT_LENGTH = 22 * 1024 * 1024
 
     RATELIMIT_STORAGE_URI = os.getenv("RATELIMIT_STORAGE_URI", "memory://")
     RATELIMIT_HEADERS_ENABLED = True
