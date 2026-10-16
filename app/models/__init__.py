@@ -13,6 +13,7 @@ from app.models.operation import Operation
 from app.models.operation_execution import OperationExecution
 from app.models.operation_log import OperationLog
 from app.models.organization import Organization
+from app.models.report_artifact import ReportArtifact
 from app.models.task_evidence import TaskEvidence
 from app.models.team import Team
 from app.models.team_member import TeamMember
@@ -34,6 +35,7 @@ __all__ = [
     "OperationExecution",
     "OperationLog",
     "Organization",
+    "ReportArtifact",
     "TaskEvidence",
     "Team",
     "TeamMember",
