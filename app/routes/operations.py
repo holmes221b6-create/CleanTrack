@@ -660,7 +660,7 @@ def upload_operation_evidence(operation_id):
         stage = "execution"
 
     execution = OperationExecution.query.filter_by(
-        operation_id=operation.id, performed_by_id=operation.assigned_to_id
+        operation_id=operation.id, performed_by_id=user.id
     ).order_by(OperationExecution.attempt_number.desc()).first()
     if execution is None and operation.status.lower() == "in progress":
         latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
@@ -982,8 +982,12 @@ def start_operation(operation_id):
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or not assigned to you."}), 404
-    if operation.assigned_to_id != user.id:
-        return jsonify({"error": "Only the current assignee can start this operation."}), 403
+    if user.role == "Employee":
+        if operation.assigned_to_id != user.id:
+            return jsonify({"error": "Only the current assignee can start this operation."}), 403
+    elif user.role == "Supervisor":
+        if operation.assigned_to_id != user.id and not _can_manage(operation, user):
+            return jsonify({"error": "You can only start work for an operation assigned to you or within your authorized team."}), 403
     if operation.status.lower() not in {"assigned", "pending", "rejected"}:
         return jsonify({"error": "Only pending, assigned, or rejected work can be started."}), 409
     previous = operation.status
@@ -1016,8 +1020,12 @@ def submit_operation(operation_id):
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or not assigned to you."}), 404
-    if operation.assigned_to_id != user.id:
-        return jsonify({"error": "Only the current assignee can submit this operation."}), 403
+    if user.role == "Employee":
+        if operation.assigned_to_id != user.id:
+            return jsonify({"error": "Only the current assignee can submit this operation."}), 403
+    elif user.role == "Supervisor":
+        if operation.assigned_to_id != user.id and not _can_manage(operation, user):
+            return jsonify({"error": "You can only submit work for an operation assigned to you or within your authorized team."}), 403
     if operation.status.lower() != "in progress":
         return jsonify({"error": "Only operations in progress can be submitted."}), 409
 
