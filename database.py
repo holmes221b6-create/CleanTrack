@@ -159,5 +159,17 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_locations_organization ON locations(organization_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id)")
 
+
+
+    # Per-user sync preferences. Provider secrets and OAuth tokens are never stored here.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_sync_settings (
+            user_id TEXT PRIMARY KEY,
+            settings_json TEXT NOT NULL DEFAULT '{}',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    """)
+
     conn.commit()
     conn.close()
