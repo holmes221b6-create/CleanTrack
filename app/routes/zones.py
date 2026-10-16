@@ -460,6 +460,8 @@ def zone_detail(zone_id):
         status = data["status"]
         if status not in {"active", "inactive", "archived"}:
             return jsonify({"error": "Status must be active, inactive, or archived."}), 400
+        if status == "active" and zone.location is not None and zone.location.status != "active":
+            return jsonify({"error": "Activate or restore the parent location before activating this zone."}), 409
         if status == "archived" and zone.status != "archived":
             payload = _zone_payload(zone, include_people=True, include_operations=True)
             blockers = [
