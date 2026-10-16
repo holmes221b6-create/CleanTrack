@@ -109,6 +109,9 @@ def _people_for_team(team_id, organization_id):
 def _zone_payload(zone, include_people=False, include_operations=False):
     payload = zone.to_dict()
     location = zone.location
+    floor_plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    payload["has_floor_plan"] = floor_plan is not None
+    payload["has_indoor_boundary"] = bool(floor_plan and floor_plan.boundary)
     effective_team_id = zone.team_id or (location.team_id if location else None)
     team = Team.query.filter_by(id=effective_team_id, organization_id=zone.organization_id).first() if effective_team_id else None
     people = _people_for_team(effective_team_id, zone.organization_id)
