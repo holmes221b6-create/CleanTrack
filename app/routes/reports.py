@@ -181,7 +181,7 @@ def _int_filter(payload, key):
 
 def _format_export_value(value, date_format):
     text = _clean(value)
-    match = re.match(r"^(\\d{4})-(\\d{2})-(\\d{2})(.*)$", text)
+    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})(.*)$", text)
     if not match:
         return text
     year, month, day, suffix = match.groups()
