@@ -24,6 +24,16 @@ def _zone_or_none(zone_id, user):
     return Zone.query.filter_by(id=zone_id, organization_id=user.organization_id).first()
 
 
+def _json_safe(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _audit(user, zone, action, details):
     db.session.add(AuditLog(
         actor_id=user.id,
@@ -31,7 +41,7 @@ def _audit(user, zone, action, details):
         action=action,
         resource_type="Zone",
         resource_id=str(zone.id),
-        details=details or {},
+        details=_json_safe(details or {}),
         ip_address=request.remote_addr,
         user_agent=(request.headers.get("User-Agent", "")[:300] or None),
     ))
