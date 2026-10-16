@@ -582,12 +582,25 @@ def assign_zones(team_id):
     ).all()
     if len(zones) != len(ids):
         return jsonify({"error": "One or more selected zones are outside your organization or unavailable."}), 400
-    unavailable_zones = [row.name for row in zones if row.status != "active"]
+    locations = {row.id: row for row in Location.query.filter_by(organization_id=admin.organization_id).all()}
+    current_location_ids = [row.id for row in locations.values() if row.team_id == team.id]
+    existing_scope_filter = [Zone.team_id == team.id]
+    if current_location_ids:
+        existing_scope_filter.append(Zone.location_id.in_(current_location_ids))
+    existing_scope_ids = {
+        row.id for row in Zone.query.filter(
+            Zone.organization_id == admin.organization_id,
+            or_(*existing_scope_filter),
+        ).all()
+    }
+    unavailable_zones = [
+        row.name for row in zones
+        if row.status != "active" and row.id not in existing_scope_ids
+    ]
     if unavailable_zones:
         return jsonify({
-            "error": "Only active zones can be assigned to teams. Restore or activate these zones first: " + ", ".join(unavailable_zones[:10])
+            "error": "Only active zones can be newly assigned to teams. Restore or activate these zones first: " + ", ".join(unavailable_zones[:10])
         }), 409
-    locations = {row.id: row for row in Location.query.filter_by(organization_id=admin.organization_id).all()}
     for zone in zones:
         loc = locations.get(zone.location_id)
         if loc and loc.team_id not in (None, team.id):
