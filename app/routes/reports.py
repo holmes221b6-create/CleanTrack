@@ -212,6 +212,7 @@ def report_options():
         "staff": [{"id": x.id, "name": x.full_name, "role": x.role} for x in User.query.filter_by(organization_id=org).order_by(User.full_name).all()],
         "locations": [{"id": x.id, "name": x.name} for x in Location.query.filter_by(organization_id=org).order_by(Location.name).all()],
         "zones": [{"id": x.id, "name": x.name, "location_id": x.location_id} for x in Zone.query.filter_by(organization_id=org).order_by(Zone.name).all()],
+        "operation_types": [{"id": name, "name": name} for name in db.session.query(Operation.task_type).filter(Operation.organization_id == org).distinct().order_by(Operation.task_type).all() if name[0]],
         "report_types": sorted(TYPES), "formats": sorted(FORMATS),
         "quota_bytes": ORG_QUOTA_BYTES, "retention_days": RETENTION_DAYS,
     }), 200
