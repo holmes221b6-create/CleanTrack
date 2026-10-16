@@ -338,8 +338,8 @@ def zone_detail(zone_id):
         location = Location.query.filter_by(
             id=location_id, organization_id=admin.organization_id
         ).first()
-        if location is None or location.status != "active":
-            return jsonify({"error": "Choose an active location in your organization."}), 400
+        if location is None or (location.status != "active" and location_id != zone.location_id):
+            return jsonify({"error": "Choose an active location for a new parent assignment."}), 400
         duplicate = Zone.query.filter(
             Zone.organization_id == admin.organization_id,
             Zone.location_id == location_id,
@@ -364,8 +364,8 @@ def zone_detail(zone_id):
             except (TypeError, ValueError):
                 return jsonify({"error": "Team ID must be an integer."}), 400
             team = Team.query.filter_by(id=team_id, organization_id=admin.organization_id).first()
-            if team is None or team.status != "active":
-                return jsonify({"error": "Choose an active team in your organization."}), 400
+            if team is None or (team.status != "active" and team_id != zone.team_id):
+                return jsonify({"error": "New assignments require an active team in your organization."}), 400
             if zone.status != "active" and team_id != zone.team_id:
                 return jsonify({"error": "Activate or restore this zone before assigning a team."}), 409
             location = zone.location
