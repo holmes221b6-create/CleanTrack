@@ -7,6 +7,8 @@ from app.models.zone import Zone
 from app.models.operation import Operation
 from app.models.audit_log import AuditLog
 from app.models.team import Team
+from app.models.notification import Notification
+from app.models.user import User
 from app.services.permissions import get_current_user, roles_required
 
 locations_bp = Blueprint("locations", __name__, url_prefix="/api/locations")
@@ -57,6 +59,24 @@ def _audit(admin, location, action, details):
         ip_address=request.remote_addr,
         user_agent=(request.headers.get("User-Agent", "")[:300] or None),
     ))
+
+
+def _notify_admins(admin, location, title, message):
+    admins = User.query.filter_by(
+        organization_id=admin.organization_id,
+        role="Admin",
+        account_status="active",
+    ).all()
+    for recipient in admins:
+        db.session.add(Notification(
+            recipient_id=recipient.id,
+            organization_id=admin.organization_id,
+            title=title[:160],
+            message=message[:1000],
+            notification_type="location",
+            resource_type="Location",
+            resource_id=str(location.id),
+        ))
 
 
 @locations_bp.route("", methods=["GET", "POST"])
@@ -136,6 +156,7 @@ def locations_collection():
             "latitude": location.latitude, "longitude": location.longitude,
             "status": location.status,
         })
+        _notify_admins(admin, location, "Location created", f'{admin.full_name} created location "{location.name}".')
         db.session.commit()
     except Exception:
         db.session.rollback()
@@ -247,6 +268,8 @@ def location_detail(location_id):
             old_status, new_status = changed["status"]["before"], changed["status"]["after"]
             action = "location.archived" if new_status == "archived" else "location.restored" if old_status == "archived" else "location.status_changed"
         _audit(admin, location, action, {"changes": changed})
+        notification_title = "Location archived" if action == "location.archived" else "Location restored" if action == "location.restored" else "Location updated"
+        _notify_admins(admin, location, notification_title, f'{admin.full_name} updated location "{location.name}".')
         db.session.commit()
     except Exception:
         db.session.rollback()
