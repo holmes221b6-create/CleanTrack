@@ -122,8 +122,12 @@ def _rows_for(admin, payload):
         if employee_id: query = query.filter(Operation.assigned_to_id == employee_id)
         if location_id: query = query.filter(Operation.location_id == location_id)
         if zone_id: query = query.filter(Operation.zone_id == zone_id)
+        query = query.filter(
+            OperationLog.created_at >= datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
+            OperationLog.created_at < datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+        )
         logs = query.order_by(OperationLog.created_at.desc()).limit(MAX_ROWS + 1).all()
-        logs = [l for l in logs if _in_range(l.created_at, start, end) and (not status or status in (l.new_status or "").lower())]
+        logs = [l for l in logs if not status or status in (l.new_status or "").lower()]
         headers = ["Log ID", "Operation ID", "Operation", "Actor", "Action", "Previous status", "New status", "Message", "Date"]
         rows = [[l.id, l.operation_id, l.operation.title if l.operation else "", l.actor.full_name if l.actor else "", l.action, l.previous_status, l.new_status, l.message, l.created_at] for l in logs]
     elif kind == "staff":
