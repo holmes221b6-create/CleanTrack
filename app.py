@@ -450,7 +450,7 @@ def get_sync_settings():
         (uid,)
     ).fetchone()
     conn.close()
-    settings = dict(SYNC_DEFAULTS)
+    settings = json.loads(json.dumps(SYNC_DEFAULTS))
     if row:
         try:
             saved = json.loads(row["settings_json"] or "{}")
@@ -477,7 +477,7 @@ def update_sync_settings():
     conn = get_db()
     row = conn.execute("SELECT settings_json FROM user_sync_settings WHERE user_id=?", (uid,)).fetchone()
     current = json.loads(row["settings_json"] or "{}") if row else {}
-    settings = {**SYNC_DEFAULTS}
+    settings = json.loads(json.dumps(SYNC_DEFAULTS))
     for section in ("calendar", "sms"):
         if isinstance(current.get(section), dict):
             settings[section] = {**settings[section], **current[section]}
