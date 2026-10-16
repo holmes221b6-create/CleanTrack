@@ -1,5 +1,6 @@
 import os
 from datetime import datetime, timezone
+from uuid import uuid4
 
 
 from flask import Flask, jsonify, request
@@ -67,8 +68,28 @@ def create_app(config_class=Config):
                     connection.execute(text("ALTER TABLE teams ADD COLUMN whatsapp_group_url VARCHAR(500)"))
             if "zones" in tables:
                 zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
-                if "team_id" not in zone_columns:
-                    connection.execute(text("ALTER TABLE zones ADD COLUMN team_id INTEGER REFERENCES teams(id)"))
+                zone_additions = {
+                    "team_id": "INTEGER REFERENCES teams(id)",
+                    "boundary": "JSON",
+                    "floor_label": "VARCHAR(120)",
+                    "qr_token": "VARCHAR(64)",
+                    "updated_at": "TIMESTAMP WITH TIME ZONE",
+                }
+                for column, sql_type in zone_additions.items():
+                    if column not in zone_columns:
+                        connection.execute(text(f"ALTER TABLE zones ADD COLUMN {column} {sql_type}"))
+                # Stable identifiers are backfilled for existing zones. A QR identifies an area but never grants access.
+                zone_rows = connection.execute(text(
+                    "SELECT id FROM zones WHERE qr_token IS NULL OR qr_token = ''"
+                )).fetchall()
+                for row in zone_rows:
+                    connection.execute(
+                        text("UPDATE zones SET qr_token = :token WHERE id = :zone_id"),
+                        {"token": uuid4().hex, "zone_id": row[0]},
+                    )
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_zones_qr_token ON zones (qr_token)"
+                ))
             if "organizations" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("organizations")}
                 additive_columns = {
