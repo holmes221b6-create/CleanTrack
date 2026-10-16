@@ -24,6 +24,7 @@ class ZoneFloorPlan(db.Model):
     content_type = db.Column(db.String(40), nullable=False)
     size = db.Column(db.Integer, nullable=False)
     data = db.Column(db.LargeBinary, nullable=False)
+    boundary = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
