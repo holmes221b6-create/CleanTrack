@@ -8,6 +8,7 @@ from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.location import Location
+from app.models.location_floor_plan import LocationFloorPlan
 from app.models.zone import Zone
 from app.models.zone_floor_plan import ZoneFloorPlan
 from app.models.team import Team
@@ -110,8 +111,11 @@ def _zone_payload(zone, include_people=False, include_operations=False):
     payload = zone.to_dict()
     location = zone.location
     floor_plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
-    payload["has_floor_plan"] = floor_plan is not None
-    payload["has_indoor_boundary"] = bool(floor_plan and floor_plan.boundary)
+    location_floor_plan = LocationFloorPlan.query.filter_by(location_id=zone.location_id).first()
+    payload["has_zone_floor_plan"] = floor_plan is not None
+    payload["has_floor_plan"] = floor_plan is not None or location_floor_plan is not None
+    payload["floor_plan_source"] = "zone" if floor_plan is not None else "location" if location_floor_plan is not None else None
+    payload["has_indoor_boundary"] = bool(zone.indoor_boundary or (floor_plan and floor_plan.boundary))
     effective_team_id = zone.team_id or (location.team_id if location else None)
     team = Team.query.filter_by(id=effective_team_id, organization_id=zone.organization_id).first() if effective_team_id else None
     people = _people_for_team(effective_team_id, zone.organization_id)
@@ -660,9 +664,10 @@ def get_zone_floor_plan_boundary(zone_id):
     if not _can_access_floor_plan(user, zone):
         return jsonify({"error": "You are not assigned to this zone. The private floor plan is not available to your account."}), 403
     plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
-    if plan is None:
-        return jsonify({"error": "No floor plan has been uploaded for this zone."}), 404
-    return jsonify({"floor_plan": _floor_plan_metadata(plan), "boundary": plan.boundary}), 200
+    shared_plan = LocationFloorPlan.query.filter_by(location_id=zone.location_id).first()
+    boundary = zone.indoor_boundary or (plan.boundary if plan else None)
+    metadata = _floor_plan_metadata(plan) if plan else _floor_plan_metadata(shared_plan) if shared_plan else None
+    return jsonify({"floor_plan": metadata, "source": "zone" if plan else "location" if shared_plan else None, "boundary": boundary}), 200
 
 
 @zones_bp.patch("/<int:zone_id>/floor-plan/boundary")
@@ -673,12 +678,15 @@ def save_zone_floor_plan_boundary(zone_id):
     if zone is None:
         return jsonify({"error": "Zone not found in your organization."}), 404
     plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
-    if plan is None:
-        return jsonify({"error": "Upload a floor plan before drawing its operational boundary."}), 404
+    shared_plan = LocationFloorPlan.query.filter_by(location_id=zone.location_id).first()
+    if plan is None and shared_plan is None:
+        return jsonify({"error": "Upload a floor plan for this zone or its parent location before drawing an indoor boundary."}), 404
     data = request.get_json(silent=True) or {}
     points = data.get("points")
     if points is None:
-        plan.boundary = None
+        zone.indoor_boundary = None
+        if plan is not None:
+            plan.boundary = None
     else:
         if not isinstance(points, list) or len(points) < 3 or len(points) > 500:
             return jsonify({"error": "An indoor boundary needs between 3 and 500 points."}), 400
@@ -696,18 +704,21 @@ def save_zone_floor_plan_boundary(zone_id):
             checked.pop()
         if len(checked) < 3 or len(set((p[0], p[1]) for p in checked)) < 3:
             return jsonify({"error": "An indoor boundary needs at least three distinct points."}), 400
-        plan.boundary = {"type": "IndoorPolygon", "points": checked}
+        zone.indoor_boundary = {"type": "IndoorPolygon", "points": checked}
+        if plan is not None:
+            plan.boundary = zone.indoor_boundary
     try:
         _audit(admin, zone, "zone.indoor_boundary_updated", {
-            "floor_plan": plan.filename,
-            "boundary": plan.boundary,
+            "floor_plan": plan.filename if plan else shared_plan.filename,
+            "floor_plan_source": "zone" if plan else "location",
+            "boundary": zone.indoor_boundary,
         })
         _notify_admins(admin, zone, "Indoor zone boundary updated", f'{admin.full_name} updated the indoor boundary for zone "{zone.name}".')
         db.session.commit()
     except Exception:
         db.session.rollback()
         return jsonify({"error": "Indoor boundary could not be saved."}), 500
-    return jsonify({"message": "Indoor boundary saved and audited.", "boundary": plan.boundary}), 200
+    return jsonify({"message": "Indoor boundary saved and audited.", "boundary": zone.indoor_boundary}), 200
 
 
 @zones_bp.delete("/<int:zone_id>/floor-plan")
