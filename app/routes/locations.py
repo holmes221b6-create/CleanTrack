@@ -1,12 +1,17 @@
-from flask import Blueprint, jsonify, request
+from io import BytesIO
+
+from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import func, or_
+from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.location import Location
+from app.models.location_floor_plan import LocationFloorPlan
 from app.models.zone import Zone
 from app.models.operation import Operation
 from app.models.audit_log import AuditLog
 from app.models.team import Team
+from app.models.team_member import TeamMember
 from app.models.notification import Notification
 from app.models.user import User
 from app.services.permissions import get_current_user, roles_required
@@ -24,6 +29,9 @@ def _location_or_none(location_id, admin):
 def _payload(location):
     data = location.to_dict()
     data["team_name"] = location.team.name if location.team else None
+    floor_plan = LocationFloorPlan.query.filter_by(location_id=location.id).first()
+    data["has_floor_plan"] = floor_plan is not None
+    data["floor_plan"] = _floor_plan_metadata(floor_plan) if floor_plan else None
     data["zone_count"] = Zone.query.filter_by(
         organization_id=location.organization_id, location_id=location.id
     ).count()
@@ -275,6 +283,137 @@ def location_detail(location_id):
         db.session.rollback()
         return jsonify({"error": "Location changes could not be saved."}), 500
     return jsonify({"message": "Location updated successfully.", "location": _payload(location)}), 200
+
+
+LOCATION_FLOOR_PLAN_TYPES = {
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".webp": ("image/webp", b"RIFF"),
+}
+LOCATION_FLOOR_PLAN_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _floor_plan_metadata(plan):
+    return {
+        "filename": plan.filename,
+        "content_type": plan.content_type,
+        "size": plan.size,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+    }
+
+
+def _can_access_location_floor_plan(user, location):
+    if user.role == "Admin":
+        return True
+    team_ids = {
+        row[0] for row in db.session.query(TeamMember.team_id)
+        .join(Team, TeamMember.team_id == Team.id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id).all()
+    }
+    if location.team_id and location.team_id in team_ids:
+        return True
+    zone_query = Zone.query.filter_by(
+        organization_id=user.organization_id, location_id=location.id
+    )
+    zone_ids = [row.id for row in zone_query.all()]
+    if any(row.supervisor_id == user.id or (row.team_id or location.team_id) in team_ids for row in zone_query):
+        return True
+    operation_scope = [Operation.location_id == location.id]
+    if zone_ids:
+        operation_scope.append(Operation.zone_id.in_(zone_ids))
+    return Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        or_(*operation_scope),
+        or_(Operation.assigned_to_id == user.id, Operation.assigned_supervisor_id == user.id),
+    ).first() is not None
+
+
+@locations_bp.post("/<int:location_id>/floor-plan")
+@roles_required("Admin")
+def upload_location_floor_plan(location_id):
+    admin = get_current_user()
+    location = _location_or_none(location_id, admin)
+    if location is None:
+        return jsonify({"error": "Location not found in your organization."}), 404
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "Choose a PNG, JPEG, or WebP floor-plan image."}), 400
+    filename = secure_filename(file.filename)
+    extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    expected = LOCATION_FLOOR_PLAN_TYPES.get(extension)
+    if expected is None:
+        return jsonify({"error": "Floor plans must be PNG, JPEG, or WebP images."}), 400
+    data = file.read(LOCATION_FLOOR_PLAN_MAX_BYTES + 1)
+    if not data or len(data) > LOCATION_FLOOR_PLAN_MAX_BYTES:
+        return jsonify({"error": "Floor-plan images must be between 1 byte and 10 MB."}), 413
+    content_type, signature = expected
+    if not data.startswith(signature) or (extension == ".webp" and (len(data) < 12 or data[8:12] != b"WEBP")):
+        return jsonify({"error": "The uploaded file does not match its image format."}), 400
+    plan = LocationFloorPlan.query.filter_by(location_id=location.id).first()
+    replacing = plan is not None
+    if plan is None:
+        plan = LocationFloorPlan(location_id=location.id, uploaded_by_id=admin.id)
+        db.session.add(plan)
+    plan.filename = filename[:255]
+    plan.content_type = content_type
+    plan.size = len(data)
+    plan.data = data
+    plan.uploaded_by_id = admin.id
+    try:
+        db.session.flush()
+        _audit(admin, location, "location.floor_plan_replaced" if replacing else "location.floor_plan_uploaded", {
+            "filename": plan.filename, "size": plan.size, "content_type": plan.content_type,
+        })
+        _notify_admins(admin, location, "Location floor plan updated", f'{admin.full_name} {"replaced" if replacing else "uploaded"} the shared floor plan for location "{location.name}".')
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Location floor plan could not be saved."}), 500
+    return jsonify({"message": "Shared location floor plan saved securely. Zones at this location can draw boundaries on it.", "floor_plan": _floor_plan_metadata(plan)}), 200 if replacing else 201
+
+
+@locations_bp.get("/<int:location_id>/floor-plan")
+@roles_required("Admin", "Supervisor", "Employee")
+def get_location_floor_plan(location_id):
+    user = get_current_user()
+    location = _location_or_none(location_id, user)
+    if location is None:
+        return jsonify({"error": "Location not found in your organization."}), 404
+    if not _can_access_location_floor_plan(user, location):
+        return jsonify({"error": "Your account is not assigned to this location or its zones. The private floor plan is not available."}), 403
+    plan = LocationFloorPlan.query.filter_by(location_id=location.id).first()
+    if plan is None:
+        return jsonify({"error": "No shared floor plan has been uploaded for this location."}), 404
+    response = send_file(
+        BytesIO(plan.data), mimetype=plan.content_type, as_attachment=False,
+        download_name=plan.filename, max_age=0,
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return response
+
+
+@locations_bp.delete("/<int:location_id>/floor-plan")
+@roles_required("Admin")
+def delete_location_floor_plan(location_id):
+    admin = get_current_user()
+    location = _location_or_none(location_id, admin)
+    if location is None:
+        return jsonify({"error": "Location not found in your organization."}), 404
+    plan = LocationFloorPlan.query.filter_by(location_id=location.id).first()
+    if plan is None:
+        return jsonify({"error": "No shared floor plan is saved for this location."}), 404
+    try:
+        _audit(admin, location, "location.floor_plan_removed", {"filename": plan.filename, "size": plan.size})
+        db.session.delete(plan)
+        _notify_admins(admin, location, "Location floor plan removed", f'{admin.full_name} removed the shared floor plan for location "{location.name}".')
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Location floor plan could not be removed."}), 500
+    return jsonify({"message": "Shared floor plan removed. Zone boundary and location history records are retained."}), 200
 
 
 @locations_bp.get("/<int:location_id>/history")
