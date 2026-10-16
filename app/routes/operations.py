@@ -1181,6 +1181,8 @@ def review_operation(operation_id):
         "message": "Operation verified and completed." if decision == "approve" else "Operation rejected. The assignee can correct the work and resubmit it.",
         "operation": operation.to_dict(),
         "execution": execution.to_dict(),
+        "employee_notification": "created" if operation.assigned_to_id else "not_available",
+        "email_delivery": "not_configured",
     }), 200
 
 
