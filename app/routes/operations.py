@@ -19,6 +19,7 @@ from app.models.team_member import TeamMember
 from app.models.location import Location
 from app.models.zone import Zone
 from app.models.task_evidence import TaskEvidence
+from app.models.notification import Notification
 from app.services.operation_scheduler import next_occurrence
 from werkzeug.utils import secure_filename
 from app.services.permissions import get_current_user, roles_required
@@ -329,9 +330,29 @@ def operations_collection():
             ))
         now = datetime.now(timezone.utc)
         items = query.order_by(Operation.created_at.desc()).all()
+        operation_ids = [item.id for item in items]
+        latest_execution = {}
+        if operation_ids:
+            executions = OperationExecution.query.filter(
+                OperationExecution.operation_id.in_(operation_ids)
+            ).order_by(OperationExecution.attempt_number.desc(), OperationExecution.created_at.desc()).all()
+            for execution in executions:
+                latest_execution.setdefault(execution.operation_id, execution)
+        operation_rows = []
         for item in items:
             item.overdue = _operation_is_overdue(item, now)
-        return jsonify({"operations": [item.to_dict() for item in items], "count": len(items)}), 200
+            row = item.to_dict()
+            attempt = latest_execution.get(item.id)
+            if attempt:
+                row["started_at"] = attempt.started_at.isoformat() if attempt.started_at else None
+                row["execution_submitted_at"] = attempt.submitted_at.isoformat() if attempt.submitted_at else None
+                row["execution_status"] = attempt.status
+                row["time_taken_minutes"] = (
+                    max(0, round((attempt.submitted_at - attempt.started_at).total_seconds() / 60))
+                    if attempt.started_at and attempt.submitted_at else None
+                )
+            operation_rows.append(row)
+        return jsonify({"operations": operation_rows, "count": len(operation_rows)}), 200
 
     if user.role not in {"Admin", "Supervisor"}:
         return jsonify({"error": "Employees can execute assigned work but cannot create organization operations."}), 403
@@ -1125,6 +1146,9 @@ def review_operation(operation_id):
             verification_required=True,
         )
         db.session.add(execution)
+    if execution is None:
+        db.session.rollback()
+        return jsonify({"error": "No execution record could be associated with this submission. The review was not saved."}), 409
     execution.status = "Completed" if decision == "approve" else "Rejected"
     execution.verified_by_id = user.id
     execution.verified_at = operation.reviewed_at
@@ -1137,6 +1161,29 @@ def review_operation(operation_id):
             "execution_id": execution.id,
             "execution_attempt": execution.attempt_number,
         })
+        if operation.assigned_to_id:
+            Notification(
+                recipient_id=operation.assigned_to_id,
+                organization_id=operation.organization_id,
+                title="Work approved" if decision == "approve" else "Work needs correction",
+                message=(
+                    feedback or "Your work has been approved. Your task has been reviewed and approved. Great work, thank you!"
+                ) if decision == "approve" else "Your submitted work was rejected. Reason: " + feedback,
+                notification_type="operation_review",
+                resource_type="operation",
+                resource_id=str(operation.id),
+            )
+            db.session.add(Notification(
+                recipient_id=operation.assigned_to_id,
+                organization_id=operation.organization_id,
+                title="Work approved" if decision == "approve" else "Work needs correction",
+                message=(
+                    feedback or "Your work has been approved. Your task has been reviewed and approved. Great work, thank you!"
+                ) if decision == "approve" else "Your submitted work was rejected. Reason: " + feedback,
+                notification_type="operation_review",
+                resource_type="operation",
+                resource_id=str(operation.id),
+            ))
         db.session.commit()
     except Exception:
         db.session.rollback()
