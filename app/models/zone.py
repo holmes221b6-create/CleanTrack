@@ -41,6 +41,12 @@ class Zone(db.Model):
         nullable=True,
         index=True,
     )
+    supervisor_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id"),
+        nullable=True,
+        index=True,
+    )
 
     status = db.Column(db.String(20), nullable=False, default="active")
 
@@ -59,6 +65,7 @@ class Zone(db.Model):
     organization = db.relationship("Organization")
     location = db.relationship("Location")
     team = db.relationship("Team")
+    supervisor = db.relationship("User", foreign_keys=[supervisor_id])
 
     __table_args__ = (
         db.UniqueConstraint(
