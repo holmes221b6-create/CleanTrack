@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
+from io import BytesIO
 from uuid import uuid4
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import func, or_
+from werkzeug.utils import secure_filename
 
 from app.extensions import db
 from app.models.location import Location
 from app.models.zone import Zone
+from app.models.zone_floor_plan import ZoneFloorPlan
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -536,6 +539,133 @@ def zone_history(zone_id):
         **row.to_dict(),
         "actor_name": row.actor.full_name if row.actor else "System",
     } for row in rows]}), 200
+
+
+FLOOR_PLAN_TYPES = {
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".webp": ("image/webp", b"RIFF"),
+}
+FLOOR_PLAN_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _can_access_floor_plan(user, zone):
+    if user.role == "Admin":
+        return True
+    effective_team_id = zone.team_id or (zone.location.team_id if zone.location else None)
+    member_team_ids = {
+        row[0] for row in db.session.query(TeamMember.team_id)
+        .join(Team, TeamMember.team_id == Team.id)
+        .filter(
+            TeamMember.user_id == user.id,
+            Team.organization_id == user.organization_id,
+        ).all()
+    }
+    if zone.supervisor_id == user.id or (effective_team_id and effective_team_id in member_team_ids):
+        return True
+    return Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        Operation.zone_id == zone.id,
+        or_(Operation.assigned_to_id == user.id, Operation.assigned_supervisor_id == user.id),
+    ).first() is not None
+
+
+def _floor_plan_metadata(plan):
+    return {
+        "filename": plan.filename,
+        "content_type": plan.content_type,
+        "size": plan.size,
+        "updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+    }
+
+
+@zones_bp.post("/<int:zone_id>/floor-plan")
+@roles_required("Admin")
+def upload_zone_floor_plan(zone_id):
+    admin = get_current_user()
+    zone = _zone_or_none(zone_id, admin)
+    if zone is None:
+        return jsonify({"error": "Zone not found in your organization."}), 404
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "Choose a PNG, JPEG, or WebP floor-plan image."}), 400
+    filename = secure_filename(file.filename)
+    extension = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    expected = FLOOR_PLAN_TYPES.get(extension)
+    if expected is None:
+        return jsonify({"error": "Floor plans must be PNG, JPEG, or WebP images."}), 400
+    data = file.read(FLOOR_PLAN_MAX_BYTES + 1)
+    if not data or len(data) > FLOOR_PLAN_MAX_BYTES:
+        return jsonify({"error": "Floor-plan images must be between 1 byte and 10 MB."}), 413
+    content_type, signature = expected
+    if not data.startswith(signature) or (extension == ".webp" and (len(data) < 12 or data[8:12] != b"WEBP")):
+        return jsonify({"error": "The uploaded file does not match its image format."}), 400
+
+    plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    replacing = plan is not None
+    if plan is None:
+        plan = ZoneFloorPlan(zone_id=zone.id, uploaded_by_id=admin.id)
+        db.session.add(plan)
+    plan.filename = filename[:255]
+    plan.content_type = content_type
+    plan.size = len(data)
+    plan.data = data
+    plan.uploaded_by_id = admin.id
+    try:
+        db.session.flush()
+        _audit(admin, zone, "zone.floor_plan_replaced" if replacing else "zone.floor_plan_uploaded", {
+            "filename": plan.filename, "size": plan.size, "content_type": plan.content_type,
+        })
+        _notify_admins(admin, zone, "Zone floor plan updated", f'{admin.full_name} {"replaced" if replacing else "uploaded"} the floor plan for zone "{zone.name}".')
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Floor plan could not be saved to the database."}), 500
+    return jsonify({"message": "Floor plan saved securely to CleanTrack.", "floor_plan": _floor_plan_metadata(plan)}), 201 if not replacing else 200
+
+
+@zones_bp.get("/<int:zone_id>/floor-plan")
+@roles_required("Admin", "Supervisor", "Employee")
+def get_zone_floor_plan(zone_id):
+    user = get_current_user()
+    zone = _zone_or_none(zone_id, user)
+    if zone is None:
+        return jsonify({"error": "Zone not found in your organization."}), 404
+    if not _can_access_floor_plan(user, zone):
+        return jsonify({"error": "You are not assigned to this zone. The private floor plan is not available to your account."}), 403
+    plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    if plan is None:
+        return jsonify({"error": "No floor plan has been uploaded for this zone."}), 404
+    response = send_file(
+        BytesIO(plan.data), mimetype=plan.content_type, as_attachment=False,
+        download_name=plan.filename, max_age=0,
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return response
+
+
+@zones_bp.delete("/<int:zone_id>/floor-plan")
+@roles_required("Admin")
+def delete_zone_floor_plan(zone_id):
+    admin = get_current_user()
+    zone = _zone_or_none(zone_id, admin)
+    if zone is None:
+        return jsonify({"error": "Zone not found in your organization."}), 404
+    plan = ZoneFloorPlan.query.filter_by(zone_id=zone.id).first()
+    if plan is None:
+        return jsonify({"error": "No floor plan is saved for this zone."}), 404
+    details = {"filename": plan.filename, "size": plan.size}
+    try:
+        _audit(admin, zone, "zone.floor_plan_removed", details)
+        db.session.delete(plan)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Floor plan could not be removed."}), 500
+    return jsonify({"message": "Floor plan removed. Zone history has been retained."}), 200
 
 
 @zones_bp.get("/resolve/<string:qr_token>")
