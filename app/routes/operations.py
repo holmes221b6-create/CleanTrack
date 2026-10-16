@@ -346,6 +346,8 @@ def operations_collection():
             if attempt:
                 row["started_at"] = attempt.started_at.isoformat() if attempt.started_at else None
                 row["execution_submitted_at"] = attempt.submitted_at.isoformat() if attempt.submitted_at else None
+                row["completed_by_id"] = attempt.performed_by_id
+                row["completed_by_name"] = attempt.performer.full_name if attempt.performer else None
                 row["execution_status"] = attempt.status
                 row["time_taken_minutes"] = (
                     max(0, round((attempt.submitted_at - attempt.started_at).total_seconds() / 60))
