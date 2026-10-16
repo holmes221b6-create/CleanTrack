@@ -217,8 +217,8 @@ def zones_collection():
     location = Location.query.filter_by(
         id=location_id, organization_id=admin.organization_id
     ).first()
-    if location is None or location.status == "archived":
-        return jsonify({"error": "Choose a non-archived location in your organization."}), 400
+    if location is None or location.status != "active":
+        return jsonify({"error": "Choose an active location in your organization."}), 400
 
     team = None
     if team_id not in (None, ""):
@@ -364,6 +364,8 @@ def zone_detail(zone_id):
             team = Team.query.filter_by(id=team_id, organization_id=admin.organization_id).first()
             if team is None or team.status != "active":
                 return jsonify({"error": "Choose an active team in your organization."}), 400
+            if zone.status != "active" and team_id != zone.team_id:
+                return jsonify({"error": "Activate or restore this zone before assigning a team."}), 409
             location = zone.location
             if location and location.team_id not in (None, team.id):
                 return jsonify({"error": "The parent location belongs to another team. Reassign the location first."}), 409
@@ -537,7 +539,11 @@ def resolve_zone_qr(qr_token):
     if user.role == "Admin":
         visible = assigned_ops
     elif user.role == "Supervisor":
-        visible = [op for op in assigned_ops if op.team_id in team_ids or op.assigned_supervisor_id == user.id or op.assigned_to_id == user.id]
+        effective_team_id = zone.team_id or (location.team_id if location else None)
+        visible = assigned_ops if effective_team_id in team_ids else [
+            op for op in assigned_ops
+            if op.team_id in team_ids or op.assigned_supervisor_id == user.id or op.assigned_to_id == user.id
+        ]
     else:
         visible = [op for op in assigned_ops if op.assigned_to_id == user.id]
     base["operations"] = [{
