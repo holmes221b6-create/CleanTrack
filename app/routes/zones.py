@@ -97,7 +97,7 @@ def _zone_payload(zone, include_people=False, include_operations=False):
     payload = zone.to_dict()
     location = zone.location
     effective_team_id = zone.team_id or (location.team_id if location else None)
-    team = db.session.get(Team, effective_team_id) if effective_team_id else None
+    team = Team.query.filter_by(id=effective_team_id, organization_id=zone.organization_id).first() if effective_team_id else None
     people = _people_for_team(effective_team_id, zone.organization_id)
     all_operations = _ops(zone, include_closed=True)
     open_operations = [
@@ -509,7 +509,8 @@ def resolve_zone_qr(qr_token):
 
     team_ids = [
         row[0] for row in db.session.query(TeamMember.team_id)
-        .filter(TeamMember.user_id == user.id).all()
+        .join(Team, TeamMember.team_id == Team.id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id).all()
     ]
     assigned_ops = Operation.query.filter_by(
         organization_id=user.organization_id,
