@@ -20,6 +20,8 @@ class Zone(db.Model):
     boundary = db.Column(db.JSON, nullable=True)
     # An opaque identifier for a QR deep link. It identifies a zone but grants no access.
     qr_token = db.Column(db.String(64), nullable=False, unique=True, default=lambda: uuid4().hex)
+    qr_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    qr_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
     organization_id = db.Column(
         db.Integer,
@@ -74,6 +76,8 @@ class Zone(db.Model):
             "floor_label": self.floor_label,
             "boundary": self.boundary,
             "qr_token": self.qr_token,
+            "qr_enabled": bool(self.qr_enabled),
+            "qr_expires_at": self.qr_expires_at.isoformat() if self.qr_expires_at else None,
             "organization_id": self.organization_id,
             "location_id": self.location_id,
             "location_name": self.location.name if self.location else None,
