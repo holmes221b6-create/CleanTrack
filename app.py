@@ -411,6 +411,161 @@ def me():
         return jsonify(error="This account does not have active workspace access."), 403
     return jsonify(user=user)
 
+
+# ─── personal sync integrations ──────────────────────────────────────────────
+import json
+import urllib.parse
+import urllib.request
+import urllib.error
+from base64 import b64encode
+
+SYNC_DEFAULTS = {
+    "calendar": {
+        "enabled": False, "provider": "google",
+        "mode": "confirm", "reminderMinutes": 15
+    },
+    "sms": {
+        "enabled": False,
+        "events": {"assigned": True, "changed": True, "overdue": True, "cancelled": False}
+    }
+}
+
+def _sync_provider_status():
+    google_ready = bool(os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET"))
+    outlook_ready = bool(os.getenv("MICROSOFT_CLIENT_ID") and os.getenv("MICROSOFT_CLIENT_SECRET"))
+    twilio_ready = bool(os.getenv("TWILIO_ACCOUNT_SID") and os.getenv("TWILIO_AUTH_TOKEN") and os.getenv("TWILIO_FROM_NUMBER"))
+    return {
+        "googleCalendar": {"configured": google_ready, "connected": False, "status": "ready_for_oauth" if google_ready else "credentials_required"},
+        "outlookCalendar": {"configured": outlook_ready, "connected": False, "status": "ready_for_oauth" if outlook_ready else "credentials_required"},
+        "sms": {"configured": twilio_ready, "connected": False, "status": "ready_to_send" if twilio_ready else "credentials_required"}
+    }
+
+@app.route("/api/integrations/sync-settings", methods=["GET"])
+@jwt_required()
+def get_sync_settings():
+    uid = get_jwt_identity()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT settings_json, updated_at FROM user_sync_settings WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+    conn.close()
+    settings = dict(SYNC_DEFAULTS)
+    if row:
+        try:
+            saved = json.loads(row["settings_json"] or "{}")
+            if isinstance(saved, dict):
+                for section in ("calendar", "sms"):
+                    if isinstance(saved.get(section), dict):
+                        settings[section] = {**settings[section], **saved[section]}
+                        if section == "sms" and isinstance(saved[section].get("events"), dict):
+                            settings[section]["events"] = {**SYNC_DEFAULTS["sms"]["events"], **saved[section]["events"]}
+        except (TypeError, ValueError):
+            pass
+    return jsonify(settings=settings, providers=_sync_provider_status(), updated_at=row["updated_at"] if row else None)
+
+@app.route("/api/integrations/sync-settings", methods=["PATCH"])
+@jwt_required()
+def update_sync_settings():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify(error="A JSON settings object is required."), 400
+    allowed_top = {"calendar", "sms"}
+    if set(data) - allowed_top:
+        return jsonify(error="Only calendar and SMS preferences can be changed here. Provider credentials cannot be submitted through this endpoint."), 400
+    uid = get_jwt_identity()
+    conn = get_db()
+    row = conn.execute("SELECT settings_json FROM user_sync_settings WHERE user_id=?", (uid,)).fetchone()
+    current = json.loads(row["settings_json"] or "{}") if row else {}
+    settings = {**SYNC_DEFAULTS}
+    for section in ("calendar", "sms"):
+        if isinstance(current.get(section), dict):
+            settings[section] = {**settings[section], **current[section]}
+    for section, patch in data.items():
+        if not isinstance(patch, dict):
+            conn.close()
+            return jsonify(error=f"{section} settings must be an object."), 400
+        if section == "calendar":
+            if set(patch) - {"enabled", "provider", "mode", "reminderMinutes"}:
+                conn.close()
+                return jsonify(error="Unsupported calendar setting."), 400
+            if "enabled" in patch and not isinstance(patch["enabled"], bool):
+                conn.close()
+                return jsonify(error="Calendar enabled must be true or false."), 400
+            if "provider" in patch and patch["provider"] not in ("google", "outlook"):
+                conn.close()
+                return jsonify(error="Calendar provider must be google or outlook."), 400
+            if "mode" in patch and patch["mode"] not in ("confirm", "automatic"):
+                conn.close()
+                return jsonify(error="Calendar mode must be confirm or automatic."), 400
+            if "reminderMinutes" in patch and patch["reminderMinutes"] not in (0, 5, 10, 15, 30, 60):
+                conn.close()
+                return jsonify(error="Choose a supported reminder interval."), 400
+            settings["calendar"].update(patch)
+        else:
+            if set(patch) - {"enabled", "events"}:
+                conn.close()
+                return jsonify(error="Unsupported SMS setting."), 400
+            if "enabled" in patch and not isinstance(patch["enabled"], bool):
+                conn.close()
+                return jsonify(error="SMS enabled must be true or false."), 400
+            if "events" in patch:
+                if not isinstance(patch["events"], dict) or set(patch["events"]) - {"assigned", "changed", "overdue", "cancelled"} or any(not isinstance(v, bool) for v in patch["events"].values()):
+                    conn.close()
+                    return jsonify(error="SMS event preferences are invalid."), 400
+                settings["sms"]["events"] = {**settings["sms"].get("events", SYNC_DEFAULTS["sms"]["events"]), **patch["events"]}
+            if "enabled" in patch:
+                settings["sms"]["enabled"] = patch["enabled"]
+    encoded = json.dumps(settings, separators=(",", ":"))
+    conn.execute("""
+        INSERT INTO user_sync_settings(user_id, settings_json, updated_at)
+        VALUES(?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id) DO UPDATE SET settings_json=excluded.settings_json, updated_at=CURRENT_TIMESTAMP
+    """, (uid, encoded))
+    conn.commit()
+    conn.close()
+    return jsonify(success=True, settings=settings, providers=_sync_provider_status())
+
+@app.route("/api/integrations/sms/test", methods=["POST"])
+@jwt_required()
+def send_sync_sms_test():
+    # Only send a test to the authenticated user's own registered phone.
+    uid = get_jwt_identity()
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    sender = os.getenv("TWILIO_FROM_NUMBER")
+    if not (sid and token and sender):
+        return jsonify(error="SMS is not configured on the server. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER in the backend environment first."), 503
+    conn = get_db()
+    user = row_to_dict(conn.execute("SELECT phone FROM users WHERE id=?", (uid,)).fetchone())
+    conn.close()
+    phone = str((user or {}).get("phone") or "").strip()
+    if not phone:
+        return jsonify(error="Add your phone number in Account settings before sending a test SMS."), 400
+    body = urllib.parse.urlencode({
+        "To": phone,
+        "From": sender,
+        "Body": "CleanTrack test: SMS notifications are configured for your account."
+    }).encode("utf-8")
+    request_obj = urllib.request.Request(
+        f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+        data=body, method="POST",
+        headers={
+            "Authorization": "Basic " + b64encode(f"{sid}:{token}".encode()).decode(),
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=12) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return jsonify(success=True, message="Test SMS accepted by the provider.", provider_message_id=result.get("sid")), 200
+    except urllib.error.HTTPError as exc:
+        # Do not return provider response bodies, which may contain account details.
+        return jsonify(error="The SMS provider rejected the test message. Check the Twilio credentials, sender, destination format and messaging permissions."), 502
+    except Exception:
+        return jsonify(error="Could not reach the SMS provider. Check backend network access and provider status."), 502
+
+
 @app.route("/api/organizations/current", methods=["GET"])
 @require_roles("admin")
 def get_current_organization():
