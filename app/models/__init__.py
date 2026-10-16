@@ -6,6 +6,7 @@ from app.models.announcement_receipt import AnnouncementReceipt
 from app.models.audit_log import AuditLog
 from app.models.invitation import Invitation
 from app.models.location import Location
+from app.models.location_floor_plan import LocationFloorPlan
 from app.models.membership_request import MembershipRequest
 from app.models.notification import Notification
 from app.models.operation import Operation
@@ -26,6 +27,7 @@ __all__ = [
     "AuditLog",
     "Invitation",
     "Location",
+    "LocationFloorPlan",
     "MembershipRequest",
     "Notification",
     "Operation",
