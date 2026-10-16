@@ -4,7 +4,7 @@ from io import BytesIO
 from uuid import uuid4
 from mimetypes import guess_type
 
-from flask import Blueprint, jsonify, request, has_request_context, send_file
+from flask import Blueprint, current_app, jsonify, request, has_request_context, send_file
 from sqlalchemy import func, or_
 
 from app.extensions import db
@@ -540,8 +540,15 @@ def operations_collection():
              {"assigned_to_id": assigned_to_id, "original_due_at": due_at.isoformat() if due_at else None})
         db.session.commit()
     except Exception:
+        current_app.logger.exception(
+            "OPERATION_CREATE_FAILED: operation insert or audit record failed "
+            "(organization_id=%s, actor_id=%s)",
+            user.organization_id, user.id,
+        )
         db.session.rollback()
-        return jsonify({"error": "Operation could not be created."}), 500
+        return jsonify({
+            "error": "Operation could not be created. The server recorded diagnostic details; please retry after the backend deployment finishes."
+        }), 500
     return jsonify({"message": "Operation created successfully.", "operation": operation.to_dict()}), 201
 
 
