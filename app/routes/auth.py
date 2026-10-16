@@ -311,7 +311,7 @@ def current_user():
                     "language": {"en", "es", "ar", "hi", "ur", "zh"},
                     "dateFormat": {"YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD Mon YYYY"},
                     "timeFormat": {"12", "24"},
-                    "theme": {"light", "dark"},
+                    "theme": {"default", "light", "black"},
                     "currency": {
                         "USD", "EUR", "GBP", "INR", "CNY", "JPY", "KRW", "AED",
                         "SAR", "QAR", "KWD", "BHD", "OMR", "JOD", "SGD", "AUD", "CAD", "CHF", "NZD",
