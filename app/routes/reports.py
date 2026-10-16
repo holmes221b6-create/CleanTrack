@@ -105,7 +105,7 @@ def _rows_for(admin, payload):
         if supervisor_id: query = query.filter(Operation.assigned_supervisor_id == supervisor_id)
         if location_id: query = query.filter(Operation.location_id == location_id)
         if zone_id: query = query.filter(Operation.zone_id == zone_id)
-        if status: query = query.filter(db.func.lower(Operation.status) == status)
+        if status == "overdue": query = query.filter(Operation.overdue.is_(True))\n        elif status: query = query.filter(db.func.lower(Operation.status) == status)
         if operation_type: query = query.filter(db.func.lower(Operation.task_type) == operation_type)
         query = query.filter(Operation.created_at >= datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc),
                              Operation.created_at < datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc))
