@@ -93,6 +93,10 @@ def create_app(config_class=Config):
                 connection.execute(text(
                     "CREATE UNIQUE INDEX IF NOT EXISTS uq_zones_qr_token ON zones (qr_token)"
                 ))
+            if "zones" in tables:
+                zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
+                if "indoor_boundary" not in zone_columns:
+                    connection.execute(text("ALTER TABLE zones ADD COLUMN indoor_boundary JSON"))
             if "zone_floor_plans" in tables:
                 floor_plan_columns = {item["name"] for item in inspect(connection).get_columns("zone_floor_plans")}
                 if "boundary" not in floor_plan_columns:
