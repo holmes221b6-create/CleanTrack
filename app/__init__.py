@@ -70,6 +70,7 @@ def create_app(config_class=Config):
                 zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
                 zone_additions = {
                     "team_id": "INTEGER REFERENCES teams(id)",
+                    "supervisor_id": "INTEGER REFERENCES users(id)",
                     "boundary": "JSON",
                     "floor_label": "VARCHAR(120)",
                     "qr_token": "VARCHAR(64)",
