@@ -122,6 +122,8 @@ def _zone_payload(zone, include_people=False, include_operations=False):
         "active_operation_count": len(open_operations),
         "scheduled_operation_count": len(scheduled),
         "assigned_people": people if include_people else [],
+        "assigned_supervisor_names": [row["name"] for row in people if str(row["role"]).lower() == "supervisor"],
+        "assigned_employee_names": [row["name"] for row in people if str(row["role"]).lower() == "employee"],
     })
     if include_operations:
         payload["operations"] = [{
