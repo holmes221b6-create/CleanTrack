@@ -582,6 +582,11 @@ def assign_zones(team_id):
     ).all()
     if len(zones) != len(ids):
         return jsonify({"error": "One or more selected zones are outside your organization or unavailable."}), 400
+    unavailable_zones = [row.name for row in zones if row.status != "active"]
+    if unavailable_zones:
+        return jsonify({
+            "error": "Only active zones can be assigned to teams. Restore or activate these zones first: " + ", ".join(unavailable_zones[:10])
+        }), 409
     locations = {row.id: row for row in Location.query.filter_by(organization_id=admin.organization_id).all()}
     for zone in zones:
         loc = locations.get(zone.location_id)
