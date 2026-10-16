@@ -73,6 +73,8 @@ def create_app(config_class=Config):
                     "boundary": "JSON",
                     "floor_label": "VARCHAR(120)",
                     "qr_token": "VARCHAR(64)",
+                    "qr_enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
+                    "qr_expires_at": "TIMESTAMP WITH TIME ZONE",
                     "updated_at": "TIMESTAMP WITH TIME ZONE",
                 }
                 for column, sql_type in zone_additions.items():
