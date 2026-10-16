@@ -1162,17 +1162,6 @@ def review_operation(operation_id):
             "execution_attempt": execution.attempt_number,
         })
         if operation.assigned_to_id:
-            Notification(
-                recipient_id=operation.assigned_to_id,
-                organization_id=operation.organization_id,
-                title="Work approved" if decision == "approve" else "Work needs correction",
-                message=(
-                    feedback or "Your work has been approved. Your task has been reviewed and approved. Great work, thank you!"
-                ) if decision == "approve" else "Your submitted work was rejected. Reason: " + feedback,
-                notification_type="operation_review",
-                resource_type="operation",
-                resource_id=str(operation.id),
-            )
             db.session.add(Notification(
                 recipient_id=operation.assigned_to_id,
                 organization_id=operation.organization_id,
