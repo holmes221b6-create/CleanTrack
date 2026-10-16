@@ -279,7 +279,7 @@ def zone_detail(zone_id):
         return jsonify({"zone": _zone_payload(zone, include_people=True, include_operations=True)}), 200
 
     data = request.get_json(silent=True) or {}
-    allowed = {"name", "description", "location_id", "team_id", "status", "floor_label", "boundary"}
+    allowed = {"name", "description", "location_id", "team_id", "status", "floor_label", "boundary", "qr_enabled", "qr_expires_at", "regenerate_qr"}
     unknown = set(data) - allowed
     if unknown:
         return jsonify({"error": "Unsupported field(s): " + ", ".join(sorted(unknown))}), 400
@@ -287,7 +287,7 @@ def zone_detail(zone_id):
     before = {
         key: getattr(zone, key)
         for key in allowed
-        if key not in {"location_id", "team_id", "boundary"}
+        if key not in {"location_id", "team_id", "boundary", "regenerate_qr"}
     }
     before.update({
         "location_id": zone.location_id,
@@ -336,8 +336,8 @@ def zone_detail(zone_id):
         location = Location.query.filter_by(
             id=location_id, organization_id=admin.organization_id
         ).first()
-        if location is None or location.status == "archived":
-            return jsonify({"error": "Choose a non-archived location in your organization."}), 400
+        if location is None or location.status != "active":
+            return jsonify({"error": "Choose an active location in your organization."}), 400
         duplicate = Zone.query.filter(
             Zone.organization_id == admin.organization_id,
             Zone.location_id == location_id,
@@ -375,6 +375,33 @@ def zone_detail(zone_id):
         except ValueError as error:
             return jsonify({"error": str(error)}), 400
 
+    if "qr_enabled" in data:
+        if not isinstance(data["qr_enabled"], bool):
+            return jsonify({"error": "qr_enabled must be true or false."}), 400
+        zone.qr_enabled = data["qr_enabled"]
+
+    if "qr_expires_at" in data:
+        raw_expiry = data["qr_expires_at"]
+        if raw_expiry in (None, ""):
+            zone.qr_expires_at = None
+        elif not isinstance(raw_expiry, str):
+            return jsonify({"error": "QR expiry must be a valid ISO date/time or blank."}), 400
+        else:
+            try:
+                expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                zone.qr_expires_at = expiry.astimezone(timezone.utc)
+            except ValueError:
+                return jsonify({"error": "QR expiry must be a valid ISO date/time or blank."}), 400
+
+    if "regenerate_qr" in data:
+        if not isinstance(data["regenerate_qr"], bool):
+            return jsonify({"error": "regenerate_qr must be true or false."}), 400
+        if data["regenerate_qr"]:
+            before["qr_token"] = zone.qr_token
+            zone.qr_token = uuid4().hex
+
     if "status" in data:
         status = data["status"]
         if status not in {"active", "inactive", "archived"}:
@@ -400,14 +427,21 @@ def zone_detail(zone_id):
                 }), 409
         zone.status = status
 
+    changed_keys = (allowed - {"regenerate_qr"}) | ({"qr_token"} if "qr_token" in before else set())
     changed = {key: {"before": before.get(key), "after": getattr(zone, key)}
-               for key in allowed if before.get(key) != getattr(zone, key)}
+               for key in changed_keys if before.get(key) != getattr(zone, key)}
     if not changed:
         return jsonify({"message": "No zone changes were needed.", "zone": _zone_payload(zone, include_people=True)}), 200
 
     old_status = before.get("status")
     new_status = zone.status
-    if "status" in changed:
+    if "qr_token" in changed:
+        action = "zone.qr_regenerated"
+    elif "qr_enabled" in changed:
+        action = "zone.qr_enabled" if zone.qr_enabled else "zone.qr_disabled"
+    elif "qr_expires_at" in changed:
+        action = "zone.qr_expiry_changed"
+    elif "status" in changed:
         action = "zone.archived" if new_status == "archived" else "zone.restored" if old_status == "archived" and new_status == "active" else "zone.status_changed"
     elif "boundary" in changed:
         action = "zone.boundary_updated"
@@ -458,6 +492,12 @@ def resolve_zone_qr(qr_token):
         return jsonify({"error": "This QR code is invalid or does not belong to your organization.", "code_status": "invalid"}), 404
 
     location = zone.location
+    if not zone.qr_enabled:
+        return jsonify({"code_status": "disabled", "message": "This QR code has been disabled by an Admin. Ask for a current code."}), 410
+    if zone.qr_expires_at is not None:
+        expiry = zone.qr_expires_at.replace(tzinfo=timezone.utc) if zone.qr_expires_at.tzinfo is None else zone.qr_expires_at
+        if expiry <= datetime.now(timezone.utc):
+            return jsonify({"code_status": "expired", "message": "This QR code has expired. Ask an Admin for a current code."}), 410
     if zone.status == "archived" or (location and location.status == "archived"):
         return jsonify({"code_status": "archived", "message": "This zone is no longer active. Contact your organization Admin. The QR code does not grant access."}), 410
     if zone.status != "active" or (location and location.status != "active"):
