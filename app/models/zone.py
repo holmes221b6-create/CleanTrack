@@ -18,6 +18,8 @@ class Zone(db.Model):
     # GeoJSON Polygon geometry in longitude/latitude coordinates.
     # A boundary is optional; no placeholder geometry is created.
     boundary = db.Column(db.JSON, nullable=True)
+    # Normalized polygon on the shared parent-location floor plan (0..1 coordinates).
+    indoor_boundary = db.Column(db.JSON, nullable=True)
     # An opaque identifier for a QR deep link. It identifies a zone but grants no access.
     qr_token = db.Column(db.String(64), nullable=False, unique=True, default=lambda: uuid4().hex)
     qr_enabled = db.Column(db.Boolean, nullable=False, default=True)
@@ -82,6 +84,7 @@ class Zone(db.Model):
             "description": self.description,
             "floor_label": self.floor_label,
             "boundary": self.boundary,
+            "indoor_boundary": self.indoor_boundary,
             "qr_token": self.qr_token,
             "qr_enabled": bool(self.qr_enabled),
             "qr_expires_at": self.qr_expires_at.isoformat() if self.qr_expires_at else None,
