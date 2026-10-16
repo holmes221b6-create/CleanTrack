@@ -430,6 +430,28 @@ SYNC_DEFAULTS = {
     }
 }
 
+def _send_twilio_sms(to_phone, message_text):
+    sid = os.getenv("TWILIO_ACCOUNT_SID")
+    token = os.getenv("TWILIO_AUTH_TOKEN")
+    sender = os.getenv("TWILIO_FROM_NUMBER")
+    if not (sid and token and sender and to_phone):
+        return False, None
+    body = urllib.parse.urlencode({"To": to_phone, "From": sender, "Body": message_text}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+        data=body, method="POST",
+        headers={
+            "Authorization": "Basic " + b64encode(f"{sid}:{token}".encode()).decode(),
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return True, result.get("sid")
+    except Exception:
+        return False, None
+
 def _sync_provider_status():
     google_ready = bool(os.getenv("GOOGLE_CLIENT_ID") and os.getenv("GOOGLE_CLIENT_SECRET"))
     outlook_ready = bool(os.getenv("MICROSOFT_CLIENT_ID") and os.getenv("MICROSOFT_CLIENT_SECRET"))
@@ -542,28 +564,10 @@ def send_sync_sms_test():
     phone = str((user or {}).get("phone") or "").strip()
     if not phone:
         return jsonify(error="Add your phone number in Account settings before sending a test SMS."), 400
-    body = urllib.parse.urlencode({
-        "To": phone,
-        "From": sender,
-        "Body": "CleanTrack test: SMS notifications are configured for your account."
-    }).encode("utf-8")
-    request_obj = urllib.request.Request(
-        f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
-        data=body, method="POST",
-        headers={
-            "Authorization": "Basic " + b64encode(f"{sid}:{token}".encode()).decode(),
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-    )
-    try:
-        with urllib.request.urlopen(request_obj, timeout=12) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        return jsonify(success=True, message="Test SMS accepted by the provider.", provider_message_id=result.get("sid")), 200
-    except urllib.error.HTTPError as exc:
-        # Do not return provider response bodies, which may contain account details.
-        return jsonify(error="The SMS provider rejected the test message. Check the Twilio credentials, sender, destination format and messaging permissions."), 502
-    except Exception:
-        return jsonify(error="Could not reach the SMS provider. Check backend network access and provider status."), 502
+    success, message_id = _send_twilio_sms(phone, "CleanTrack test: SMS notifications are configured for your account.")
+    if success:
+        return jsonify(success=True, message="Test SMS accepted by the provider.", provider_message_id=message_id), 200
+    return jsonify(error="The SMS provider rejected the test message or could not be reached. Check Twilio credentials, sender, destination format, messaging permissions and backend network access."), 502
 
 
 @app.route("/api/organizations/current", methods=["GET"])
@@ -2014,8 +2018,31 @@ def create_task():
         )
     )
 
+    notification = conn.execute("""
+        SELECT u.phone, u.name AS employee_name, z.name AS zone_name,
+               s.settings_json
+        FROM users u
+        JOIN zones z ON z.id=?
+        LEFT JOIN user_sync_settings s ON s.user_id=u.id
+        WHERE u.id=?
+    """, (d["zone_id"], assigned_to)).fetchone() if assigned_to else None
     conn.commit()
     conn.close()
+
+    # SMS is best-effort: task creation succeeds even if the external provider is unavailable.
+    if notification and notification["phone"] and notification["settings_json"]:
+        try:
+            sync_settings = json.loads(notification["settings_json"] or "{}")
+            sms_settings = sync_settings.get("sms") or {}
+            events = sms_settings.get("events") or {}
+            if sms_settings.get("enabled") is True and events.get("assigned", True) is True:
+                when = str(d["scheduled_at"])
+                message = f"CleanTrack: A cleaning task has been assigned to you for {notification['zone_name']} at {when}. Sign in to view task details."
+                sent, _message_id = _send_twilio_sms(notification["phone"], message)
+                if not sent:
+                    app.logger.warning("Assignment SMS delivery failed for task %s.", tid)
+        except Exception:
+            app.logger.warning("Assignment SMS notification could not be processed for task %s.", tid)
 
     return jsonify(id=tid), 201
 #start_task-----------------------------------------------------
