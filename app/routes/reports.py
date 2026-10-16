@@ -96,7 +96,7 @@ def _rows_for(admin, payload):
     filters = {"report_type": kind, "start_date": start.isoformat(), "end_date": end.isoformat(),
                "team_id": team_id, "supervisor_id": supervisor_id, "employee_id": employee_id,
                "location_id": location_id, "zone_id": zone_id, "status": status or None,
-               "operation_type": operation_type or None}
+               "operation_type": operation_type or None, "date_format": str(payload.get("date_format") or "iso")}
 
     if kind in {"operations", "performance", "approvals"}:
         query = Operation.query.filter(Operation.organization_id == org)
@@ -179,19 +179,36 @@ def _int_filter(payload, key):
         raise ValueError("Invalid filter: " + key.replace("_", " ") + ".")
 
 
+def _format_export_value(value, date_format):
+    text = _clean(value)
+    match = re.match(r"^(\\d{4})-(\\d{2})-(\\d{2})(.*)$", text)
+    if not match:
+        return text
+    year, month, day, suffix = match.groups()
+    if date_format == "day-first":
+        return f"{day}/{month}/{year}{suffix}"
+    if date_format == "month-first":
+        return f"{month}/{day}/{year}{suffix}"
+    return text
+
+
 def _render_file(report, file_format, report_name):
     headers, rows = report["headers"], report["rows"]
+    date_format = report["filters"].get("date_format", "iso")
+    if date_format not in {"iso", "day-first", "month-first"}:
+        date_format = "iso"
+    rows = [[_format_export_value(v, date_format) for v in row] for row in rows]
     if file_format == "csv":
         stream = StringIO(newline="")
         writer = csv.writer(stream)
         writer.writerow(headers)
-        writer.writerows([[_clean(v) for v in row] for row in rows])
+        writer.writerows(rows)
         return ("\ufeff" + stream.getvalue()).encode("utf-8")
     if file_format == "xlsx":
         from app.routes.analytics import _make_xlsx
-        return _make_xlsx(headers, [[_clean(v) for v in row] for row in rows], sheet_name="CleanTrack Report")
+        return _make_xlsx(headers, rows, sheet_name="CleanTrack Report")
     from app.routes.analytics import _make_pdf
-    return _make_pdf(headers, [[_clean(v) for v in row] for row in rows],
+    return _make_pdf(headers, rows,
                      {"start_date": report["start_date"], "end_date": report["end_date"]})
 
 
