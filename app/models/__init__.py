@@ -17,6 +17,7 @@ from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.zone import Zone
+from app.models.zone_floor_plan import ZoneFloorPlan
 
 __all__ = [
     "Announcement",
@@ -36,4 +37,5 @@ __all__ = [
     "TeamMember",
     "User",
     "Zone",
+    "ZoneFloorPlan",
 ]
