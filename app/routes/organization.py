@@ -173,6 +173,25 @@ def organization_audit_log():
     return jsonify(events=events, count=len(events)), 200
 
 
+@organization_bp.get("/my-profile")
+@roles_required("Admin", "Supervisor", "Employee")
+def my_organization_profile():
+    """Return safe organization identity fields for the signed-in member."""
+    user = get_current_user()
+    if not user or not user.organization_id:
+        return jsonify(organization=None), 200
+    organization = db.session.get(Organization, user.organization_id)
+    if organization is None:
+        return jsonify(organization=None), 200
+    return jsonify(organization={
+        "id": organization.id,
+        "name": organization.name,
+        "description": organization.description,
+        "avatar_url": organization.avatar_url,
+        "contact_email": organization.contact_email,
+        "status": organization.status,
+    }), 200
+
 @organization_bp.route("/current", methods=["GET", "POST", "PATCH"])
 @roles_required("Admin")
 def current_organization():
@@ -272,7 +291,13 @@ def current_organization():
             "organization": _organization_payload(organization),
         }), 409
 
-    organization = Organization(name=name.strip())
+    description = data.get("description") or ""
+    if not isinstance(description, str):
+        return jsonify({"error": "Organization description must be text."}), 400
+    if len(description.strip()) > 5000:
+        return jsonify({"error": "Organization description must be 5000 characters or fewer."}), 400
+
+    organization = Organization(name=name.strip(), description=description.strip() or None)
     admin.organization = organization
     try:
         db.session.add(organization)
