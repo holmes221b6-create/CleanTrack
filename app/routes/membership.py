@@ -1,4 +1,7 @@
 from flask import Blueprint, jsonify, request
+import os
+import smtplib
+from email.message import EmailMessage
 from flask_jwt_extended import verify_jwt_in_request
 
 from app.extensions import db
@@ -6,6 +9,7 @@ from app.models.membership_request import MembershipRequest
 from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.models.notification import Notification
+from app.models.organization import Organization
 from app.services.permissions import get_current_user, roles_required
 
 
@@ -14,6 +18,29 @@ membership_bp = Blueprint(
     __name__,
     url_prefix="/api/membership",
 )
+
+
+def _send_membership_approval_email(to_email, subject, body):
+    """Send approval mail using backend-only Gmail SMTP credentials."""
+    sender = (os.getenv("GMAIL_SENDER") or "").strip()
+    app_password = (os.getenv("GMAIL_APP_PASSWORD") or "").strip()
+    if not sender or not app_password:
+        return False, "Email is not configured on the server. Set GMAIL_SENDER and GMAIL_APP_PASSWORD."
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = to_email
+    message["Subject"] = subject
+    message.set_content(body)
+    try:
+        with smtplib.SMTP(os.getenv("SMTP_HOST", "smtp.gmail.com"), int(os.getenv("SMTP_PORT", "587")), timeout=15) as smtp:
+            smtp.ehlo()
+            smtp.starttls()
+            smtp.ehlo()
+            smtp.login(sender, app_password)
+            smtp.send_message(message)
+        return True, "Approval email sent."
+    except Exception:
+        return False, "Membership was approved, but the email could not be sent. Check the backend email configuration and logs."
 
 
 @membership_bp.get("/requests")
@@ -57,7 +84,10 @@ def review_membership_request(request_id):
     data = request.get_json(silent=True) or {}
 
     decision = data.get("decision", "").strip().lower()
-    review_message = data.get("review_message", "").strip()
+    review_message = str(data.get("review_message") or "").strip()
+    approval_email_message = str(data.get("approval_email_message") or "").strip()
+    if len(review_message) > 2000 or len(approval_email_message) > 10000:
+        return jsonify({"error": "Review notes must be 2,000 characters or fewer and approval email text 10,000 characters or fewer."}), 400
 
     if decision not in {"approve", "reject"}:
         return jsonify({
@@ -143,12 +173,51 @@ def review_membership_request(request_id):
             "error": "Membership review could not be saved."
         }), 500
 
+    email_sent = None
+    email_message = None
+    if decision == "approve":
+        organization = db.session.get(Organization, admin.organization_id)
+        org_name = organization.name if organization else "your organization"
+        default_message = (
+            "Hello {name},\n\n"
+            "Good news! Your request to join {organization} on CleanTrack has been approved. "
+            "Your account is now active, and you can sign in using {email}.\n\n"
+            "Approved role: {role}\n"
+            "Organization: {organization}\n\n"
+            "Welcome aboard!\n"
+            "{organization} Admin team"
+        )
+        template = approval_email_message or default_message
+        values = {
+            "name": applicant.full_name or "there",
+            "organization": org_name,
+            "role": membership_request.requested_role or applicant.role or "Member",
+            "email": applicant.email or "",
+        }
+        try:
+            body = template.format_map(values)
+        except (KeyError, ValueError):
+            body = template
+        email_sent, email_message = _send_membership_approval_email(
+            applicant.email,
+            "Your CleanTrack membership request was approved",
+            body,
+        )
+
+    response_message = (
+        "Membership request approved."
+        if decision == "approve"
+        else "Membership request rejected."
+    )
+    if decision == "approve" and email_sent is False:
+        response_message += " " + (email_message or "The approval email was not sent.")
+    elif decision == "approve" and email_sent:
+        response_message += " Approval email sent."
+
     return jsonify({
-        "message": (
-            "Membership request approved."
-            if decision == "approve"
-            else "Membership request rejected."
-        ),
+        "message": response_message,
+        "email_sent": email_sent,
+        "email_message": email_message,
         "membership_request": membership_request.to_dict(),
         "user": applicant.to_dict(),
     }), 200
