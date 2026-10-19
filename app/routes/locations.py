@@ -204,6 +204,33 @@ def _package_boundary(value):
     return {"type": "Polygon", "coordinates": [normalized]}
 
 
+def _package_indoor_boundary(value):
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict) or value.get("type") != "IndoorPolygon":
+        raise ValueError("Indoor boundary must be an IndoorPolygon object or null.")
+    points = value.get("points")
+    if not isinstance(points, list) or not 3 <= len(points) <= 500:
+        raise ValueError("Indoor boundary needs between 3 and 500 points.")
+    normalized = []
+    for point in points:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise ValueError("Each indoor point must contain normalized x and y coordinates.")
+        x, y = point
+        if isinstance(x, bool) or isinstance(y, bool):
+            raise ValueError("Indoor coordinates must be numbers between 0 and 1.")
+        try:
+            x, y = float(x), float(y)
+        except (TypeError, ValueError):
+            raise ValueError("Indoor coordinates must be numbers between 0 and 1.")
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            raise ValueError("Indoor coordinates must be between 0 and 1.")
+        normalized.append([round(x, 6), round(y, 6)])
+    if len({(p[0], p[1]) for p in normalized}) < 3:
+        raise ValueError("Indoor boundary needs at least three distinct points.")
+    return {"type": "IndoorPolygon", "points": normalized}
+
+
 def _validate_location_package(data):
     if not isinstance(data, dict) or data.get("format") != "cleantrack-location-package":
         raise ValueError('Expected a "cleantrack-location-package" JSON object.')
@@ -255,6 +282,7 @@ def _validate_location_package(data):
             raise ValueError(f'Floor label for Zone "{zone_name.strip()}" must be 120 characters or fewer.')
         try:
             boundary = _package_boundary(zone.get("boundary"))
+            indoor_boundary = _package_indoor_boundary(zone.get("indoor_boundary"))
         except ValueError as error:
             raise ValueError(f'Zone "{zone_name.strip()}": {error}')
         normalized_zones.append({
@@ -263,6 +291,7 @@ def _validate_location_package(data):
             "description": (description or "").strip() or None,
             "floor_label": (floor_label or "").strip() or None,
             "boundary": boundary,
+            "indoor_boundary": indoor_boundary,
         })
     return {
         "location": {
@@ -296,6 +325,7 @@ def preview_location_package():
         "zones": package["zones"],
         "zone_count": len(package["zones"]),
         "zones_with_boundaries": sum(1 for zone in package["zones"] if zone["boundary"]),
+        "zones_with_indoor_boundaries": sum(1 for zone in package["zones"] if zone["indoor_boundary"]),
         "matching_locations": [{"id": row.id, "name": row.name, "status": row.status} for row in matches],
         "message": "Validated only. No records have been saved.",
     }), 200
@@ -397,7 +427,7 @@ def import_location_package():
         for item in package["zones"]:
             zone = Zone(
                 name=item["name"], description=item["description"],
-                floor_label=item["floor_label"], boundary=item["boundary"],
+                floor_label=item["floor_label"], boundary=item["boundary"], indoor_boundary=item["indoor_boundary"],
                 location_id=location.id, team_id=None, supervisor_id=None,
                 organization_id=admin.organization_id, status="active",
             )
@@ -409,7 +439,7 @@ def import_location_package():
                 action="zone.created", resource_type="Zone", resource_id=str(zone.id),
                 details={"source": "cleantrack-location-package", "location_id": location.id,
                          "zone_name": zone.name, "source_id": item["source_id"],
-                         "has_boundary": bool(zone.boundary)},
+                         "has_boundary": bool(zone.boundary), "has_indoor_boundary": bool(zone.indoor_boundary)},
                 ip_address=request.remote_addr,
                 user_agent=(request.headers.get("User-Agent", "")[:300] or None),
             ))
