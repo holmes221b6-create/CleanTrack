@@ -1144,6 +1144,154 @@ def import_location_package():
     finally:
         conn.close()
 
+
+# ─── Private location floor-plan files (PDF and raster images) ─────────────────
+# Store the organisation's original plan without inventing or altering its geometry.
+def _ensure_location_floor_plan_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_floor_plans (
+            location_id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            content BLOB NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+def _floor_plan_location_scope(conn, location_id, uid, role):
+    row = conn.execute(
+        "SELECT id, organization_id, name FROM locations WHERE id=?",
+        (str(location_id),)
+    ).fetchone()
+    if not row:
+        return None, None
+    if role == "admin":
+        org_id = _current_user_organization(conn, uid)
+        if not org_id or str(row["organization_id"]) != str(org_id):
+            return None, None
+        return row, org_id
+    if role == "supervisor":
+        own = conn.execute(
+            "SELECT location_id FROM users WHERE id=?",
+            (uid,)
+        ).fetchone()
+        if not own or str(own["location_id"] or "") != str(location_id):
+            return None, None
+        return row, row["organization_id"]
+    return None, None
+
+@app.route("/api/locations/<location_id>/floor-plan", methods=["GET"])
+@jwt_required()
+@require_roles("admin", "supervisor")
+def get_location_floor_plan(location_id):
+    conn = get_db()
+    try:
+        _ensure_location_floor_plan_table(conn)
+        location, org_id = _floor_plan_location_scope(
+            conn, location_id, get_jwt_identity(), get_jwt().get("role")
+        )
+        if not location:
+            return jsonify(error="Location not found or access denied."), 404
+        row = conn.execute(
+            "SELECT filename,mime_type,content,size_bytes,updated_at FROM location_floor_plans WHERE location_id=? AND organization_id=?",
+            (str(location_id), str(org_id))
+        ).fetchone()
+        if not row:
+            return jsonify(error="No floor plan has been uploaded for this Location yet."), 404
+        response = send_file(
+            BytesIO(bytes(row["content"])),
+            mimetype=row["mime_type"],
+            as_attachment=False,
+            download_name=row["filename"],
+            max_age=0
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-CleanTrack-Floor-Plan-Name"] = row["filename"]
+        return response
+    finally:
+        conn.close()
+
+@app.route("/api/locations/<location_id>/floor-plan", methods=["POST"])
+@jwt_required()
+@require_roles("admin")
+def upload_location_floor_plan(location_id):
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify(error="Choose a PDF, PNG, JPG, JPEG or WebP floor-plan file."), 400
+    filename = os.path.basename(uploaded.filename).replace("\\", "_").replace("/", "_")[:180]
+    extension = os.path.splitext(filename)[1].lower()
+    allowed = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
+    if extension not in allowed:
+        return jsonify(error="Supported floor-plan files are PDF, PNG, JPG, JPEG and WebP."), 415
+    content = uploaded.read()
+    if not content or len(content) > 15 * 1024 * 1024:
+        return jsonify(error="Choose a non-empty floor plan no larger than 15 MB."), 413
+    signatures = [
+        (".pdf", b"%PDF-", "application/pdf"),
+        (".png", b"\\x89PNG\\r\\n\\x1a\\n", "image/png"),
+        (".jpg", b"\\xff\\xd8\\xff", "image/jpeg"),
+        (".jpeg", b"\\xff\\xd8\\xff", "image/jpeg"),
+    ]
+    mime_type = None
+    for ext, signature, mime in signatures:
+        if extension == ext and content.startswith(signature):
+            mime_type = mime
+            break
+    if extension == ".webp" and len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        mime_type = "image/webp"
+    if not mime_type:
+        return jsonify(error="The file contents do not match the selected PDF or image format."), 415
+    conn = get_db()
+    try:
+        _ensure_location_floor_plan_table(conn)
+        uid, role = get_jwt_identity(), get_jwt().get("role")
+        location, org_id = _floor_plan_location_scope(conn, location_id, uid, role)
+        if not location:
+            return jsonify(error="Location not found in your organization."), 404
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        conn.execute("""
+            INSERT INTO location_floor_plans
+                (location_id,organization_id,filename,mime_type,content,size_bytes,updated_by,updated_at)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(location_id) DO UPDATE SET
+                organization_id=excluded.organization_id,
+                filename=excluded.filename,mime_type=excluded.mime_type,
+                content=excluded.content,size_bytes=excluded.size_bytes,
+                updated_by=excluded.updated_by,updated_at=excluded.updated_at
+        """, (str(location_id), str(org_id), filename, mime_type, content, len(content), str(uid), now))
+        conn.commit()
+        return jsonify(message="Floor plan uploaded and saved privately.", filename=filename,
+                       mime_type=mime_type, size_bytes=len(content), updated_at=now), 201
+    finally:
+        conn.close()
+
+@app.route("/api/locations/<location_id>/floor-plan", methods=["DELETE"])
+@jwt_required()
+@require_roles("admin")
+def delete_location_floor_plan(location_id):
+    conn = get_db()
+    try:
+        _ensure_location_floor_plan_table(conn)
+        location, org_id = _floor_plan_location_scope(
+            conn, location_id, get_jwt_identity(), get_jwt().get("role")
+        )
+        if not location:
+            return jsonify(error="Location not found in your organization."), 404
+        cur = conn.execute(
+            "DELETE FROM location_floor_plans WHERE location_id=? AND organization_id=?",
+            (str(location_id), str(org_id))
+        )
+        conn.commit()
+        if not cur.rowcount:
+            return jsonify(error="No floor plan was saved for this Location."), 404
+        return jsonify(message="The Location floor plan was removed. Zones and boundaries were retained.")
+    finally:
+        conn.close()
+
 # ─── zones ────────────────────────────────────────────────────────────────────
 @app.route("/api/zones", methods=["GET"])
 @jwt_required()
