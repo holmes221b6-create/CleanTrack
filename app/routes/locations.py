@@ -176,6 +176,264 @@ def locations_collection():
     }), 201
 
 
+def _package_boundary(value):
+    """Validate a supplied outdoor GeoJSON Polygon; never invent geometry."""
+    if value in (None, {}):
+        return None
+    if not isinstance(value, dict) or value.get("type") != "Polygon":
+        raise ValueError("Zone boundary must be a GeoJSON Polygon or null.")
+    coordinates = value.get("coordinates")
+    if not isinstance(coordinates, list) or not coordinates or not isinstance(coordinates[0], list):
+        raise ValueError("Zone boundary coordinates are invalid.")
+    ring = coordinates[0]
+    if len(ring) < 4:
+        raise ValueError("A boundary needs at least three points and a closing point.")
+    normalized = []
+    for point in ring:
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise ValueError("Each boundary point must contain longitude and latitude.")
+        try:
+            lon, lat = float(point[0]), float(point[1])
+        except (TypeError, ValueError):
+            raise ValueError("Boundary coordinates must be numeric.")
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            raise ValueError("Boundary coordinates are outside valid longitude/latitude ranges.")
+        normalized.append([lon, lat])
+    if normalized[0] != normalized[-1]:
+        raise ValueError("The boundary polygon must be closed (last point matches first point).")
+    return {"type": "Polygon", "coordinates": [normalized]}
+
+
+def _validate_location_package(data):
+    if not isinstance(data, dict) or data.get("format") != "cleantrack-location-package":
+        raise ValueError('Expected a "cleantrack-location-package" JSON object.')
+    if data.get("version") != 1:
+        raise ValueError("Unsupported Location Package version. Supported version: 1.")
+    location = data.get("location")
+    zones = data.get("zones")
+    if not isinstance(location, dict):
+        raise ValueError('The package must contain a "location" object.')
+    name = location.get("name")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 150:
+        raise ValueError("Location name is required and must be 150 characters or fewer.")
+    for field, maximum in (("address", 300), ("description", 10000)):
+        value = location.get(field, "")
+        if value is not None and (not isinstance(value, str) or len(value) > maximum):
+            raise ValueError(f"Location {field} must be text of {maximum} characters or fewer.")
+    latitude, longitude = location.get("latitude"), location.get("longitude")
+    if (latitude in (None, "")) != (longitude in (None, "")):
+        raise ValueError("Provide both Location latitude and longitude, or leave both blank.")
+    if latitude not in (None, ""):
+        if isinstance(latitude, bool) or isinstance(longitude, bool):
+            raise ValueError("Location coordinates must be numbers.")
+        try:
+            latitude, longitude = float(latitude), float(longitude)
+        except (TypeError, ValueError):
+            raise ValueError("Location coordinates must be numbers.")
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            raise ValueError("Location coordinates are outside valid latitude/longitude ranges.")
+    else:
+        latitude = longitude = None
+    if not isinstance(zones, list) or len(zones) > 500:
+        raise ValueError('The package "zones" field must be an array containing at most 500 zones.')
+    normalized_zones, names = [], set()
+    for index, zone in enumerate(zones, start=1):
+        if not isinstance(zone, dict):
+            raise ValueError(f"Zone {index} must be an object.")
+        zone_name = zone.get("name")
+        if not isinstance(zone_name, str) or not zone_name.strip() or len(zone_name.strip()) > 150:
+            raise ValueError(f"Zone {index} needs a name of 150 characters or fewer.")
+        key = zone_name.strip().casefold()
+        if key in names:
+            raise ValueError(f'The package contains duplicate Zone name "{zone_name.strip()}".')
+        names.add(key)
+        description = zone.get("description", "")
+        floor_label = zone.get("floor_label", "")
+        if description is not None and (not isinstance(description, str) or len(description) > 4000):
+            raise ValueError(f'Description for Zone "{zone_name.strip()}" must be 4,000 characters or fewer.')
+        if floor_label is not None and (not isinstance(floor_label, str) or len(floor_label) > 120):
+            raise ValueError(f'Floor label for Zone "{zone_name.strip()}" must be 120 characters or fewer.')
+        try:
+            boundary = _package_boundary(zone.get("boundary"))
+        except ValueError as error:
+            raise ValueError(f'Zone "{zone_name.strip()}": {error}')
+        normalized_zones.append({
+            "source_id": str(zone.get("source_id", "")).strip()[:200] or None,
+            "name": zone_name.strip(),
+            "description": (description or "").strip() or None,
+            "floor_label": (floor_label or "").strip() or None,
+            "boundary": boundary,
+        })
+    return {
+        "location": {
+            "name": name.strip(),
+            "address": (location.get("address") or "").strip() or None,
+            "description": (location.get("description") or "").strip() or None,
+            "latitude": latitude,
+            "longitude": longitude,
+            "team_id": location.get("team_id"),
+        },
+        "zones": normalized_zones,
+    }
+
+
+@locations_bp.post("/import-package/preview")
+@roles_required("Admin")
+def preview_location_package():
+    try:
+        package = _validate_location_package(request.get_json(silent=True))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    admin = get_current_user()
+    name = package["location"]["name"]
+    matches = Location.query.filter(
+        Location.organization_id == admin.organization_id,
+        func.lower(Location.name) == name.casefold(),
+    ).all()
+    return jsonify({
+        "valid": True,
+        "location": package["location"],
+        "zones": package["zones"],
+        "zone_count": len(package["zones"]),
+        "zones_with_boundaries": sum(1 for zone in package["zones"] if zone["boundary"]),
+        "matching_locations": [{"id": row.id, "name": row.name, "status": row.status} for row in matches],
+        "message": "Validated only. No records have been saved.",
+    }), 200
+
+
+@locations_bp.post("/import-package")
+@roles_required("Admin")
+def import_location_package():
+    admin = get_current_user()
+    data = request.get_json(silent=True) or {}
+    try:
+        package = _validate_location_package(data.get("package"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+
+    mode = data.get("mode")
+    if mode not in {"create_location", "existing_location"}:
+        return jsonify({"error": 'Mode must be "create_location" or "existing_location".'}), 400
+
+    parent = package["location"]
+    location = None
+    if mode == "create_location":
+        duplicate = Location.query.filter(
+            Location.organization_id == admin.organization_id,
+            func.lower(Location.name) == parent["name"].casefold(),
+        ).first()
+        if duplicate:
+            return jsonify({
+                "error": "A Location with this name already exists. Choose the existing-location workflow to attach Zones to it.",
+                "matching_location_id": duplicate.id,
+                "matching_location_name": duplicate.name,
+            }), 409
+        team_id = parent.get("team_id")
+        if team_id not in (None, ""):
+            try:
+                if isinstance(team_id, bool):
+                    raise ValueError()
+                team_id = int(team_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Location team_id must be an integer."}), 400
+            team = Team.query.filter_by(id=team_id, organization_id=admin.organization_id).first()
+            if team is None or team.status != "active":
+                return jsonify({"error": "Location team_id must identify an active team in your organization."}), 400
+        else:
+            team_id = None
+    else:
+        raw_location_id = data.get("location_id")
+        try:
+            if isinstance(raw_location_id, bool):
+                raise ValueError()
+            raw_location_id = int(raw_location_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Choose a valid existing Location."}), 400
+        location = Location.query.filter_by(
+            id=raw_location_id, organization_id=admin.organization_id
+        ).first()
+        if location is None or location.status != "active":
+            return jsonify({"error": "Choose an active Location in your organization."}), 400
+        team_id = None
+
+    target_id = location.id if location else None
+    if target_id is not None:
+        existing_names = {
+            row[0].casefold() for row in db.session.query(Zone.name).filter_by(
+                organization_id=admin.organization_id, location_id=target_id
+            ).all()
+        }
+        conflicts = [zone["name"] for zone in package["zones"] if zone["name"].casefold() in existing_names]
+        if conflicts:
+            return jsonify({
+                "error": "These Zone names already exist at the selected Location: " + ", ".join(conflicts[:10]) + ". No records were imported.",
+                "duplicate_zones": conflicts,
+            }), 409
+
+    created_zones = []
+    try:
+        if location is None:
+            location = Location(
+                name=parent["name"], address=parent["address"],
+                description=parent["description"], latitude=parent["latitude"],
+                longitude=parent["longitude"], team_id=team_id,
+                organization_id=admin.organization_id, status="active",
+            )
+            db.session.add(location)
+            db.session.flush()
+            _audit(admin, location, "location.created", {
+                "source": "cleantrack-location-package",
+                "name": location.name, "zone_count": len(package["zones"]),
+            })
+        target_id = location.id
+        existing_names = {
+            row[0].casefold() for row in db.session.query(Zone.name).filter_by(
+                organization_id=admin.organization_id, location_id=target_id
+            ).all()
+        }
+        conflicts = [zone["name"] for zone in package["zones"] if zone["name"].casefold() in existing_names]
+        if conflicts:
+            raise ValueError("These Zone names already exist at the selected Location: " + ", ".join(conflicts[:10]) + ".")
+        for item in package["zones"]:
+            zone = Zone(
+                name=item["name"], description=item["description"],
+                floor_label=item["floor_label"], boundary=item["boundary"],
+                location_id=location.id, team_id=None, supervisor_id=None,
+                organization_id=admin.organization_id, status="active",
+            )
+            db.session.add(zone)
+            db.session.flush()
+            created_zones.append(zone)
+            db.session.add(AuditLog(
+                actor_id=admin.id, organization_id=admin.organization_id,
+                action="zone.created", resource_type="Zone", resource_id=str(zone.id),
+                details={"source": "cleantrack-location-package", "location_id": location.id,
+                         "zone_name": zone.name, "source_id": item["source_id"],
+                         "has_boundary": bool(zone.boundary)},
+                ip_address=request.remote_addr,
+                user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+            ))
+        _notify_admins(
+            admin, location, "Location package imported",
+            f'{admin.full_name} imported {len(created_zones)} zone(s) into "{location.name}".',
+        )
+        db.session.commit()
+    except ValueError as error:
+        db.session.rollback()
+        return jsonify({"error": str(error)}), 409
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "The Location Package could not be imported. No records were saved."}), 500
+
+    return jsonify({
+        "message": f'Imported Location "{location.name}" and {len(created_zones)} Zone(s) successfully.' if mode == "create_location" else f'Imported {len(created_zones)} Zone(s) into "{location.name}" successfully.',
+        "location": _payload(location),
+        "zones": [zone.to_dict() for zone in created_zones],
+        "created_location": mode == "create_location",
+        "zone_count": len(created_zones),
+    }), 201
+
+
 @locations_bp.route("/<int:location_id>", methods=["GET", "PATCH"])
 @roles_required("Admin")
 def location_detail(location_id):
