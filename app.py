@@ -1,4 +1,4 @@
-import os, uuid, random, io, base64
+import os, uuid, random, io, base64, json
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
@@ -924,15 +924,12 @@ def create_location():
 
     conn.execute(
         """INSERT INTO locations
-           (id, name, address, city, country, organization_id)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           (id, name, address, city, country, description, latitude, longitude, team_id, status, organization_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            lid,
-            d["name"],
-            d.get("address"),
-            d.get("city"),
-            d.get("country"),
-            org_id
+            lid, str(d["name"]).strip(), d.get("address"), d.get("city"), d.get("country"),
+            d.get("description"), d.get("latitude"), d.get("longitude"), d.get("team_id"),
+            d.get("status", "active"), org_id
         )
     )
 
@@ -986,14 +983,17 @@ def update_location(lid):
            SET name=COALESCE(?,name),
                address=COALESCE(?,address),
                city=COALESCE(?,city),
-               country=COALESCE(?,country)
+               country=COALESCE(?,country),
+               description=COALESCE(?,description),
+               latitude=COALESCE(?,latitude),
+               longitude=COALESCE(?,longitude),
+               team_id=COALESCE(?,team_id),
+               status=COALESCE(?,status)
            WHERE id=?""",
         (
-            d.get("name"),
-            d.get("address"),
-            d.get("city"),
-            d.get("country"),
-            lid
+            d.get("name"), d.get("address"), d.get("city"), d.get("country"),
+            d.get("description"), d.get("latitude"), d.get("longitude"),
+            d.get("team_id"), d.get("status"), lid
         )
     )
 
@@ -1028,6 +1028,122 @@ def delete_location(lid):
     conn.close()
 
     return jsonify(message="Deleted")
+
+# ─── CleanTrack Location Package API ─────────────────────────────────────────
+def _validate_location_package(payload):
+    if not isinstance(payload, dict) or payload.get("format") != "cleantrack-location-package":
+        raise ValueError("Use a CleanTrack Location Package JSON file.")
+    location = payload.get("location")
+    zones = payload.get("zones", [])
+    if not isinstance(location, dict) or not str(location.get("name") or "").strip():
+        raise ValueError("The package must include a Location name.")
+    if not isinstance(zones, list) or len(zones) > 500:
+        raise ValueError("Zones must be an array containing no more than 500 entries.")
+    cleaned, seen = [], set()
+    for i, z in enumerate(zones, 1):
+        if not isinstance(z, dict) or not str(z.get("name") or "").strip():
+            raise ValueError(f"Zone {i} must have a name.")
+        name = str(z["name"]).strip()
+        if name.casefold() in seen:
+            raise ValueError(f'Duplicate Zone name in package: "{name}".')
+        seen.add(name.casefold())
+        boundary = z.get("boundary")
+        if boundary is not None:
+            if not isinstance(boundary, dict) or boundary.get("type") not in ("Polygon", "MultiPolygon") or not isinstance(boundary.get("coordinates"), list) or not boundary["coordinates"]:
+                raise ValueError(f'Zone "{name}" must use a non-empty GeoJSON Polygon or MultiPolygon boundary.')
+            if len(json.dumps(boundary)) > 500000:
+                raise ValueError(f'Zone "{name}" boundary is too large.')
+        cleaned.append({"name":name[:160],"floor":str(z.get("floor") or z.get("floor_label") or "")[:80] or None,
+          "floor_label":str(z.get("floor_label") or z.get("floor") or "")[:80] or None,
+          "description":str(z.get("description") or "")[:2000] or None,
+          "type":str(z.get("type") or "other")[:60],"boundary":boundary})
+    return location, cleaned
+
+@app.route("/api/locations/import-package/preview", methods=["POST"])
+@jwt_required()
+@require_roles("admin", "supervisor")
+def preview_location_package():
+    try:
+        location, zones = _validate_location_package(request.get_json() or {})
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    uid, role = get_jwt_identity(), get_jwt().get("role")
+    conn = get_db()
+    if role == "admin":
+        org = _current_user_organization(conn, uid)
+        matches = rows_to_list(conn.execute("SELECT id,name,address,city,country FROM locations WHERE organization_id=? AND lower(name)=lower(?)", (org, str(location["name"]).strip())).fetchall()) if org else []
+    else:
+        own = conn.execute("SELECT location_id FROM users WHERE id=?", (uid,)).fetchone()
+        matches = rows_to_list(conn.execute("SELECT id,name,address,city,country FROM locations WHERE id=? AND lower(name)=lower(?)", (own["location_id"], str(location["name"]).strip())).fetchall()) if own and own["location_id"] else []
+    conn.close()
+    return jsonify(location=location,zones=zones,matching_locations=matches,
+        zones_with_boundaries=sum(bool(z["boundary"]) for z in zones),
+        zones_named_only=sum(not z["boundary"] for z in zones))
+
+@app.route("/api/locations/import-package", methods=["POST"])
+@jwt_required()
+@require_roles("admin", "supervisor")
+def import_location_package():
+    d = request.get_json() or {}
+    try:
+        location_data, zones_data = _validate_location_package(d.get("package"))
+    except ValueError as exc:
+        return jsonify(error=str(exc)), 400
+    mode = d.get("mode", "create_location")
+    if mode not in ("create_location", "existing_location"):
+        return jsonify(error="Invalid import mode."), 400
+    uid, role = get_jwt_identity(), get_jwt().get("role")
+    if mode == "create_location" and role != "admin":
+        return jsonify(error="Only an Admin can create a Location from a package."), 403
+    conn = get_db()
+    try:
+        org = _current_user_organization(conn, uid) if role == "admin" else None
+        if role == "admin" and not org:
+            return jsonify(error="Create your organization before importing."), 409
+        if mode == "create_location":
+            lat, lon = location_data.get("latitude"), location_data.get("longitude")
+            if lat not in (None, "") and not -90 <= float(lat) <= 90: return jsonify(error="Invalid latitude."), 400
+            if lon not in (None, "") and not -180 <= float(lon) <= 180: return jsonify(error="Invalid longitude."), 400
+            lid = str(uuid.uuid4())
+            conn.execute("""INSERT INTO locations
+              (id,name,address,city,country,description,latitude,longitude,team_id,status,organization_id)
+              VALUES (?,?,?,?,?,?,?,?,?,'active',?)""",
+              (lid,str(location_data["name"]).strip(),location_data.get("address"),location_data.get("city"),
+               location_data.get("country"),location_data.get("description"),lat or None,lon or None,location_data.get("team_id"),org))
+        else:
+            lid = str(d.get("location_id") or "")
+            target = conn.execute("SELECT id,organization_id FROM locations WHERE id=?", (lid,)).fetchone()
+            if not target: return jsonify(error="Parent Location not found."), 404
+            if role == "admin" and target["organization_id"] != org: return jsonify(error="Parent Location not found in your organization."), 404
+            if role == "supervisor":
+                own = conn.execute("SELECT location_id FROM users WHERE id=?", (uid,)).fetchone()
+                if not own or own["location_id"] != lid: return jsonify(error="You can only import into your assigned Location."), 403
+        existing = {str(x["name"]).strip().casefold() for x in conn.execute("SELECT name FROM zones WHERE location_id=?", (lid,)).fetchall()}
+        dup = [z["name"] for z in zones_data if z["name"].casefold() in existing]
+        if dup:
+            conn.rollback()
+            return jsonify(error="Import stopped because these Zone names already exist: "+", ".join(dup[:20])+". No records were saved."), 409
+        for z in zones_data:
+            zid = str(uuid.uuid4())
+            qr = gen_qr_b64(json.dumps({"zoneId":zid,"name":z["name"]}, ensure_ascii=False))
+            conn.execute("""INSERT INTO zones
+              (id,location_id,name,floor,floor_label,description,boundary_json,type,qr_code,cleaning_interval_minutes,status,last_cleaned_at)
+              VALUES (?,?,?,?,?,?,?,?,?,60,'pending',NULL)""",
+              (zid,lid,z["name"],z["floor"],z["floor_label"],z["description"],
+               json.dumps(z["boundary"]) if z["boundary"] else None,z["type"],qr))
+        conn.commit()
+        saved = row_to_dict(conn.execute("SELECT id,name,address,city,country,description,latitude,longitude FROM locations WHERE id=?", (lid,)).fetchone())
+        return jsonify(message=f"Imported {len(zones_data)} Zone(s) into {saved['name']}.",location=saved,imported=len(zones_data)), 201
+    except (TypeError, ValueError) as exc:
+        conn.rollback()
+        return jsonify(error="Invalid coordinates or package data: "+str(exc)), 400
+    except Exception:
+        conn.rollback()
+        app.logger.exception("Location Package import failed")
+        return jsonify(error="The package could not be imported. No records were saved."), 500
+    finally:
+        conn.close()
+
 # ─── zones ────────────────────────────────────────────────────────────────────
 @app.route("/api/zones", methods=["GET"])
 @jwt_required()
@@ -1124,12 +1240,14 @@ def get_zones():
 
         params = (uid,)
 
-    rows = rows_to_list(
-        conn.execute(q, params).fetchall()
-    )
-
+    rows = rows_to_list(conn.execute(q, params).fetchall())
+    for row in rows:
+        try:
+            row["boundary"] = json.loads(row.get("boundary_json")) if row.get("boundary_json") else None
+        except (TypeError, ValueError):
+            row["boundary"] = None
+        row["has_indoor_boundary"] = bool(row.get("boundary"))
     conn.close()
-
     return jsonify(rows)
 #get-zones-zid&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
 @app.route("/api/zones/<zid>", methods=["GET"])
@@ -1201,9 +1319,12 @@ def get_zone(zid):
             return jsonify(error="Access denied"), 403
 
     result = row_to_dict(row)
-
+    try:
+        result["boundary"] = json.loads(result.get("boundary_json")) if result.get("boundary_json") else None
+    except (TypeError, ValueError):
+        result["boundary"] = None
+    result["has_indoor_boundary"] = bool(result.get("boundary"))
     conn.close()
-
     return jsonify(result)
 #create_zones___________________________________________________________________
 @app.route("/api/zones", methods=["POST"])
@@ -1258,19 +1379,13 @@ def create_zone():
 
     conn.execute(
         """INSERT INTO zones
-           (id, location_id, name, floor, type, qr_code,
+           (id, location_id, name, floor, floor_label, description, boundary_json, type, qr_code,
             cleaning_interval_minutes, status, last_cleaned_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
-            zid,
-            d["location_id"],
-            d["name"],
-            d.get("floor"),
-            d.get("type", "bathroom"),
-            qr,
-            d.get("cleaning_interval_minutes", 60),
-            "pending",
-            None
+            zid, d["location_id"], d["name"], d.get("floor"), d.get("floor_label"),
+            d.get("description"), json.dumps(d.get("boundary")) if isinstance(d.get("boundary"), dict) else None,
+            d.get("type", "bathroom"), qr, d.get("cleaning_interval_minutes", 60), "pending", None
         )
     )
 
@@ -1327,16 +1442,16 @@ def update_zone(zid):
            SET name=COALESCE(?,name),
                floor=COALESCE(?,floor),
                type=COALESCE(?,type),
+               floor_label=COALESCE(?,floor_label),
+               description=COALESCE(?,description),
+               boundary_json=COALESCE(?,boundary_json),
                cleaning_interval_minutes=COALESCE(?,cleaning_interval_minutes),
                status=COALESCE(?,status)
            WHERE id=?""",
         (
-            d.get("name"),
-            d.get("floor"),
-            d.get("type"),
-            d.get("cleaning_interval_minutes"),
-            d.get("status"),
-            zid
+            d.get("name"), d.get("floor"), d.get("type"), d.get("floor_label"),
+            d.get("description"), json.dumps(d.get("boundary")) if isinstance(d.get("boundary"), dict) else None,
+            d.get("cleaning_interval_minutes"), d.get("status"), zid
         )
     )
 
