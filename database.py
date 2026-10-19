@@ -37,6 +37,11 @@ def init_db():
             address TEXT,
             city TEXT,
             country TEXT,
+            description TEXT,
+            latitude REAL,
+            longitude REAL,
+            team_id TEXT,
+            status TEXT DEFAULT 'active',
             organization_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -45,6 +50,9 @@ def init_db():
             location_id TEXT NOT NULL,
             name TEXT NOT NULL,
             floor TEXT,
+            floor_label TEXT,
+            description TEXT,
+            boundary_json TEXT,
             type TEXT DEFAULT 'bathroom',
             qr_code TEXT,
             cleaning_interval_minutes INTEGER DEFAULT 60,
@@ -121,10 +129,18 @@ def init_db():
             "membership_status": "TEXT NOT NULL DEFAULT 'approved'"
         },
         "locations": {
-            "organization_id": "TEXT"
+            "organization_id": "TEXT",
+            "description": "TEXT",
+            "latitude": "REAL",
+            "longitude": "REAL",
+            "team_id": "TEXT",
+            "status": "TEXT DEFAULT 'active'"
         },
         "zones": {
-            "id": "TEXT"
+            "id": "TEXT",
+            "floor_label": "TEXT",
+            "description": "TEXT",
+            "boundary_json": "TEXT"
         }
     }
     for table, columns in migrations.items():
