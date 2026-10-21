@@ -1426,6 +1426,11 @@ def get_zone(zid):
 
     if role == "admin":
         result = row_to_dict(row)
+        try:
+            result["boundary"] = json.loads(result.get("boundary_json")) if result.get("boundary_json") else None
+        except (TypeError, ValueError):
+            result["boundary"] = None
+        result["has_indoor_boundary"] = bool(result.get("boundary"))
         conn.close()
         return jsonify(result)
 
@@ -1592,13 +1597,13 @@ def update_zone(zid):
                type=COALESCE(?,type),
                floor_label=COALESCE(?,floor_label),
                description=COALESCE(?,description),
-               boundary_json=COALESCE(?,boundary_json),
+               boundary_json=CASE WHEN ? THEN ? ELSE boundary_json END,
                cleaning_interval_minutes=COALESCE(?,cleaning_interval_minutes),
                status=COALESCE(?,status)
            WHERE id=?""",
         (
             d.get("name"), d.get("floor"), d.get("type"), d.get("floor_label"),
-            d.get("description"), json.dumps(d.get("boundary")) if isinstance(d.get("boundary"), dict) else None,
+            d.get("description"), "boundary" in d, json.dumps(d.get("boundary")) if isinstance(d.get("boundary"), dict) else None,
             d.get("cleaning_interval_minutes"), d.get("status"), zid
         )
     )
