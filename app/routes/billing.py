@@ -101,6 +101,18 @@ def start_trial():
         return jsonify({"error": "This organization has already used its 14-day Premium trial."}), 409
     if item.status == "trialing":
         return jsonify({"error": "Your organization's Premium trial is already active.", "subscription": item.to_dict()}), 409
+    required_details = {
+        "billing_contact_name": item.billing_contact_name,
+        "billing_email": item.billing_email,
+        "billing_legal_name": item.billing_legal_name,
+        "billing_address": item.billing_address,
+    }
+    missing_details = [field for field, value in required_details.items() if not str(value or "").strip()]
+    if missing_details:
+        return jsonify({
+            "error": "Complete and save your billing contact name, billing email, legal/organisation name, and billing address before starting the 14-day trial.",
+            "missing_fields": missing_details,
+        }), 400
     now = datetime.now(timezone.utc)
     item.plan_key, item.status, item.billing_interval = "premium", "trialing", interval
     item.trial_started_at, item.trial_ends_at, item.trial_used_at = now, now + timedelta(days=14), now
