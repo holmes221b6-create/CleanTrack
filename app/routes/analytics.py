@@ -18,12 +18,29 @@ from app.models.location import Location
 from app.models.zone import Zone
 from app.models.audit_log import AuditLog
 from app.services.permissions import get_current_user, roles_required
+from app.models.subscription import OrganizationSubscription
+from app.services.entitlements import subscription_has_premium
 
 
 analytics_bp = Blueprint("analytics", __name__, url_prefix="/api/analytics")
 
 DONE_STATUSES = {"completed", "complete", "approved", "done", "closed"}
 CANCELLED_STATUSES = {"cancelled", "canceled", "archived"}
+
+def _analytics_access_error(admin):
+    """Advanced analytics are available to active Premium subscriptions and trials."""
+    if not admin or not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+    subscription = OrganizationSubscription.query.filter_by(organization_id=admin.organization_id).first()
+    if not subscription_has_premium(subscription):
+        return jsonify({
+            "error": "Advanced analytics require CleanTrack Premium. Start an eligible 14-day trial or subscribe to Premium.",
+            "required_plan": "premium",
+            "feature": "advanced_reports",
+        }), 403
+    return None
+
+
 
 
 def _parse_period():
@@ -408,6 +425,9 @@ def analytics_workspace():
     events; they are not inferred from a task's current status.
     """
     admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
     if not admin.organization_id:
         return jsonify({"error": "Your account is not linked to an organization."}), 403
 
@@ -829,6 +849,9 @@ def analytics_workspace():
 @roles_required("Admin")
 def team_analytics():
     admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
     if not admin.organization_id:
         return jsonify({"error": "Your account is not linked to an organization."}), 403
     parsed, _unused, error = _parse_period()
@@ -844,6 +867,9 @@ def team_analytics():
 @roles_required("Admin")
 def export_team_analytics():
     admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
     if not admin.organization_id:
         return jsonify({"error": "Your account is not linked to an organization."}), 403
     parsed, _unused, error = _parse_period()
