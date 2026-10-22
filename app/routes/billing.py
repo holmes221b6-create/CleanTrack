@@ -287,6 +287,131 @@ def verify_razorpay_checkout():
     return jsonify({"message": "Payment signature verified. Premium activates after provider confirmation.", "status": item.status}), 200
 
 
+@billing_bp.post("/checkout/paypal/create")
+@roles_required("Admin")
+def create_paypal_checkout():
+    admin, org = _admin_org()
+    if not org:
+        return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+    item = _subscription(org.id)
+    _expire_trial(item)
+    if item.status == "active":
+        return jsonify({"error": "This organisation already has an active Premium subscription."}), 409
+    if not _billing_profile_complete(item):
+        return jsonify({"error": "Save the required billing contact, email, legal name and billing address first."}), 400
+    interval = str((request.get_json(silent=True) or {}).get("billing_interval") or "monthly").lower()
+    if interval not in {"monthly", "annual"}:
+        return jsonify({"error": "Choose monthly or annual billing."}), 400
+    if os.getenv("PAYPAL_CURRENCY", "USD").upper() == "INR":
+        return jsonify({"error": "PayPal recurring subscriptions do not support INR. Configure a supported currency and matching PayPal plans."}), 400
+    plan_id = os.getenv("PAYPAL_PLAN_MONTHLY_ID" if interval == "monthly" else "PAYPAL_PLAN_ANNUAL_ID", "")
+    base_url = (os.getenv("CLEANTRACK_PUBLIC_URL") or os.getenv("FRONTEND_URL") or "").rstrip("/")
+    if not plan_id or not os.getenv("PAYPAL_WEBHOOK_ID") or not base_url:
+        return jsonify({"error": "PayPal needs REST credentials, monthly/annual plan IDs, a webhook ID and CLEANTRACK_PUBLIC_URL configured on the backend."}), 503
+    try:
+        result = _paypal_call("/v1/billing/subscriptions", {
+            "plan_id": plan_id,
+            "subscriber": {"name": {"given_name": item.billing_contact_name[:120]},
+                           "email_address": item.billing_email},
+            "custom_id": str(org.id),
+            "application_context": {
+                "brand_name": "CleanTrack",
+                "user_action": "SUBSCRIBE_NOW",
+                "return_url": base_url + "/?billing=paypal-return",
+                "cancel_url": base_url + "/?billing=paypal-cancelled",
+            },
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 503
+    subscription_id = str(result.get("id") or "")
+    approval_url = next((x.get("href") for x in result.get("links", [])
+                         if x.get("rel") == "approve" and str(x.get("href", "")).startswith("https://")), None)
+    if not subscription_id or not approval_url:
+        return jsonify({"error": "PayPal did not return a usable subscription approval link."}), 502
+    item.provider, item.provider_subscription_id = "paypal", subscription_id
+    item.billing_interval, item.plan_key, item.status = interval, "premium", "pending_payment"
+    item.currency = os.getenv("PAYPAL_CURRENCY", "USD").upper()
+    _audit(admin, org, "billing.paypal_checkout_created", {
+        "subscription_id": subscription_id, "billing_interval": interval,
+    })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not save PayPal subscription.")
+        return jsonify({"error": "PayPal checkout was created but could not be linked to the organisation. Contact support before retrying."}), 500
+    return jsonify({"provider": "paypal", "subscription_id": subscription_id,
+                    "approval_url": approval_url, "status": "pending_payment"}), 201
+
+
+@billing_bp.post("/webhook/paypal")
+def paypal_webhook():
+    webhook_id = os.getenv("PAYPAL_WEBHOOK_ID", "")
+    if not webhook_id:
+        return jsonify({"error": "PayPal webhook verification is not configured."}), 503
+    raw = request.get_data(cache=True)
+    if len(raw) > 1024 * 1024:
+        return jsonify({"error": "Webhook payload is too large."}), 413
+    try:
+        event = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return jsonify({"error": "Invalid webhook JSON."}), 400
+    headers = {
+        "auth_algo": request.headers.get("PAYPAL-AUTH-ALGO", ""),
+        "cert_url": request.headers.get("PAYPAL-CERT-URL", ""),
+        "transmission_id": request.headers.get("PAYPAL-TRANSMISSION-ID", ""),
+        "transmission_sig": request.headers.get("PAYPAL-TRANSMISSION-SIG", ""),
+        "transmission_time": request.headers.get("PAYPAL-TRANSMISSION-TIME", ""),
+        "webhook_id": webhook_id,
+        "webhook_event": event,
+    }
+    if not all(headers.get(key) for key in ("auth_algo", "cert_url", "transmission_id", "transmission_sig", "transmission_time")):
+        return jsonify({"error": "PayPal signature headers are incomplete."}), 400
+    try:
+        verification = _paypal_call("/v1/notifications/verify-webhook-signature", headers)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 503
+    if verification.get("verification_status") != "SUCCESS":
+        return jsonify({"error": "PayPal webhook signature could not be verified."}), 400
+    event_id = str(event.get("id") or "").strip()
+    event_type = str(event.get("event_type") or "").strip()
+    if not event_id or not event_type:
+        return jsonify({"error": "PayPal event ID and type are required."}), 400
+    if BillingProviderEvent.query.filter_by(provider_event_id=event_id).first():
+        return jsonify({"message": "Webhook event already received.", "duplicate": True}), 200
+    resource = event.get("resource") or {}
+    subscription_id = str(resource.get("id") if event_type.startswith("BILLING.SUBSCRIPTION.") else
+                           (resource.get("billing_agreement_id") or resource.get("subscription_id") or ""))
+    item = OrganizationSubscription.query.filter_by(provider="paypal", provider_subscription_id=subscription_id).first() if subscription_id else None
+    changed = False
+    if item and event_type == "PAYMENT.SALE.COMPLETED":
+        item.status, item.plan_key = "active", "premium"
+        changed = True
+    elif item and event_type in {"BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED"}:
+        item.status = "cancelled" if event_type.endswith("CANCELLED") else "expired"
+        if item.status == "expired":
+            item.plan_key = "free"
+        item.cancel_at_period_end = False
+        changed = True
+    elif item and event_type == "BILLING.SUBSCRIPTION.PAYMENT.FAILED":
+        item.status = "past_due"
+        changed = True
+    if item and changed:
+        org = db.session.get(Organization, item.organization_id)
+        if org:
+            _audit(None, org, "billing.paypal_subscription_updated", {
+                "provider_event": event_type, "subscription_status": item.status,
+            })
+    db.session.add(BillingProviderEvent(provider="paypal", provider_event_id=event_id, event_type=event_type))
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not record verified PayPal webhook.")
+        return jsonify({"error": "Verified webhook event could not be recorded."}), 500
+    return jsonify({"message": "Verified PayPal webhook processed.", "subscription_state_updated": changed}), 202
+
+
 @billing_bp.patch("/billing-details")
 @roles_required("Admin")
 def update_billing_details():
