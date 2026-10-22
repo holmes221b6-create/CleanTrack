@@ -51,7 +51,7 @@ The backend imports all SQLAlchemy models and calls `db.create_all()` at applica
 
 ## Planned payment methods
 
-The Billing UI now lists bank transfer/net banking, UPI, and PayPal as planned methods. They are marked Coming soon and cannot initiate payment. Razorpay checkout remains disabled until the provider integration, recurring billing lifecycle, and sandbox tests are complete. PayPal availability for recurring business subscriptions must be confirmed for the intended merchant country and account.
+The Billing UI now connects to the Razorpay and PayPal checkout endpoints. Razorpay can present merchant-enabled UPI and net-banking methods; PayPal subscriptions require eligible merchant access and a supported non-INR currency. Checkout remains disabled until provider configuration, pricing approval and sandbox tests are complete. PayPal availability for recurring business subscriptions must be confirmed for the intended merchant country and account.
 
 
 ## PayPal configuration
