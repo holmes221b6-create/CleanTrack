@@ -230,9 +230,10 @@ def create_razorpay_checkout():
     plan_id = os.getenv("RAZORPAY_PLAN_MONTHLY_ID" if interval == "monthly" else "RAZORPAY_PLAN_ANNUAL_ID", "")
     if not plan_id or not os.getenv("RAZORPAY_WEBHOOK_SECRET") or os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() != "true":
         return jsonify({"error": "Razorpay checkout is not enabled. Configure the provider, test the sandbox flow and set BILLING_CHECKOUT_ENABLED=true only when approved."}), 503
+    cycle_count = 120 if interval == "monthly" else 10
     try:
         data = _razorpay_call("subscriptions", {
-            "plan_id": plan_id, "total_count": 120, "quantity": 1,
+            "plan_id": plan_id, "total_count": cycle_count, "quantity": 1,
             "customer_notify": 1,
             "notes": {"organization_id": str(org.id), "organization_name": str(org.name)[:200],
                       "billing_interval": interval},
