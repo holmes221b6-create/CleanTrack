@@ -48,7 +48,7 @@ def _provider_readiness():
     result["live_checkout_switch"] = os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true"
     result["message"] = "Razorpay checkout requires credentials, both plan IDs, a webhook secret, sandbox verification and BILLING_CHECKOUT_ENABLED=true."
     result["paypal"] = summary("paypal", paypal)
-    result["paypal"]["checkout_enabled"] = result["paypal"]["checkout_enabled"] and os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true"
+    result["paypal"]["checkout_enabled"] = result["paypal"]["checkout_enabled"] and os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true" and os.getenv("PAYPAL_CURRENCY", "USD").upper() != "INR"
     result["paypal"]["mode"] = os.getenv("PAYPAL_MODE", "sandbox").lower()
     result["paypal"]["currency"] = os.getenv("PAYPAL_CURRENCY", "USD").upper()
     result["paypal"]["message"] = "PayPal subscriptions require supported-currency plans; INR recurring subscriptions are not supported."
