@@ -22,19 +22,35 @@ def _aware(value):
     return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
 
 def _provider_readiness():
-    required = {
+    razorpay = {
         "RAZORPAY_KEY_ID": bool(os.getenv("RAZORPAY_KEY_ID")),
         "RAZORPAY_KEY_SECRET": bool(os.getenv("RAZORPAY_KEY_SECRET")),
         "RAZORPAY_PLAN_MONTHLY_ID": bool(os.getenv("RAZORPAY_PLAN_MONTHLY_ID")),
         "RAZORPAY_PLAN_ANNUAL_ID": bool(os.getenv("RAZORPAY_PLAN_ANNUAL_ID")),
         "RAZORPAY_WEBHOOK_SECRET": bool(os.getenv("RAZORPAY_WEBHOOK_SECRET")),
     }
-    return {
-        "provider": "razorpay", "configured_fields": [k for k,v in required.items() if v],
-        "missing_fields": [k.lower() for k,v in required.items() if not v],
-        "credentials_complete": all(required.values()), "checkout_enabled": all(required.values()),
-        "message": "Checkout endpoints require configured credentials and plan IDs; use sandbox credentials and verify webhook handling before enabling live payments.",
+    paypal = {
+        "PAYPAL_CLIENT_ID": bool(os.getenv("PAYPAL_CLIENT_ID")),
+        "PAYPAL_CLIENT_SECRET": bool(os.getenv("PAYPAL_CLIENT_SECRET")),
+        "PAYPAL_PLAN_MONTHLY_ID": bool(os.getenv("PAYPAL_PLAN_MONTHLY_ID")),
+        "PAYPAL_PLAN_ANNUAL_ID": bool(os.getenv("PAYPAL_PLAN_ANNUAL_ID")),
+        "PAYPAL_WEBHOOK_ID": bool(os.getenv("PAYPAL_WEBHOOK_ID")),
     }
+    def summary(provider, fields):
+        return {
+            "provider": provider,
+            "configured_fields": [key for key, value in fields.items() if value],
+            "missing_fields": [key.lower() for key, value in fields.items() if not value],
+            "credentials_complete": all(fields.values()),
+            "checkout_enabled": all(fields.values()),
+        }
+    result = summary("razorpay", razorpay)
+    result["message"] = "Razorpay checkout requires credentials, both plan IDs and a webhook secret."
+    result["paypal"] = summary("paypal", paypal)
+    result["paypal"]["mode"] = os.getenv("PAYPAL_MODE", "sandbox").lower()
+    result["paypal"]["currency"] = os.getenv("PAYPAL_CURRENCY", "USD").upper()
+    result["paypal"]["message"] = "PayPal subscriptions require supported-currency plans; INR recurring subscriptions are not supported."
+    return result
 
 def _provider_http(url, method="GET", payload=None, headers=None):
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
