@@ -1049,8 +1049,10 @@ def _validate_location_package(payload):
         seen.add(name.casefold())
         boundary = z.get("boundary")
         if boundary is not None:
-            if not isinstance(boundary, dict) or boundary.get("type") not in ("Polygon", "MultiPolygon") or not isinstance(boundary.get("coordinates"), list) or not boundary["coordinates"]:
-                raise ValueError(f'Zone "{name}" must use a non-empty GeoJSON Polygon or MultiPolygon boundary.')
+            is_geo = isinstance(boundary, dict) and boundary.get("type") in ("Polygon", "MultiPolygon") and isinstance(boundary.get("coordinates"), list) and bool(boundary["coordinates"])
+            is_indoor = isinstance(boundary, dict) and boundary.get("type") == "IndoorPolygon" and isinstance(boundary.get("points"), list) and len(boundary["points"]) >= 3 and all(isinstance(p, (list, tuple)) and len(p) == 2 for p in boundary["points"])
+            if not (is_geo or is_indoor):
+                raise ValueError(f'Zone "{name}" must use a valid Polygon/MultiPolygon or an IndoorPolygon with at least three points.')
             if len(json.dumps(boundary)) > 500000:
                 raise ValueError(f'Zone "{name}" boundary is too large.')
         cleaned.append({"name":name[:160],"floor":str(z.get("floor") or z.get("floor_label") or "")[:80] or None,
