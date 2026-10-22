@@ -28,6 +28,7 @@ from app.routes.organization import organization_bp
 from app.routes.audit_trail import audit_trail_bp
 from app.routes.analytics import analytics_bp
 from app.routes.reports import reports_bp
+from app.routes.billing import billing_bp
 from app.services.audit_retention import purge_expired_audit_logs
 
 from app.models.audit_log import AuditLog
@@ -216,6 +217,7 @@ def create_app(config_class=Config):
     app.register_blueprint(audit_trail_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(reports_bp)
+    app.register_blueprint(billing_bp)
 
     @app.before_request
     def _finalize_due_member_terminations():
