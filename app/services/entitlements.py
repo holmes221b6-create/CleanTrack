@@ -27,5 +27,6 @@ def get_organization_entitlements(organization):
             "advanced_reports": premium, "extended_audit_history": premium,
             "integrations": premium, "priority_support": premium,
         },
-        "enforcement_status": "foundation_only",
+        "enforcement_status": "partial",
+        "enforced_features": ["advanced_reports"],
     }
