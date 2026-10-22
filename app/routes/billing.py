@@ -42,11 +42,13 @@ def _provider_readiness():
             "configured_fields": [key for key, value in fields.items() if value],
             "missing_fields": [key.lower() for key, value in fields.items() if not value],
             "credentials_complete": all(fields.values()),
-            "checkout_enabled": all(fields.values()),
+            "checkout_enabled": all(fields.values()) and os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true",
         }
     result = summary("razorpay", razorpay)
-    result["message"] = "Razorpay checkout requires credentials, both plan IDs and a webhook secret."
+    result["live_checkout_switch"] = os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true"
+    result["message"] = "Razorpay checkout requires credentials, both plan IDs, a webhook secret, sandbox verification and BILLING_CHECKOUT_ENABLED=true."
     result["paypal"] = summary("paypal", paypal)
+    result["paypal"]["checkout_enabled"] = result["paypal"]["checkout_enabled"] and os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() == "true"
     result["paypal"]["mode"] = os.getenv("PAYPAL_MODE", "sandbox").lower()
     result["paypal"]["currency"] = os.getenv("PAYPAL_CURRENCY", "USD").upper()
     result["paypal"]["message"] = "PayPal subscriptions require supported-currency plans; INR recurring subscriptions are not supported."
@@ -226,8 +228,8 @@ def create_razorpay_checkout():
     if interval not in {"monthly", "annual"}:
         return jsonify({"error": "Choose monthly or annual billing."}), 400
     plan_id = os.getenv("RAZORPAY_PLAN_MONTHLY_ID" if interval == "monthly" else "RAZORPAY_PLAN_ANNUAL_ID", "")
-    if not plan_id or not os.getenv("RAZORPAY_WEBHOOK_SECRET"):
-        return jsonify({"error": "Razorpay is not fully configured. Add the selected plan ID and webhook secret in the backend environment."}), 503
+    if not plan_id or not os.getenv("RAZORPAY_WEBHOOK_SECRET") or os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() != "true":
+        return jsonify({"error": "Razorpay checkout is not enabled. Configure the provider, test the sandbox flow and set BILLING_CHECKOUT_ENABLED=true only when approved."}), 503
     try:
         data = _razorpay_call("subscriptions", {
             "plan_id": plan_id, "total_count": 120, "quantity": 1,
@@ -322,8 +324,8 @@ def create_paypal_checkout():
         return jsonify({"error": "PayPal recurring subscriptions do not support INR. Configure a supported currency and matching PayPal plans."}), 400
     plan_id = os.getenv("PAYPAL_PLAN_MONTHLY_ID" if interval == "monthly" else "PAYPAL_PLAN_ANNUAL_ID", "")
     base_url = (os.getenv("CLEANTRACK_PUBLIC_URL") or os.getenv("FRONTEND_URL") or "").rstrip("/")
-    if not plan_id or not os.getenv("PAYPAL_WEBHOOK_ID") or not base_url:
-        return jsonify({"error": "PayPal needs REST credentials, monthly/annual plan IDs, a webhook ID and CLEANTRACK_PUBLIC_URL configured on the backend."}), 503
+    if not plan_id or not os.getenv("PAYPAL_WEBHOOK_ID") or not base_url or os.getenv("BILLING_CHECKOUT_ENABLED", "false").lower() != "true":
+        return jsonify({"error": "PayPal checkout is not enabled. Configure the provider, test the sandbox flow and set BILLING_CHECKOUT_ENABLED=true only when approved."}), 503
     try:
         result = _paypal_call("/v1/billing/subscriptions", {
             "plan_id": plan_id,
