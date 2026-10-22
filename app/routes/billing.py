@@ -35,6 +35,32 @@ def _provider_readiness():
         "message": "Checkout endpoints require configured credentials and plan IDs; use sandbox credentials and verify webhook handling before enabling live payments.",
     }
 
+def _provider_http(url, method="GET", payload=None, headers=None):
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request_headers = {"Accept": "application/json"}
+    if body is not None:
+        request_headers["Content-Type"] = "application/json"
+    request_headers.update(headers or {})
+    req = urllib.request.Request(url, data=body, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            raw = response.read(1024 * 1024)
+            return json.loads(raw.decode("utf-8")) if raw else {}
+    except urllib.error.HTTPError as exc:
+        current_app.logger.warning("Payment provider returned HTTP %s.", exc.code)
+        raise ValueError("The payment provider rejected the request. Check its configuration.") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        current_app.logger.warning("Payment provider request failed: %s", exc)
+        raise ValueError("The payment provider is temporarily unavailable.") from exc
+
+def _razorpay_call(path, payload=None, method="POST"):
+    key_id, secret = os.getenv("RAZORPAY_KEY_ID", ""), os.getenv("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not secret:
+        raise ValueError("Razorpay credentials are not configured on the server.")
+    token = base64.b64encode((key_id + ":" + secret).encode()).decode()
+    return _provider_http("https://api.razorpay.com/v1/" + path.lstrip("/"), method, payload,
+                          {"Authorization": "Basic " + token})
+
 def _subscription(org_id):
     item = OrganizationSubscription.query.filter_by(organization_id=org_id).first()
     if item is None:
