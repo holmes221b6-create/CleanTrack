@@ -62,6 +62,36 @@ def _razorpay_call(path, payload=None, method="POST"):
     return _provider_http("https://api.razorpay.com/v1/" + path.lstrip("/"), method, payload,
                           {"Authorization": "Basic " + token})
 
+def _paypal_base():
+    return "https://api-m.sandbox.paypal.com" if os.getenv("PAYPAL_MODE", "sandbox").lower() != "live" else "https://api-m.paypal.com"
+
+def _paypal_token():
+    client = os.getenv("PAYPAL_CLIENT_ID", "")
+    secret = os.getenv("PAYPAL_CLIENT_SECRET", "")
+    if not client or not secret:
+        raise ValueError("PayPal REST credentials are not configured on the server.")
+    token = base64.b64encode((client + ":" + secret).encode()).decode()
+    req = urllib.request.Request(
+        _paypal_base() + "/v1/oauth2/token",
+        data=b"grant_type=client_credentials",
+        headers={"Authorization": "Basic " + token, "Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = json.loads(response.read(65536).decode())
+            return data["access_token"]
+    except Exception as exc:
+        current_app.logger.warning("PayPal authentication failed.")
+        raise ValueError("PayPal authentication failed. Check the server credentials and mode.") from exc
+
+def _paypal_call(path, payload=None, method="POST"):
+    token = _paypal_token()
+    return _provider_http(_paypal_base() + path, method, payload, {
+        "Authorization": "Bearer " + token,
+        "Prefer": "return=representation",
+    })
+
 def _billing_profile_complete(item):
     values = (item.billing_contact_name, item.billing_email, item.billing_legal_name, item.billing_address)
     return all(str(value or "").strip() for value in values)
