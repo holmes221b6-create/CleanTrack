@@ -313,6 +313,28 @@ def razorpay_webhook():
         return jsonify({"error": "Webhook event ID and valid event type are required."}), 400
     if BillingProviderEvent.query.filter_by(provider_event_id=event_id).first():
         return jsonify({"message": "Webhook event already received.", "duplicate": True}), 200
+    payload_data = payload.get("payload") or {}
+    sub_data = ((payload_data.get("subscription") or {}).get("entity") or {})
+    invoice_data = ((payload_data.get("invoice") or {}).get("entity") or {})
+    pay_data = ((payload_data.get("payment") or {}).get("entity") or {})
+    sub_id = str(sub_data.get("id") or invoice_data.get("subscription_id") or pay_data.get("subscription_id") or "")
+    item = OrganizationSubscription.query.filter_by(provider_subscription_id=sub_id).first() if sub_id else None
+    changed = False
+    if item and event_type in {"subscription.charged", "invoice.paid"}:
+        item.status, item.plan_key = "active", "premium"
+        changed = True
+    elif item and event_type == "subscription.cancelled":
+        item.status, item.cancel_at_period_end = "cancelled", False
+        changed = True
+    elif item and event_type == "subscription.halted":
+        item.status = "past_due"
+        changed = True
+    if item and changed:
+        org = db.session.get(Organization, item.organization_id)
+        if org:
+            _audit(None, org, "billing.provider_subscription_updated", {
+                "provider_event": event_type, "subscription_status": item.status,
+            })
     db.session.add(BillingProviderEvent(provider="razorpay", provider_event_id=event_id, event_type=event_type))
     try:
         db.session.commit()
@@ -321,5 +343,5 @@ def razorpay_webhook():
         current_app.logger.exception("Could not record verified Razorpay webhook.")
         return jsonify({"error": "Verified webhook event could not be recorded."}), 500
     current_app.logger.info("Verified Razorpay webhook received: %s (%s)", event_type, event_id)
-    return jsonify({"message": "Signature verified and event recorded; subscription state was not changed.",
-                    "subscription_state_updated": False}), 202
+    return jsonify({"message": "Verified webhook event processed.",
+                    "subscription_state_updated": changed}), 202
