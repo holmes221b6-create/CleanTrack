@@ -464,7 +464,7 @@ def import_location_package():
     }), 201
 
 
-@locations_bp.route("/<int:location_id>", methods=["GET", "PATCH"])
+@locations_bp.route("/<int:location_id>", methods=["GET", "PATCH", "DELETE"])
 @roles_required("Admin")
 def location_detail(location_id):
     admin = get_current_user()
@@ -474,6 +474,34 @@ def location_detail(location_id):
 
     if request.method == "GET":
         return jsonify({"location": _payload(location)}), 200
+
+    if request.method == "DELETE":
+        zone_count = Zone.query.filter_by(
+            organization_id=admin.organization_id, location_id=location.id
+        ).count()
+        operation_count = Operation.query.filter(
+            Operation.organization_id == admin.organization_id,
+            or_(Operation.location_id == location.id,
+                Operation.zone_id.in_(db.session.query(Zone.id).filter_by(
+                    organization_id=admin.organization_id, location_id=location.id
+                )))
+        ).count()
+        if zone_count or operation_count:
+            return jsonify({
+                "error": "This location still has linked zones or operations. Move or remove those records first, or archive the location to preserve its history.",
+                "zone_count": zone_count,
+                "operation_count": operation_count,
+            }), 409
+        try:
+            plan = LocationFloorPlan.query.filter_by(location_id=location.id).first()
+            if plan is not None:
+                db.session.delete(plan)
+            db.session.delete(location)
+            db.session.commit()
+            return jsonify({"message": "Location deleted successfully.", "location_id": location_id}), 200
+        except Exception:
+            db.session.rollback()
+            return jsonify({"error": "Location could not be deleted. Its linked records may prevent deletion; archive it to preserve history."}), 500
 
     data = request.get_json(silent=True) or {}
     allowed = {"name", "address", "description", "team_id", "latitude", "longitude", "status"}
