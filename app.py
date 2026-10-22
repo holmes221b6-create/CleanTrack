@@ -2145,6 +2145,15 @@ def get_tasks():
         q += " AND z.location_id=?"
         params.append(supervisor["location_id"])
 
+    elif role == "admin":
+        # Scope administrator task results to their own organisation.
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
+            conn.close()
+            return jsonify([])
+        q += " AND l.organization_id=?"
+        params.append(org_id)
+
     # ---------------------------------------------------------
     # Optional filters
     # ---------------------------------------------------------
@@ -2809,6 +2818,15 @@ def get_logs():
 
         q += " AND z.location_id=?"
         params.append(supervisor["location_id"])
+
+    elif role == "admin":
+        # Scope administrator log results to their own organisation.
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
+            conn.close()
+            return jsonify([])
+        q += " AND l.organization_id=?"
+        params.append(org_id)
 
     # Optional filters
     if args.get("zone_id"):
