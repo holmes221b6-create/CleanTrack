@@ -28,8 +28,8 @@ def _provider_readiness():
     return {
         "provider": "razorpay", "configured_fields": [k for k,v in required.items() if v],
         "missing_fields": [k.lower() for k,v in required.items() if not v],
-        "credentials_complete": all(required.values()), "checkout_enabled": False,
-        "message": "Checkout stays disabled until credentials, plans, webhook lifecycle mapping, and test transactions are verified.",
+        "credentials_complete": all(required.values()), "checkout_enabled": all(required.values()),
+        "message": "Checkout endpoints require configured credentials and plan IDs; use sandbox credentials and verify webhook handling before enabling live payments.",
     }
 
 def _subscription(org_id):
