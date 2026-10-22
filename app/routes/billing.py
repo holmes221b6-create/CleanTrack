@@ -159,6 +159,99 @@ def start_trial():
     return jsonify({"message": "Your 14-day Premium trial has started.",
                     "subscription": item.to_dict(), "entitlements": get_organization_entitlements(org)}), 201
 
+@billing_bp.post("/checkout/razorpay/create")
+@roles_required("Admin")
+def create_razorpay_checkout():
+    admin, org = _admin_org()
+    if not org:
+        return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+    item = _subscription(org.id)
+    _expire_trial(item)
+    if item.status == "active":
+        return jsonify({"error": "This organisation already has an active Premium subscription."}), 409
+    if not _billing_profile_complete(item):
+        return jsonify({"error": "Save the required billing contact, email, legal name and billing address first."}), 400
+    interval = str((request.get_json(silent=True) or {}).get("billing_interval") or "monthly").lower()
+    if interval not in {"monthly", "annual"}:
+        return jsonify({"error": "Choose monthly or annual billing."}), 400
+    plan_id = os.getenv("RAZORPAY_PLAN_MONTHLY_ID" if interval == "monthly" else "RAZORPAY_PLAN_ANNUAL_ID", "")
+    if not plan_id or not os.getenv("RAZORPAY_WEBHOOK_SECRET"):
+        return jsonify({"error": "Razorpay is not fully configured. Add the selected plan ID and webhook secret in the backend environment."}), 503
+    try:
+        data = _razorpay_call("subscriptions", {
+            "plan_id": plan_id, "total_count": 120, "quantity": 1,
+            "customer_notify": 1,
+            "notes": {"organization_id": str(org.id), "organization_name": str(org.name)[:200],
+                      "billing_interval": interval},
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 503
+    subscription_id = str(data.get("id") or "")
+    if not subscription_id:
+        return jsonify({"error": "Razorpay did not return a subscription ID."}), 502
+    item.provider = "razorpay"
+    item.provider_subscription_id = subscription_id
+    item.billing_interval = interval
+    item.plan_key = "premium"
+    item.status = "pending_payment"
+    item.currency = "INR"
+    _audit(admin, org, "billing.razorpay_checkout_created", {
+        "subscription_id": subscription_id, "billing_interval": interval,
+    })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not save Razorpay subscription.")
+        return jsonify({"error": "The checkout was created but could not be linked to the organisation. Contact support before retrying."}), 500
+    return jsonify({
+        "provider": "razorpay", "key_id": os.getenv("RAZORPAY_KEY_ID"),
+        "subscription_id": subscription_id, "name": str(org.name),
+        "description": "CleanTrack Premium " + interval,
+        "prefill": {"name": item.billing_contact_name, "email": item.billing_email},
+        "status": "pending_payment",
+    }), 201
+
+
+@billing_bp.post("/checkout/razorpay/verify")
+@roles_required("Admin")
+def verify_razorpay_checkout():
+    admin, org = _admin_org()
+    if not org:
+        return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
+    data = request.get_json(silent=True) or {}
+    payment_id = str(data.get("razorpay_payment_id") or "").strip()
+    subscription_id = str(data.get("razorpay_subscription_id") or "").strip()
+    signature = str(data.get("razorpay_signature") or "").strip()
+    item = OrganizationSubscription.query.filter_by(organization_id=org.id).first()
+    secret = os.getenv("RAZORPAY_KEY_SECRET", "")
+    if not item or item.provider != "razorpay" or not item.provider_subscription_id or item.provider_subscription_id != subscription_id:
+        return jsonify({"error": "This checkout does not match a pending subscription for your organisation."}), 400
+    if not payment_id or not signature or not secret:
+        return jsonify({"error": "Razorpay checkout verification details are incomplete."}), 400
+    expected = hmac.new(secret.encode(), (payment_id + "|" + subscription_id).encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return jsonify({"error": "Razorpay payment signature could not be verified."}), 400
+    try:
+        payment = _razorpay_call("payments/" + urllib.parse.quote(payment_id, safe=""), method="GET")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 503
+    if payment.get("status") not in {"authorized", "captured"}:
+        return jsonify({"error": "Razorpay has not confirmed an authorised payment yet.", "payment_status": payment.get("status")}), 409
+    if payment.get("subscription_id") and payment.get("subscription_id") != subscription_id:
+        return jsonify({"error": "The verified payment is not linked to this subscription."}), 400
+    _audit(admin, org, "billing.razorpay_checkout_signature_verified", {
+        "subscription_id": subscription_id, "payment_id": payment_id,
+        "payment_status": payment.get("status"),
+    })
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "The verified payment could not be recorded."}), 500
+    return jsonify({"message": "Payment signature verified. Premium activates after provider confirmation.", "status": item.status}), 200
+
+
 @billing_bp.patch("/billing-details")
 @roles_required("Admin")
 def update_billing_details():
