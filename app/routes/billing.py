@@ -62,6 +62,10 @@ def _razorpay_call(path, payload=None, method="POST"):
     return _provider_http("https://api.razorpay.com/v1/" + path.lstrip("/"), method, payload,
                           {"Authorization": "Basic " + token})
 
+def _billing_profile_complete(item):
+    values = (item.billing_contact_name, item.billing_email, item.billing_legal_name, item.billing_address)
+    return all(str(value or "").strip() for value in values)
+
 def _subscription(org_id):
     item = OrganizationSubscription.query.filter_by(organization_id=org_id).first()
     if item is None:
