@@ -187,5 +187,14 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS feedback_submissions (
+            id TEXT PRIMARY KEY, user_id TEXT, organization_id TEXT,
+            feedback_type TEXT NOT NULL, area TEXT, description TEXT NOT NULL,
+            screenshots_json TEXT NOT NULL DEFAULT '[]', app_version TEXT,
+            screen TEXT, page_url TEXT, user_agent TEXT, account_name TEXT,
+            account_email TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     conn.commit()
     conn.close()
