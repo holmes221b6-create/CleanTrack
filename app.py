@@ -124,6 +124,70 @@ def send_email_route():
     ), 200
     
 
+@app.route("/api/feedback", methods=["POST"])
+@jwt_required()
+def submit_feedback():
+    uid = get_jwt_identity()
+    data = request.get_json(silent=True) or {}
+    feedback_type = str(data.get("type") or "").strip().lower()
+    description = str(data.get("description") or "").strip()
+    area = str(data.get("area") or "").strip()[:180]
+    if feedback_type not in ("bug", "suggestion"):
+        return jsonify(error="Choose Report a Bug or Suggest Improvement."), 400
+    if not description:
+        return jsonify(error="A description is required."), 400
+    if len(description) > 8000:
+        return jsonify(error="Description must be 8,000 characters or fewer."), 400
+    screenshots = data.get("screenshots") or []
+    if not isinstance(screenshots, list) or len(screenshots) > 5:
+        return jsonify(error="You can attach up to five screenshots."), 400
+    clean_images = []
+    for image in screenshots:
+        if not isinstance(image, dict):
+            return jsonify(error="Invalid screenshot attachment."), 400
+        mime = str(image.get("type") or "")
+        payload = str(image.get("data") or "")
+        if not mime.startswith("image/") or len(payload) > 7200000:
+            return jsonify(error="Each attachment must be a valid image of 5 MB or less."), 400
+        try:
+            base64.b64decode(payload, validate=True)
+        except Exception:
+            return jsonify(error="A screenshot could not be read. Please choose it again."), 400
+        clean_images.append({"name": str(image.get("name") or "screenshot")[:180], "type": mime[:100], "data": payload})
+    conn = get_db()
+    user = row_to_dict(conn.execute(
+        "SELECT id, name, email, organization_id FROM users WHERE id=?", (uid,)
+    ).fetchone())
+    if not user:
+        conn.close()
+        return jsonify(error="Your account could not be verified. Please sign in again."), 401
+    feedback_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO feedback_submissions
+        (id, user_id, organization_id, feedback_type, area, description,
+         screenshots_json, app_version, screen, page_url, user_agent, account_name, account_email)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        feedback_id, user["id"], user.get("organization_id"), feedback_type, area,
+        description, json.dumps(clean_images), str(data.get("app_version") or "")[:80],
+        str(data.get("screen") or "")[:180], str(data.get("url") or "")[:500],
+        str(data.get("user_agent") or "")[:500], user.get("name") or "",
+        user.get("email") or ""
+    ))
+    conn.commit()
+    conn.close()
+    recipient = os.getenv("CLEANTRACK_FEEDBACK_EMAIL", "").strip()
+    email_sent = False
+    if recipient:
+        subject = "[CleanTrack %s] %s" % ("Bug Report" if feedback_type == "bug" else "Suggestion", area or str(data.get("screen") or "User feedback")[:120])
+        body = (
+            "New CleanTrack feedback\nID: %s\nType: %s\nFrom: %s <%s>\nArea: %s\nScreen: %s\nURL: %s\n\nDescription:\n%s\n\nScreenshots saved with feedback ID: %s"
+        ) % (feedback_id, feedback_type, user.get("name") or "", user.get("email") or "", area or "Not specified",
+             str(data.get("screen") or ""), str(data.get("url") or ""), description, len(clean_images))
+        email_sent = send_gmail(recipient, subject, body)
+    return jsonify(success=True, id=feedback_id, stored=True, email_sent=email_sent,
+                   message="Feedback recorded successfully." if not email_sent else "Feedback recorded and sent to the CleanTrack feedback inbox."), 201
+
 @app.after_request
 def after_request(response):
     origin = request.headers.get("Origin")
