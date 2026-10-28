@@ -450,9 +450,46 @@ def login():
         return json_error("Login failed due to a server error.", 500)
 
 def _send_password_reset_email(recipient, code):
-    """Send the one-time recovery code through the configured Gmail SMTP account."""
+    """Send password-reset codes through Resend's HTTPS API, which works on Render Free."""
     import os
+
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+
+    # Render Free blocks outbound SMTP ports 25, 465, and 587. Prefer the Resend
+    # HTTPS API whenever configured; keep SMTP only as a fallback for paid hosts.
+    if api_key and sender:
+        try:
+            import resend
+
+            resend.api_key = api_key
+            resend.Emails.send({
+                "from": sender,
+                "to": [recipient],
+                "subject": "Your CleanTrack password reset code",
+                "html": (
+                    "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
+                    "<h2>Reset your CleanTrack password</h2>"
+                    "<p>Use this one-time code to reset your password:</p>"
+                    f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
+                    "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
+                    "</div>"
+                ),
+                "text": (
+                    f"Your CleanTrack password reset code is: {code}\n\n"
+                    "This one-time code expires in 10 minutes. If you did not request this, "
+                    "you can ignore this email."
+                ),
+            })
+            current_app.logger.info("Password reset email accepted by Resend.")
+            return True
+        except Exception:
+            current_app.logger.exception("Resend API failed to send a password reset email.")
+            return False
+
+    # SMTP is supported only where the hosting plan permits outbound SMTP.
     import smtplib
+    import ssl
     from email.message import EmailMessage
 
     host = os.getenv("MAIL_SERVER", "smtp.gmail.com").strip()
@@ -463,18 +500,18 @@ def _send_password_reset_email(recipient, code):
         return False
     username = os.getenv("MAIL_USERNAME", "").strip()
     password = os.getenv("MAIL_PASSWORD", "").strip().replace(" ", "")
-    sender = os.getenv("MAIL_DEFAULT_SENDER", username).strip()
+    smtp_sender = os.getenv("MAIL_DEFAULT_SENDER", username).strip()
     use_tls = os.getenv("MAIL_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
 
-    if not host or not username or not password or not sender:
+    if not host or not username or not password or not smtp_sender:
         current_app.logger.error(
-            "Password reset email is not configured: check MAIL_SERVER, MAIL_USERNAME, "
-            "MAIL_PASSWORD, and MAIL_DEFAULT_SENDER in the service environment."
+            "Password reset email is not configured: set RESEND_API_KEY and RESEND_FROM_EMAIL "
+            "for Render Free, or configure MAIL_* on a host that permits SMTP."
         )
         return False
 
     message = EmailMessage()
-    message["From"] = sender
+    message["From"] = smtp_sender
     message["To"] = recipient
     message["Subject"] = "Your CleanTrack password reset code"
     message.set_content(
@@ -491,19 +528,18 @@ def _send_password_reset_email(recipient, code):
         "</div>",
         subtype="html",
     )
-
     try:
-        with smtplib.SMTP(host, port, timeout=20) as smtp:
+        with smtplib.SMTP(host, port, timeout=8) as smtp:
             smtp.ehlo()
             if use_tls:
-                smtp.starttls()
+                smtp.starttls(context=ssl.create_default_context())
                 smtp.ehlo()
             smtp.login(username, password)
-            smtp.send_message(message, from_addr=sender, to_addrs=[recipient])
-        current_app.logger.info("Password reset email accepted by SMTP server for recipient.")
+            smtp.send_message(message, from_addr=smtp_sender, to_addrs=[recipient])
+        current_app.logger.info("Password reset email accepted by SMTP server.")
         return True
     except Exception:
-        current_app.logger.exception("Gmail SMTP failed to send a password reset email.")
+        current_app.logger.exception("SMTP failed to send a password reset email.")
         return False
 
 
