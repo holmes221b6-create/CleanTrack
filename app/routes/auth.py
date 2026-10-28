@@ -450,30 +450,61 @@ def login():
         return json_error("Login failed due to a server error.", 500)
 
 def _send_password_reset_email(recipient, code):
-    """Send the one-time recovery code through the configured Resend account."""
+    """Send the one-time recovery code through the configured Gmail SMTP account."""
     import os
-    import resend
+    import smtplib
+    from email.message import EmailMessage
 
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-    if not api_key or not sender:
-        current_app.logger.error("Password reset email is not configured: set RESEND_API_KEY and RESEND_FROM_EMAIL.")
+    host = os.getenv("MAIL_SERVER", "smtp.gmail.com").strip()
+    try:
+        port = int(os.getenv("MAIL_PORT", "587"))
+    except (TypeError, ValueError):
+        current_app.logger.error("Password reset email is not configured: MAIL_PORT must be a number.")
         return False
-    resend.api_key = api_key
-    resend.Emails.send({
-        "from": sender,
-        "to": [recipient],
-        "subject": "Your CleanTrack password reset code",
-        "html": (
-            "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
-            "<h2>Reset your CleanTrack password</h2>"
-            "<p>Use this one-time code to reset your password:</p>"
-            f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
-            "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
-            "</div>"
-        ),
-    })
-    return True
+    username = os.getenv("MAIL_USERNAME", "").strip()
+    password = os.getenv("MAIL_PASSWORD", "").strip().replace(" ", "")
+    sender = os.getenv("MAIL_DEFAULT_SENDER", username).strip()
+    use_tls = os.getenv("MAIL_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+    if not host or not username or not password or not sender:
+        current_app.logger.error(
+            "Password reset email is not configured: check MAIL_SERVER, MAIL_USERNAME, "
+            "MAIL_PASSWORD, and MAIL_DEFAULT_SENDER in the service environment."
+        )
+        return False
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = "Your CleanTrack password reset code"
+    message.set_content(
+        f"Your CleanTrack password reset code is: {code}\n\n"
+        "This one-time code expires in 10 minutes. If you did not request this, "
+        "you can ignore this email."
+    )
+    message.add_alternative(
+        "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
+        "<h2>Reset your CleanTrack password</h2>"
+        "<p>Use this one-time code to reset your password:</p>"
+        f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
+        "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
+        "</div>",
+        subtype="html",
+    )
+
+    try:
+        with smtplib.SMTP(host, port, timeout=20) as smtp:
+            smtp.ehlo()
+            if use_tls:
+                smtp.starttls()
+                smtp.ehlo()
+            smtp.login(username, password)
+            smtp.send_message(message, from_addr=sender, to_addrs=[recipient])
+        current_app.logger.info("Password reset email accepted by SMTP server for recipient.")
+        return True
+    except Exception:
+        current_app.logger.exception("Gmail SMTP failed to send a password reset email.")
+        return False
 
 
 @auth_bp.post("/forgot-password")
