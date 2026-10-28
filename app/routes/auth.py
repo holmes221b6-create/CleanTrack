@@ -11,6 +11,11 @@ from flask_jwt_extended import (
     verify_jwt_in_request,
 )
 from sqlalchemy import func
+from datetime import datetime, timedelta, timezone
+import hashlib
+import secrets
+
+from app.models.password_reset_code import PasswordResetCode
 
 from app.extensions import db, limiter
 from app.models.user import User
@@ -443,3 +448,109 @@ def login():
         db.session.rollback()
         current_app.logger.exception("Login failed unexpectedly.")
         return json_error("Login failed due to a server error.", 500)
+
+def _send_password_reset_email(recipient, code):
+    """Send the one-time recovery code through the configured Resend account."""
+    import os
+    import resend
+
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+    if not api_key or not sender:
+        current_app.logger.error("Password reset email is not configured: set RESEND_API_KEY and RESEND_FROM_EMAIL.")
+        return False
+    resend.api_key = api_key
+    resend.Emails.send({
+        "from": sender,
+        "to": [recipient],
+        "subject": "Your CleanTrack password reset code",
+        "html": (
+            "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
+            "<h2>Reset your CleanTrack password</h2>"
+            "<p>Use this one-time code to reset your password:</p>"
+            f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
+            "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
+            "</div>"
+        ),
+    })
+    return True
+
+
+@auth_bp.post("/forgot-password")
+@limiter.limit("5 per hour")
+def forgot_password():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    if not email or len(email) > 254 or "@" not in email:
+        return json_error("Enter the email address registered to your account.", 400)
+
+    # Return the same response whether or not the address exists to prevent account discovery.
+    generic = {"message": "If an account exists for that email, a reset code will be sent shortly."}
+    user = User.query.filter(func.lower(User.email) == email).first()
+    if user is None or user.account_status not in {"active", "termination_pending"}:
+        return jsonify(generic), 200
+
+    now = datetime.now(timezone.utc)
+    PasswordResetCode.query.filter_by(user_id=user.id, used_at=None).delete(synchronize_session=False)
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    record = PasswordResetCode(
+        user_id=user.id,
+        code_hash=hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        expires_at=now + timedelta(minutes=10),
+    )
+    db.session.add(record)
+    try:
+        db.session.commit()
+        if not _send_password_reset_email(user.email, code):
+            db.session.delete(record)
+            db.session.commit()
+            return json_error("Password recovery email is not configured. Please contact CleanTrack support.", 503)
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not issue password reset code.")
+        return json_error("Could not send a password reset email right now. Please try again later.", 503)
+
+    return jsonify(generic), 200
+
+
+@auth_bp.post("/reset-password")
+@limiter.limit("10 per hour")
+def reset_password():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    code = str(data.get("code") or "").strip()
+    password = data.get("new_password")
+    if not email or not isinstance(password, str) or len(password) < 8 or len(password) > 128:
+        return json_error("Enter your registered email and a new password of 8 to 128 characters.", 400)
+    if len(code) != 6 or not code.isdigit():
+        return json_error("Enter the six-digit code sent to your email.", 400)
+
+    user = User.query.filter(func.lower(User.email) == email).first()
+    if user is None:
+        return json_error("The code is invalid or expired. Request a new code and try again.", 400)
+
+    now = datetime.now(timezone.utc)
+    records = PasswordResetCode.query.filter_by(user_id=user.id, used_at=None).order_by(PasswordResetCode.created_at.desc()).all()
+    record = next((item for item in records if (
+        (item.expires_at.replace(tzinfo=timezone.utc) if item.expires_at.tzinfo is None else item.expires_at) > now
+        and secrets.compare_digest(item.code_hash, hashlib.sha256(code.encode("utf-8")).hexdigest())
+    )), None)
+    if record is None:
+        return json_error("The code is invalid or expired. Request a new code and try again.", 400)
+
+    user.set_password(password)
+    record.used_at = now
+    # Invalidate any other outstanding codes for this account.
+    for item in records:
+        if item.id != record.id:
+            item.used_at = now
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not reset password.")
+        return json_error("Your password could not be changed. Please try again.", 500)
+
+    response = jsonify({"message": "Password updated. You can now sign in with your new password."})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
