@@ -125,7 +125,7 @@ def _team_data(team, admin, include_directory=False):
     overdue_total = sum(1 for _, _, done, past_due in normalized if not done and past_due)
     people_count = len(members)
     supervisors = sum(1 for row in members if str(row["role"]).lower() == "supervisor")
-    employees = sum(1 for row in members if str(row["role"]).lower() == "employee")
+    employees = sum(1 for row in members if str(row["role"]).lower() == "staff")
     completion_rate = round((completed_total / total) * 100, 1) if total else None
     capacity_status = None
     if team.capacity is not None:
@@ -231,7 +231,7 @@ def _team_data(team, admin, include_directory=False):
     if include_directory:
         users = User.query.filter(
             User.organization_id == admin.organization_id, User.account_status == "active",
-            User.role.in_(["Supervisor", "Employee"]),
+            User.role.in_(["Supervisor", "Staff"]),
         ).order_by(func.lower(User.full_name)).all()
         assignment_by_user = {}
         assignment_rows = (
@@ -455,7 +455,7 @@ def assign_members(team_id):
     users = User.query.filter(
         User.id.in_(member_ids) if member_ids else User.id == -1,
         User.organization_id == admin.organization_id, User.account_status == "active",
-        User.role.in_(["Supervisor", "Employee"]),
+        User.role.in_(["Supervisor", "Staff"]),
     ).all()
     if len(users) != len(member_ids):
         return jsonify({"error": "Every selected person must be an active Supervisor or Employee in your organization."}), 400
