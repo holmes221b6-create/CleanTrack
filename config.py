@@ -20,7 +20,7 @@ class Config:
 
     SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = {}
+    SQLALCHEMY_ENGINE_OPTIONS = ({"pool_pre_ping": True, "pool_recycle": 300} if _database_url().startswith("postgresql+") else {})
 
     JWT_SECRET_KEY = os.getenv(
         "JWT_SECRET_KEY",

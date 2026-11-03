@@ -34,7 +34,11 @@ CLOSED_STATUSES = {"completed", "approved", "cancelled", "canceled"}
 def _team_ids(user):
     return {
         row[0] for row in db.session.query(TeamMember.team_id)
-        .filter(TeamMember.user_id == user.id).all()
+        .join(Team, Team.id == TeamMember.team_id)
+        .filter(
+            TeamMember.user_id == user.id,
+            Team.organization_id == user.organization_id,
+        ).all()
     }
 
 
@@ -42,7 +46,7 @@ def _scoped_operation_query(user):
     query = Operation.query.filter_by(organization_id=user.organization_id)
     if user.role == "Admin":
         return query
-    if user.role == "Employee":
+    if user.role == "Staff":
         return query.filter(Operation.assigned_to_id == user.id)
 
     team_ids = _team_ids(user)
@@ -107,7 +111,7 @@ def _visible(operation, user):
         return False
     if user.role == "Admin":
         return True
-    if user.role == "Employee":
+    if user.role == "Staff":
         return operation.assigned_to_id == user.id
     return _can_manage(operation, user)
 
@@ -254,7 +258,7 @@ def _team_context(team_id, location_id, zone_id, user, allow_area_only=False):
 
 
 @operations_bp.route("", methods=["GET", "POST"])
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def operations_collection():
     user = get_current_user()
     if request.method == "GET":
@@ -279,7 +283,11 @@ def operations_collection():
                 return jsonify({"error": "Supervisor not found in this organization."}), 404
             team_ids = [
                 row[0] for row in db.session.query(TeamMember.team_id)
-                .filter(TeamMember.user_id == supervisor.id).all()
+                .join(Team, Team.id == TeamMember.team_id)
+                .filter(
+                    TeamMember.user_id == supervisor.id,
+                    Team.organization_id == user.organization_id,
+                ).all()
             ]
             clauses = [
                 Operation.assigned_supervisor_id == supervisor.id,
@@ -357,7 +365,7 @@ def operations_collection():
         return jsonify({"operations": operation_rows, "count": len(operation_rows)}), 200
 
     if user.role not in {"Admin", "Supervisor"}:
-        return jsonify({"error": "Employees can execute assigned work but cannot create organization operations."}), 403
+        return jsonify({"error": "Staffs can execute assigned work but cannot create organization operations."}), 403
 
     data = request.get_json(silent=True) or {}
     title = data.get("title", data.get("name", ""))
@@ -399,10 +407,10 @@ def operations_collection():
     assignee = db.session.get(User, assigned_to_id) if assigned_to_id else None
     if assigned_to_id and (
         assignee is None or assignee.organization_id != user.organization_id
-        or assignee.account_status != "active" or assignee.role not in {"Supervisor", "Employee"}
+        or assignee.account_status != "active" or assignee.role not in {"Supervisor", "Staff"}
     ):
-        return jsonify({"error": "Assignee must be an active Supervisor or Employee in this organization."}), 400
-    if user.role == "Supervisor" and assignee and assignee.role != "Employee" and assignee.id != user.id:
+        return jsonify({"error": "Assignee must be an active Supervisor or Staff in this organization."}), 400
+    if user.role == "Supervisor" and assignee and assignee.role != "Staff" and assignee.id != user.id:
         return jsonify({"error": "Supervisors can assign work only to themselves or employees in their team."}), 403
     if assignee and team_id and assignee.id != user.id:
         membership = TeamMember.query.filter_by(team_id=team_id, user_id=assignee.id).first()
@@ -493,7 +501,7 @@ def operations_collection():
         assignee.id if assignee and assignee.role == "Supervisor"
         else (user.id if user.role == "Supervisor" else None)
     )
-    if assigned_supervisor_id is None and assignee and assignee.role == "Employee" and team_id:
+    if assigned_supervisor_id is None and assignee and assignee.role == "Staff" and team_id:
         team_supervisors = User.query.join(
             TeamMember, TeamMember.user_id == User.id
         ).filter(
@@ -555,14 +563,14 @@ def operations_collection():
 
 
 @operations_bp.get("/options")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def operation_options():
     user = get_current_user()
     teams_query = Team.query.filter_by(organization_id=user.organization_id, status="active")
     if user.role == "Supervisor":
         ids = _team_ids(user)
         teams_query = teams_query.filter(Team.id.in_(ids)) if ids else teams_query.filter(Team.id == -1)
-    elif user.role == "Employee":
+    elif user.role == "Staff":
         ids = _team_ids(user)
         teams_query = teams_query.filter(Team.id.in_(ids)) if ids else teams_query.filter(Team.id == -1)
     teams = teams_query.order_by(Team.name.asc()).all()
@@ -584,7 +592,7 @@ def operation_options():
     members_query = User.query.filter(
         User.organization_id == user.organization_id,
         User.account_status == "active",
-        User.role.in_(["Supervisor", "Employee"]),
+        User.role.in_(["Supervisor", "Staff"]),
     )
     if user.role != "Admin":
         member_ids = [row[0] for row in db.session.query(TeamMember.user_id).filter(TeamMember.team_id.in_(team_ids)).all()] if team_ids else []
@@ -599,7 +607,7 @@ def operation_options():
 
 
 @operations_bp.get("/<int:operation_id>")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def get_operation(operation_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)
@@ -619,13 +627,13 @@ def get_operation(operation_id):
 
 
 @operations_bp.post("/<int:operation_id>/evidence")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def upload_operation_evidence(operation_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or evidence upload is not permitted."}), 404
-    if user.role == "Employee" and operation.assigned_to_id != user.id:
+    if user.role == "Staff" and operation.assigned_to_id != user.id:
         return jsonify({"error": "Only the current assignee can upload execution evidence."}), 403
     if user.role == "Supervisor" and not _can_manage(operation, user) and operation.assigned_to_id != user.id:
         return jsonify({"error": "You cannot upload evidence for this operation."}), 403
@@ -705,7 +713,7 @@ def upload_operation_evidence(operation_id):
 
 
 @operations_bp.get("/<int:operation_id>/evidence/<int:evidence_id>/download")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def download_operation_evidence(operation_id, evidence_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)
@@ -944,13 +952,13 @@ def reassign_operation(operation_id):
     if not assignee or assignee.organization_id != user.organization_id or assignee.account_status != "active":
         return jsonify({"error": "Assignee must be an active member of this organization."}), 400
     if user.role == "Supervisor":
-        if assignee.role != "Employee" or not operation.team_id:
-            return jsonify({"error": "Supervisors can only reassign work to an Employee within a team."}), 403
+        if assignee.role != "Staff" or not operation.team_id:
+            return jsonify({"error": "Supervisors can only reassign work to an Staff within a team."}), 403
         membership = TeamMember.query.filter_by(team_id=operation.team_id, user_id=assignee.id).first()
         if not membership:
             return jsonify({"error": "That employee is not a member of this operation's team."}), 400
-    elif assignee.role not in {"Supervisor", "Employee"}:
-        return jsonify({"error": "Operations can only be assigned to a Supervisor or Employee."}), 400
+    elif assignee.role not in {"Supervisor", "Staff"}:
+        return jsonify({"error": "Operations can only be assigned to a Supervisor or Staff."}), 400
     previous_assignee = operation.assigned_to_id
     previous_status = operation.status
     if previous_assignee == assignee.id:
@@ -978,13 +986,13 @@ def reassign_operation(operation_id):
 
 
 @operations_bp.post("/<int:operation_id>/start")
-@roles_required("Supervisor", "Employee")
+@roles_required("Supervisor", "Staff")
 def start_operation(operation_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or not assigned to you."}), 404
-    if user.role == "Employee":
+    if user.role == "Staff":
         if operation.assigned_to_id != user.id:
             return jsonify({"error": "Only the current assignee can start this operation."}), 403
     elif user.role == "Supervisor":
@@ -1016,13 +1024,13 @@ def start_operation(operation_id):
 
 
 @operations_bp.post("/<int:operation_id>/submit")
-@roles_required("Supervisor", "Employee")
+@roles_required("Supervisor", "Staff")
 def submit_operation(operation_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user):
         return jsonify({"error": "Operation not found or not assigned to you."}), 404
-    if user.role == "Employee":
+    if user.role == "Staff":
         if operation.assigned_to_id != user.id:
             return jsonify({"error": "Only the current assignee can submit this operation."}), 403
     elif user.role == "Supervisor":
@@ -1230,7 +1238,7 @@ def cancel_operation(operation_id):
 
 
 @operations_bp.get("/<int:operation_id>/history")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def operation_history(operation_id):
     user = get_current_user()
     operation = db.session.get(Operation, operation_id)

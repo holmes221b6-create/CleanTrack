@@ -119,6 +119,15 @@ def review_membership_request(request_id):
             "error": "Applicant account not found."
         }), 404
 
+    if applicant.organization_id != admin.organization_id:
+        return jsonify({"error": "Applicant is not a member of this organization."}), 404
+
+    if applicant.role != membership_request.requested_role:
+        return jsonify({"error": "Applicant role does not match the requested membership role."}), 409
+
+    if membership_request.requested_role not in {"Supervisor", "Staff"}:
+        return jsonify({"error": "Only Supervisor and Staff membership requests can be approved."}), 409
+
     if applicant.account_status != "pending":
         return jsonify({
             "error": "Applicant account is not pending."

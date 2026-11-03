@@ -100,7 +100,7 @@ def _can_view(user, item, include_drafts=False):
     if item.audience_scope == "supervisors":
         return user.role == "Supervisor"
     if item.audience_scope == "team":
-        # Supervisors publish team messages to employees. Another supervisor
+        # Supervisors publish team messages to staff. Another supervisor
         # should not see a peer's targeted employee notice by team membership alone.
         if user.role == "Supervisor" and item.created_by_id != user.id and item.creator and item.creator.role == "Supervisor":
             return False
@@ -115,11 +115,14 @@ def _audience_users(item):
     if item.audience_scope == "supervisors":
         return query.filter_by(role="Supervisor").all()
     if item.audience_scope == "team":
-        query = query.join(TeamMember, TeamMember.user_id == User.id).filter(
-            TeamMember.team_id == item.team_id
+        query = query.join(TeamMember, TeamMember.user_id == User.id).join(
+            Team, Team.id == TeamMember.team_id
+        ).filter(
+            TeamMember.team_id == item.team_id,
+            Team.organization_id == item.organization_id,
         )
         if item.creator and item.creator.role == "Supervisor":
-            query = query.filter(User.role == "Employee")
+            query = query.filter(User.role == "Staff")
         return query.all()
     return []
 
@@ -132,7 +135,7 @@ def _is_target_recipient(user, item):
     if item.audience_scope == "supervisors":
         return user.role == "Supervisor"
     if item.audience_scope == "team":
-        if item.creator and item.creator.role == "Supervisor" and user.role != "Employee":
+        if item.creator and item.creator.role == "Supervisor" and user.role != "Staff":
             return False
         return item.team_id in _team_ids(user)
     return False
@@ -441,13 +444,13 @@ def _apply_payload(item, user, data, is_create=False):
 
 
 @announcements_bp.get("/options")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def options():
     user = get_current_user()
     teams_query = Team.query.filter_by(organization_id=user.organization_id, status="active")
     if user.role == "Supervisor":
         teams_query = teams_query.filter(Team.id.in_(_team_ids(user)))
-    if user.role == "Employee":
+    if user.role == "Staff":
         teams_query = teams_query.filter(Team.id.in_(_team_ids(user)))
     teams = teams_query.order_by(Team.name.asc()).all()
     team_ids = [row.id for row in teams]
@@ -466,7 +469,7 @@ def options():
 
 
 @announcements_bp.get("")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def list_announcements():
     user = get_current_user()
     _process_due_schedules(user.organization_id)
@@ -679,7 +682,7 @@ def archive_announcement(announcement_id):
 
 
 @announcements_bp.post("/<int:announcement_id>/read")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def mark_read(announcement_id):
     user = get_current_user()
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
@@ -704,7 +707,7 @@ def mark_read(announcement_id):
 
 
 @announcements_bp.post("/<int:announcement_id>/acknowledge")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def acknowledge(announcement_id):
     user = get_current_user()
     item = Announcement.query.filter_by(id=announcement_id, organization_id=user.organization_id, archived_at=None).first()
@@ -815,7 +818,7 @@ def upload_attachments(announcement_id):
 
 
 @announcements_bp.get("/attachments/<int:attachment_id>/download")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def download_attachment(attachment_id):
     user = get_current_user()
     attachment = db.session.get(AnnouncementAttachment, attachment_id)

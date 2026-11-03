@@ -9,7 +9,7 @@ notifications_bp = Blueprint("notifications", __name__, url_prefix="/api/notific
 
 
 @notifications_bp.get("")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def list_notifications():
     user = get_current_user()
     rows = Notification.query.filter_by(recipient_id=user.id).order_by(
@@ -25,7 +25,7 @@ def list_notifications():
 
 
 @notifications_bp.patch("/<int:notification_id>/read")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def mark_notification_read(notification_id):
     user = get_current_user()
     row = db.session.get(Notification, notification_id)
@@ -43,7 +43,7 @@ def mark_notification_read(notification_id):
 
 
 @notifications_bp.post("/read-all")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def mark_all_notifications_read():
     user = get_current_user()
     Notification.query.filter_by(recipient_id=user.id, is_read=False).update({

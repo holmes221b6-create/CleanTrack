@@ -29,7 +29,7 @@ class MembershipRequest(db.Model):
     requested_role = db.Column(
         db.String(20),
         nullable=False,
-        default="Employee",
+        default="Staff",
     )
     status = db.Column(
         db.String(20),

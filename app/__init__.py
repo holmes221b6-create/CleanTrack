@@ -49,6 +49,16 @@ def create_app(config_class=Config):
     # protected database tables rather than an ephemeral Render filesystem.
     with app.app_context():
         db.create_all()
+        # In-place compatibility migration: preserve user IDs and every linked
+        # operation, membership, assignment and historical record.
+        with db.engine.begin() as connection:
+            existing_tables = set(inspect(connection).get_table_names())
+            if "users" in existing_tables:
+                connection.execute(text("UPDATE users SET role = 'Staff' WHERE lower(role) = 'employee'"))
+            if "invitations" in existing_tables:
+                connection.execute(text("UPDATE invitations SET role = 'Staff' WHERE lower(role) = 'employee'"))
+            if "membership_requests" in existing_tables:
+                connection.execute(text("UPDATE membership_requests SET requested_role = 'Staff' WHERE lower(requested_role) = 'employee'"))
         with db.engine.begin() as connection:
             tables = set(inspect(connection).get_table_names())
             if "users" in tables:
@@ -310,7 +320,12 @@ def create_app(config_class=Config):
         try:
             with db.engine.connect() as connection:
                 connection.exec_driver_sql("SELECT 1")
-            return jsonify({"status": "ok", "database": "connected"}), 200
+            dialect = db.engine.dialect.name
+            return jsonify({
+                "status": "ok",
+                "database": "connected",
+                "database_engine": dialect,
+            }), 200
         except Exception:
             app.logger.exception("Database health check failed")
             return jsonify({"status": "error", "database": "unavailable"}), 503

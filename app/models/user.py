@@ -22,7 +22,7 @@ class User(db.Model):
 
     password_hash = db.Column(db.String(255), nullable=False)
 
-    role = db.Column(db.String(20), nullable=False, default="Employee")
+    role = db.Column(db.String(20), nullable=False, default="Staff")
     account_status = db.Column(
         db.String(20),
         nullable=False,
