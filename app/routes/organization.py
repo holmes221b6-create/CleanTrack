@@ -597,7 +597,7 @@ def set_member_teams(member_id):
     next_teams = [{"id": team.id, "name": team.name} for team in teams]
 
     try:
-        TeamMember.query.filter(TeamMember.user_id == member_id, TeamMember.team_id.in_([team.id for team in teams]) if teams else TeamMember.team_id.in_(db.session.query(Team.id).filter_by(organization_id=admin.organization_id))).delete(synchronize_session=False)
+        TeamMember.query.filter(TeamMember.user_id == member_id, TeamMember.team_id.in_(db.session.query(Team.id).filter_by(organization_id=admin.organization_id))).delete(synchronize_session=False)
         for team in teams:
             db.session.add(TeamMember(team_id=team.id, user_id=member_id))
         _record_organization_audit(admin, db.session.get(Organization, admin.organization_id),
