@@ -52,8 +52,13 @@ def create_app(config_class=Config):
         # In-place compatibility migration: preserve user IDs and every linked
         # operation, membership, assignment and historical record.
         with db.engine.begin() as connection:
-            if "users" in set(inspect(connection).get_table_names()):
+            existing_tables = set(inspect(connection).get_table_names())
+            if "users" in existing_tables:
                 connection.execute(text("UPDATE users SET role = 'Staff' WHERE lower(role) = 'employee'"))
+            if "invitations" in existing_tables:
+                connection.execute(text("UPDATE invitations SET role = 'Staff' WHERE lower(role) = 'employee'"))
+            if "membership_requests" in existing_tables:
+                connection.execute(text("UPDATE membership_requests SET requested_role = 'Staff' WHERE lower(requested_role) = 'employee'"))
         with db.engine.begin() as connection:
             tables = set(inspect(connection).get_table_names())
             if "users" in tables:
