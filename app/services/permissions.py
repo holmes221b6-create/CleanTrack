@@ -10,7 +10,7 @@ from app.models.user import User
 from app.models.organization import Organization
 
 
-VALID_ROLES = {"Admin", "Supervisor", "Employee"}
+VALID_ROLES = {"Admin", "Supervisor", "Staff"}
 
 
 def get_current_user():
