@@ -63,6 +63,11 @@ def roles_required(*allowed_roles):
             if user is None:
                 return jsonify({"error": "Account is unavailable"}), 401
 
+            # Every operational identity must be attached to exactly one
+            # organization. Never let a NULL tenant context reach a query.
+            if user.organization_id is None:
+                return jsonify({"error": "Your account is not linked to an organization."}), 403
+
             if user.role not in allowed_roles:
                 return jsonify({"error": "Permission denied"}), 403
 
