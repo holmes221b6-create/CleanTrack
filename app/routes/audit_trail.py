@@ -73,7 +73,7 @@ def _scoped_query(user):
             )
         )
 
-    # Employees see their own actions and the audit events for operations
+    # Staff see their own actions and the audit events for operations
     # assigned to them, but never administrative or other users' activity.
     own_operation_ids = db.session.query(cast(Operation.id, String)).filter(
         Operation.organization_id == user.organization_id,
@@ -265,7 +265,7 @@ def _rows_for_query(query, limit=None, offset=0):
 
 
 @audit_trail_bp.get("")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def audit_trail():
     user = get_current_user()
     try:
@@ -303,7 +303,7 @@ def audit_trail():
 
 
 @audit_trail_bp.get("/export")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def export_audit_trail():
     user = get_current_user()
     try:
