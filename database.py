@@ -172,6 +172,9 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_team_members_team ON team_members(team_id)")
 
     c.execute("CREATE INDEX IF NOT EXISTS idx_users_organization ON users(organization_id, membership_status, role)")
+
+    # Normalize the former employee role in place; preserve user IDs and related records.
+    c.execute("UPDATE users SET role='staff' WHERE lower(role)='employee'")
     c.execute("CREATE INDEX IF NOT EXISTS idx_locations_organization ON locations(organization_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_teams_organization ON teams(organization_id)")
 
