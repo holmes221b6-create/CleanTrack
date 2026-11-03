@@ -49,6 +49,11 @@ def create_app(config_class=Config):
     # protected database tables rather than an ephemeral Render filesystem.
     with app.app_context():
         db.create_all()
+        # In-place compatibility migration: preserve user IDs and every linked
+        # operation, membership, assignment and historical record.
+        with db.engine.begin() as connection:
+            if "users" in set(inspect(connection).get_table_names()):
+                connection.execute(text("UPDATE users SET role = 'Staff' WHERE lower(role) = 'employee'"))
         with db.engine.begin() as connection:
             tables = set(inspect(connection).get_table_names())
             if "users" in tables:
