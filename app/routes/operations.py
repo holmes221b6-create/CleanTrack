@@ -357,7 +357,7 @@ def operations_collection():
         return jsonify({"operations": operation_rows, "count": len(operation_rows)}), 200
 
     if user.role not in {"Admin", "Supervisor"}:
-        return jsonify({"error": "Employees can execute assigned work but cannot create organization operations."}), 403
+        return jsonify({"error": "Staffs can execute assigned work but cannot create organization operations."}), 403
 
     data = request.get_json(silent=True) or {}
     title = data.get("title", data.get("name", ""))
@@ -401,7 +401,7 @@ def operations_collection():
         assignee is None or assignee.organization_id != user.organization_id
         or assignee.account_status != "active" or assignee.role not in {"Supervisor", "Staff"}
     ):
-        return jsonify({"error": "Assignee must be an active Supervisor or Employee in this organization."}), 400
+        return jsonify({"error": "Assignee must be an active Supervisor or Staff in this organization."}), 400
     if user.role == "Supervisor" and assignee and assignee.role != "Staff" and assignee.id != user.id:
         return jsonify({"error": "Supervisors can assign work only to themselves or employees in their team."}), 403
     if assignee and team_id and assignee.id != user.id:
@@ -945,12 +945,12 @@ def reassign_operation(operation_id):
         return jsonify({"error": "Assignee must be an active member of this organization."}), 400
     if user.role == "Supervisor":
         if assignee.role != "Staff" or not operation.team_id:
-            return jsonify({"error": "Supervisors can only reassign work to an Employee within a team."}), 403
+            return jsonify({"error": "Supervisors can only reassign work to an Staff within a team."}), 403
         membership = TeamMember.query.filter_by(team_id=operation.team_id, user_id=assignee.id).first()
         if not membership:
             return jsonify({"error": "That employee is not a member of this operation's team."}), 400
     elif assignee.role not in {"Supervisor", "Staff"}:
-        return jsonify({"error": "Operations can only be assigned to a Supervisor or Employee."}), 400
+        return jsonify({"error": "Operations can only be assigned to a Supervisor or Staff."}), 400
     previous_assignee = operation.assigned_to_id
     previous_status = operation.status
     if previous_assignee == assignee.id:
