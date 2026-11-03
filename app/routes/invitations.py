@@ -102,7 +102,7 @@ def create_invitation():
     if not email or len(email) > 254 or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
         return jsonify({"error": "Enter a valid email address."}), 400
     if role not in {"Supervisor", "Staff"}:
-        return jsonify({"error": "Invitations can be created for Supervisors or Employees only."}), 400
+        return jsonify({"error": "Invitations can be created for Supervisors or Staffs only."}), 400
     organization = db.session.get(Organization, admin.organization_id) if admin.organization_id else None
     if organization is None:
         return jsonify({"error": "Your Admin account is not linked to an organization."}), 409
