@@ -284,7 +284,7 @@ def _organization_payload(conn, org_id):
         "staff": conn.execute(
             """SELECT COUNT(*) FROM users
                WHERE organization_id=? AND membership_status='approved'
-                 AND is_active=1 AND role IN ('supervisor','employee','staff')""",
+                 AND is_active=1 AND role IN ('supervisor','staff','staff')""",
             (org_id,)
         ).fetchone()[0],
         "teams": conn.execute(
@@ -380,11 +380,11 @@ def register():
         return jsonify(error="Name, email, and password are required."), 400
     if len(password) < 10:
         return jsonify(error="Use a password with at least 10 characters."), 400
-    if role not in ("admin", "supervisor", "employee"):
+    if role not in ("admin", "supervisor", "staff"):
         return jsonify(error="Choose Admin, Supervisor, or Employee."), 400
     if role == "admin" and len(organization_name) < 2:
         return jsonify(error="Enter your organization name."), 400
-    if role in ("supervisor", "employee") and not organization_code:
+    if role in ("supervisor", "staff") and not organization_code:
         return jsonify(error="Enter the organization code provided by your Admin."), 400
 
     conn = get_db()
@@ -393,7 +393,7 @@ def register():
         return jsonify(error="Email already registered."), 409
 
     org = None
-    if role in ("supervisor", "employee"):
+    if role in ("supervisor", "staff"):
         org = row_to_dict(conn.execute(
             "SELECT id, name FROM organizations WHERE upper(code)=?",
             (organization_code,)
@@ -404,7 +404,7 @@ def register():
 
     uid = str(uuid.uuid4())
     hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    pending = role in ("supervisor", "employee")
+    pending = role in ("supervisor", "staff")
     conn.execute("""
         INSERT INTO users
           (id, name, email, password_hash, role, organization_id,
@@ -765,7 +765,7 @@ def get_organization_members():
 
     ranked = [
         member for member in members
-        if str(member.get("role") or "").lower() in ("staff", "employee")
+        if str(member.get("role") or "").lower() in ("staff", "staff")
         and int(member.get("total_tasks") or 0) > 0
         and member.get("compliance_pct") is not None
     ]
