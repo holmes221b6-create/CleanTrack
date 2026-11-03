@@ -32,7 +32,7 @@ class Invitation(db.Model):
     )
 
     email = db.Column(db.String(254), nullable=False, index=True)
-    role = db.Column(db.String(20), nullable=False, default="Employee")
+    role = db.Column(db.String(20), nullable=False, default="Staff")
 
     # Store only a hash of the secret token, never the raw token.
     token_hash = db.Column(db.String(64), nullable=False, unique=True)
