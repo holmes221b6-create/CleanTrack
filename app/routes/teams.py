@@ -458,7 +458,7 @@ def assign_members(team_id):
         User.role.in_(["Supervisor", "Staff"]),
     ).all()
     if len(users) != len(member_ids):
-        return jsonify({"error": "Every selected person must be an active Supervisor or Employee in your organization."}), 400
+        return jsonify({"error": "Every selected person must be an active Supervisor or Staff in your organization."}), 400
     previous = {row.user_id: row for row in TeamMember.query.filter_by(team_id=team.id).all()}
     selected = set(member_ids)
     for user in users:
