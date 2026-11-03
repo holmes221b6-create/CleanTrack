@@ -1,30 +1,35 @@
-import base64
-from email.message import EmailMessage
+"""Manual Gmail API smoke-test script.
 
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
+This file is intentionally safe for pytest discovery: it does not import
+Google client libraries, read credentials, or send email when imported.
+Run it directly only when deliberately testing a configured Gmail API account.
+"""
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
-creds = Credentials.from_authorized_user_file(
-    "token.json",
-    SCOPES
-)
+def main():
+    import base64
+    from email.message import EmailMessage
 
-service = build("gmail", "v1", credentials=creds)
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
 
-message = EmailMessage()
-message["To"] = "oninoroger@gmail.com"
-message["Subject"] = "CleanTrack Gmail API Test"
-message.set_content("This is a test email from CleanTrack.")
+    scopes = ["https://www.googleapis.com/auth/gmail.send"]
+    credentials = Credentials.from_authorized_user_file("token.json", scopes)
+    service = build("gmail", "v1", credentials=credentials)
 
-encoded_message = base64.urlsafe_b64encode(
-    message.as_bytes()
-).decode()
+    recipient = input("Recipient email address: ").strip()
+    if not recipient or "@" not in recipient:
+        raise ValueError("Enter a valid recipient email address.")
 
-service.users().messages().send(
-    userId="me",
-    body={"raw": encoded_message}
-).execute()
+    message = EmailMessage()
+    message["To"] = recipient
+    message["Subject"] = "CleanTrack Gmail API Test"
+    message.set_content("This is a manually requested Gmail API test.")
 
-print("EMAIL SENT SUCCESSFULLY")
+    encoded = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": encoded}).execute()
+    print("Email sent successfully.")
+
+
+if __name__ == "__main__":
+    main()
