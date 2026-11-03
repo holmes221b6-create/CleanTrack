@@ -128,7 +128,7 @@ def register():
 
     if invitation_token:
         if role not in {"Supervisor", "Staff"}:
-            return json_error("Invitation links can only be used for Supervisor or Employee accounts.", 400)
+            return json_error("Invitation links can only be used for Supervisor or Staff accounts.", 400)
         token_hash = hashlib.sha256(invitation_token.encode("utf-8")).hexdigest()
         invitation = Invitation.query.filter_by(token_hash=token_hash).first()
         if invitation is None or invitation.status != "pending":
