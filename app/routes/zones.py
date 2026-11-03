@@ -92,7 +92,7 @@ def _people_for_team(team_id, organization_id):
             TeamMember.team_id == team_id,
             User.organization_id == organization_id,
             User.account_status == "active",
-            User.role.in_(["Supervisor", "Employee"]),
+            User.role.in_(["Supervisor", "Staff"]),
         )
         .order_by(func.lower(User.full_name))
         .all()
@@ -136,14 +136,14 @@ def _zone_payload(zone, include_people=False, include_operations=False):
         "effective_team_id": effective_team_id,
         "effective_team_name": team.name if team else None,
         "member_count": len(people),
-        "employee_count": sum(1 for row in people if row["role"].lower() == "employee"),
+        "employee_count": sum(1 for row in people if row["role"].lower() == "staff"),
         "supervisor_count": sum(1 for row in people if row["role"].lower() == "supervisor"),
         "operation_count": len(all_operations),
         "active_operation_count": len(open_operations),
         "scheduled_operation_count": len(scheduled),
         "assigned_people": people if include_people else [],
         "assigned_supervisor_names": [row["name"] for row in people if str(row["role"]).lower() == "supervisor"],
-        "assigned_employee_names": [row["name"] for row in people if str(row["role"]).lower() == "employee"],
+        "assigned_employee_names": [row["name"] for row in people if str(row["role"]).lower() == "staff"],
     })
     if include_operations:
         payload["operations"] = [{
@@ -633,7 +633,7 @@ def upload_zone_floor_plan(zone_id):
 
 
 @zones_bp.get("/<int:zone_id>/floor-plan")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def get_zone_floor_plan(zone_id):
     user = get_current_user()
     zone = _zone_or_none(zone_id, user)
@@ -655,7 +655,7 @@ def get_zone_floor_plan(zone_id):
 
 
 @zones_bp.get("/<int:zone_id>/floor-plan/boundary")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def get_zone_floor_plan_boundary(zone_id):
     user = get_current_user()
     zone = _zone_or_none(zone_id, user)
@@ -743,7 +743,7 @@ def delete_zone_floor_plan(zone_id):
 
 
 @zones_bp.get("/resolve/<string:qr_token>")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def resolve_zone_qr(qr_token):
     user = get_current_user()
     zone = Zone.query.filter_by(
