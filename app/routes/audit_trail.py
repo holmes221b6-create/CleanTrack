@@ -10,6 +10,7 @@ from sqlalchemy import cast, func, or_, String, false
 from app.extensions import db
 from app.models.audit_log import AuditLog
 from app.models.operation import Operation
+from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
 from app.services.audit_retention import audit_cutoff, purge_expired_audit_logs
@@ -44,7 +45,11 @@ def _scoped_query(user):
     if role == "supervisor":
         team_ids = [
             row[0] for row in db.session.query(TeamMember.team_id)
-            .filter(TeamMember.user_id == user.id).all()
+            .join(Team, Team.id == TeamMember.team_id)
+            .filter(
+                TeamMember.user_id == user.id,
+                Team.organization_id == user.organization_id,
+            ).all()
         ]
         assigned_operation_ids = db.session.query(cast(Operation.id, String)).filter(
             Operation.organization_id == user.organization_id,
