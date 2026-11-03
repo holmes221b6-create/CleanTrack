@@ -115,8 +115,11 @@ def _audience_users(item):
     if item.audience_scope == "supervisors":
         return query.filter_by(role="Supervisor").all()
     if item.audience_scope == "team":
-        query = query.join(TeamMember, TeamMember.user_id == User.id).filter(
-            TeamMember.team_id == item.team_id
+        query = query.join(TeamMember, TeamMember.user_id == User.id).join(
+            Team, Team.id == TeamMember.team_id
+        ).filter(
+            TeamMember.team_id == item.team_id,
+            Team.organization_id == item.organization_id,
         )
         if item.creator and item.creator.role == "Supervisor":
             query = query.filter(User.role == "Staff")
