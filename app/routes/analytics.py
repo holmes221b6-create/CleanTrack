@@ -486,7 +486,7 @@ def analytics_workspace():
     employees = User.query.filter(
         User.organization_id == admin.organization_id,
         User.account_status == "active",
-        User.role.in_(["Employee", "Supervisor"]),
+        User.role.in_(["Staff", "Supervisor"]),
     ).order_by(func.lower(User.full_name), User.id).all()
 
     team_by_id = {row.id: row for row in teams}
