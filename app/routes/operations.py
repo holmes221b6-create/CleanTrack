@@ -34,7 +34,11 @@ CLOSED_STATUSES = {"completed", "approved", "cancelled", "canceled"}
 def _team_ids(user):
     return {
         row[0] for row in db.session.query(TeamMember.team_id)
-        .filter(TeamMember.user_id == user.id).all()
+        .join(Team, Team.id == TeamMember.team_id)
+        .filter(
+            TeamMember.user_id == user.id,
+            Team.organization_id == user.organization_id,
+        ).all()
     }
 
 
@@ -279,7 +283,11 @@ def operations_collection():
                 return jsonify({"error": "Supervisor not found in this organization."}), 404
             team_ids = [
                 row[0] for row in db.session.query(TeamMember.team_id)
-                .filter(TeamMember.user_id == supervisor.id).all()
+                .join(Team, Team.id == TeamMember.team_id)
+                .filter(
+                    TeamMember.user_id == supervisor.id,
+                    Team.organization_id == user.organization_id,
+                ).all()
             ]
             clauses = [
                 Operation.assigned_supervisor_id == supervisor.id,
