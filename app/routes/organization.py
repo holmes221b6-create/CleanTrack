@@ -35,7 +35,7 @@ def _stats_for_organization(organization_id):
     staff = User.query.filter(
         User.organization_id == organization_id,
         User.account_status == "active",
-        User.role.in_(("Supervisor", "Employee")),
+        User.role.in_(("Supervisor", "Staff")),
     ).count()
     teams = Team.query.filter_by(
         organization_id=organization_id,
@@ -174,7 +174,7 @@ def organization_audit_log():
 
 
 @organization_bp.get("/my-profile")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def my_organization_profile():
     """Return safe organization identity fields for the signed-in member."""
     user = get_current_user()
@@ -409,7 +409,7 @@ def organization_members():
         User.query.filter(
             User.organization_id == org_id,
             User.account_status == "active",
-            User.role.in_(("Supervisor", "Employee")),
+            User.role.in_(("Supervisor", "Staff")),
         )
         .order_by(func.lower(User.full_name))
         .limit(5000)
@@ -532,7 +532,7 @@ def organization_members():
 
     ranked = [
         member for member in members
-        if member["role"] in ("employee", "staff")
+        if member["role"] in ("staff", "staff")
         and member["total_tasks"] > 0
         and member["compliance_pct"] is not None
     ]
@@ -573,7 +573,7 @@ def set_member_teams(member_id):
         organization_id=admin.organization_id,
         account_status="active",
     ).first()
-    if member is None or member.role not in {"Supervisor", "Employee"}:
+    if member is None or member.role not in {"Supervisor", "Staff"}:
         return jsonify({"error": "Member not found in your organization."}), 404
 
     if team_ids:
@@ -633,7 +633,7 @@ def list_organization_staff():
     organization_id = admin.organization_id
     staff = User.query.filter(
         User.organization_id == organization_id,
-        User.role.in_(("Supervisor", "Employee")),
+        User.role.in_(("Supervisor", "Staff")),
         User.account_status.in_(("active", "suspended", "termination_pending", "terminated")),
     ).order_by(func.lower(User.full_name)).limit(1000).all()
     now = datetime.now(timezone.utc)
@@ -746,7 +746,7 @@ def list_organization_staff():
     inactive_statuses = {"suspended", "terminated"}
     is_inactive = lambda member: member.account_status in inactive_statuses
     supervisors = [record for record in serialized if str(record.get("role", "")).lower() == "supervisor"]
-    employees = [record for record in serialized if str(record.get("role", "")).lower() == "employee"]
+    employees = [record for record in serialized if str(record.get("role", "")).lower() == "staff"]
 
     return jsonify({
         "staff": serialized,
@@ -762,8 +762,8 @@ def list_organization_staff():
             "terminated": sum(1 for member in staff if member.account_status == "terminated"),
             "active_supervisors": sum(1 for member in staff if member.role.lower() == "supervisor" and member.account_status == "active"),
             "inactive_supervisors": sum(1 for member in staff if member.role.lower() == "supervisor" and is_inactive(member)),
-            "active_employees": sum(1 for member in staff if member.role.lower() == "employee" and member.account_status == "active"),
-            "inactive_employees": sum(1 for member in staff if member.role.lower() == "employee" and is_inactive(member)),
+            "active_employees": sum(1 for member in staff if member.role.lower() == "staff" and member.account_status == "active"),
+            "inactive_employees": sum(1 for member in staff if member.role.lower() == "staff" and is_inactive(member)),
             "pending_invitations": pending_invite_count,
         },
         "workload_period_days": 30,
@@ -778,7 +778,7 @@ def schedule_member_termination(member_id):
     if (
         member is None
         or member.organization_id != admin.organization_id
-        or member.role not in {"Supervisor", "Employee"}
+        or member.role not in {"Supervisor", "Staff"}
     ):
         return jsonify({"error": "Organization member not found."}), 404
     if member.account_status == "termination_pending":
@@ -820,7 +820,7 @@ def cancel_member_termination(member_id):
     if (
         member is None
         or member.organization_id != admin.organization_id
-        or member.role not in {"Supervisor", "Employee"}
+        or member.role not in {"Supervisor", "Staff"}
     ):
         return jsonify({"error": "Organization member not found."}), 404
     if member.account_status != "termination_pending":
@@ -856,7 +856,7 @@ def suspend_organization_member():
         id=member_id,
         organization_id=admin.organization_id,
     ).first()
-    if member is None or member.role not in {"Supervisor", "Employee"}:
+    if member is None or member.role not in {"Supervisor", "Staff"}:
         return jsonify({"error": "Organization member not found."}), 404
     if member.account_status == "suspended":
         return jsonify({"error": "This member is already suspended."}), 409
@@ -906,7 +906,7 @@ def restore_suspended_organization_member():
         id=member_id,
         organization_id=admin.organization_id,
     ).first()
-    if member is None or member.role not in {"Supervisor", "Employee"}:
+    if member is None or member.role not in {"Supervisor", "Staff"}:
         return jsonify({"error": "Organization member not found."}), 404
     if member.account_status != "suspended":
         return jsonify({"error": "This member is not suspended."}), 409
