@@ -315,7 +315,12 @@ def create_app(config_class=Config):
         try:
             with db.engine.connect() as connection:
                 connection.exec_driver_sql("SELECT 1")
-            return jsonify({"status": "ok", "database": "connected"}), 200
+            dialect = db.engine.dialect.name
+            return jsonify({
+                "status": "ok",
+                "database": "connected",
+                "database_engine": dialect,
+            }), 200
         except Exception:
             app.logger.exception("Database health check failed")
             return jsonify({"status": "error", "database": "unavailable"}), 503
