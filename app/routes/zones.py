@@ -208,7 +208,7 @@ def zones_collection():
                 return jsonify({"error": "Status must be active, inactive, archived, or all."}), 400
             query = query.filter_by(status=status)
         zones = query.order_by(Zone.name.asc(), Zone.id.asc()).all()
-        return jsonify({"zones": [_zone_payload(zone) for zone in zones]}), 200
+        return jsonify({"zones": [_zone_payload(zone, include_people=True) for zone in zones]}), 200
 
     data = request.get_json(silent=True) or {}
     name = data.get("name", "")
