@@ -115,7 +115,7 @@ def register():
         return json_error("Email or phone number is too long.", 400)
     if not isinstance(data.get("accept_terms", True), bool):
         return json_error("Invalid terms acceptance value.", 400)
-    if role not in {"Admin", "Supervisor", "Employee"}:
+    if role not in {"Admin", "Supervisor", "Staff"}:
         return json_error("A valid role is required.", 400)
     if len(password) < 8:
         return json_error("Password must be at least 8 characters long.", 400)
@@ -127,7 +127,7 @@ def register():
     invitation = None
 
     if invitation_token:
-        if role not in {"Supervisor", "Employee"}:
+        if role not in {"Supervisor", "Staff"}:
             return json_error("Invitation links can only be used for Supervisor or Employee accounts.", 400)
         token_hash = hashlib.sha256(invitation_token.encode("utf-8")).hexdigest()
         invitation = Invitation.query.filter_by(token_hash=token_hash).first()
