@@ -589,12 +589,15 @@ def set_member_teams(member_id):
 
     previous_teams = [
         {"id": row.team_id, "name": row.team.name}
-        for row in TeamMember.query.filter_by(user_id=member_id).all()
+        for row in TeamMember.query.join(Team, TeamMember.team_id == Team.id).filter(
+            TeamMember.user_id == member_id,
+            Team.organization_id == admin.organization_id,
+        ).all()
     ]
     next_teams = [{"id": team.id, "name": team.name} for team in teams]
 
     try:
-        TeamMember.query.filter_by(user_id=member_id).delete(synchronize_session=False)
+        TeamMember.query.filter(TeamMember.user_id == member_id, TeamMember.team_id.in_([team.id for team in teams]) if teams else TeamMember.team_id.in_(db.session.query(Team.id).filter_by(organization_id=admin.organization_id))).delete(synchronize_session=False)
         for team in teams:
             db.session.add(TeamMember(team_id=team.id, user_id=member_id))
         _record_organization_audit(admin, db.session.get(Organization, admin.organization_id),
@@ -850,7 +853,7 @@ def cancel_member_termination(member_id):
 
 @organization_bp.post("/members/<int:member_id>/suspend")
 @roles_required("Admin")
-def suspend_organization_member():
+def suspend_organization_member(member_id):
     admin = get_current_user()
     member = User.query.filter_by(
         id=member_id,
@@ -900,7 +903,7 @@ def suspend_organization_member():
 
 @organization_bp.post("/members/<int:member_id>/suspend/restore")
 @roles_required("Admin")
-def restore_suspended_organization_member():
+def restore_suspended_organization_member(member_id):
     admin = get_current_user()
     member = User.query.filter_by(
         id=member_id,
