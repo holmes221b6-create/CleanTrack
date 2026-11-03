@@ -690,7 +690,7 @@ def upload_location_floor_plan(location_id):
 
 
 @locations_bp.get("/<int:location_id>/floor-plan")
-@roles_required("Admin", "Supervisor", "Employee")
+@roles_required("Admin", "Supervisor", "Staff")
 def get_location_floor_plan(location_id):
     user = get_current_user()
     location = _location_or_none(location_id, user)
