@@ -1153,13 +1153,6 @@ def analytics_overdue_risk():
     team_ids = {row.id for row in teams}
     location_by_id = {row.id: row for row in locations}
     zone_by_id = {row.id: row for row in zones}
-    active_people = {
-        row.id for row in User.query.filter(
-            User.organization_id == admin.organization_id,
-            User.account_status == "active",
-        ).all()
-    }
-
     def dimensions(operation):
         zone = zone_by_id.get(operation.zone_id)
         location_id = operation.location_id
