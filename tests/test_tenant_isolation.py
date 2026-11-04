@@ -223,8 +223,9 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     workload = client.get("/api/analytics/predictions", headers=headers)
     assert workload.status_code == 200
     workload_payload = workload.get_json()
-    assert workload_payload["status"] == "no_history"
-    assert workload_payload["forecast"] == []
+    assert workload_payload["status"] == "available"
+    # Three historical Tenant A operations; Tenant B's operation is excluded.
+    assert workload_payload["sample_count"] == 3
 
     risk = client.get("/api/analytics/predictions/overdue-risk", headers=headers)
     assert risk.status_code == 200
@@ -266,3 +267,13 @@ def test_anomaly_detection_excludes_completed_records_without_terminal_timestamp
     payload = response.get_json()
     # Only the still-open overdue operation has a defensible matured outcome.
     assert payload["matured_deadline_outcomes"] == 1
+
+
+
+def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operations(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    response = tenant_app.test_client().get("/api/analytics/predictions", headers=headers)
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "no_history"
+    assert payload["forecast"] == []
