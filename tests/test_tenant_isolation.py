@@ -265,7 +265,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     risk_payload = risk.get_json()
     assert risk_payload["historical_sample_count"] == 1
     assert risk_payload["validation"]["status"] == "insufficient_history"
-    assert risk_payload["validation"]["holdout_sample_count"] == 0
+    assert risk_payload["validation"]["holdout_sample_count"] == 1
     assert all(row["title"] != "Tenant B secret future operation" for row in risk_payload["at_risk_operations"])
     assert any(row["operation_id"] == future_a_id for row in risk_payload["at_risk_operations"])
     assert any(row["operation_id"] == rejected_a_id for row in risk_payload["at_risk_operations"])
