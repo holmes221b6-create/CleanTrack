@@ -1848,9 +1848,11 @@ def analytics_anomalies():
         day = (now.date() - timedelta(days=offset)).isoformat()
         baseline_days.append(daily_counts.get(day, 0))
     baseline_mean = sum(baseline_days) / len(baseline_days) if baseline_days else 0
+    # Compare seven complete calendar days; exclude today because its
+    # partial count would be biased downward against full-day baselines.
     recent_days = [
         (now.date() - timedelta(days=offset)).isoformat()
-        for offset in range(7)
+        for offset in range(1, 8)
     ]
     recent_total = sum(daily_counts.get(day, 0) for day in recent_days)
     recent_daily_mean = recent_total / 7
@@ -1859,7 +1861,7 @@ def analytics_anomalies():
             "kind": "workload_spike",
             "severity": "elevated",
             "title": "Recent operation volume is unusually high",
-            "description": "The last seven days averaged more incoming operations per day than the preceding historical baseline.",
+            "description": "The last seven complete calendar days averaged more incoming operations per day than the preceding historical baseline.",
             "observed": round(recent_daily_mean, 2),
             "baseline": round(baseline_mean, 2),
             "change_percent": round((recent_daily_mean / baseline_mean - 1) * 100, 1),
@@ -1934,7 +1936,7 @@ def analytics_anomalies():
                 str(len(findings)) + " operational pattern(s) identified for review."
             )
         ),
-        "method": "Workload spike: recent 7-day daily average exceeds the prior 82-day baseline by 1.8x; overdue pattern: at least 3 matured outcomes and 15 percentage points above the organisation-wide late rate; repeat execution: 2 or more recorded attempts. These are screening thresholds, not statistical significance tests.",
+        "method": "Workload spike: 7 complete calendar days (excluding today) exceed the prior 82-day daily baseline by 1.8x; overdue pattern: at least 3 matured outcomes and 15 percentage points above the organisation-wide late rate; repeat execution: 2 or more recorded attempts. These are screening thresholds, not statistical significance tests.",
         "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
     }), 200
 
