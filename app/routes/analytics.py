@@ -1720,8 +1720,8 @@ def analytics_completion_time():
         "organisation_median_minutes": round(organisation_median, 1) if organisation_median is not None else None,
         "predicted_open_operations": len(predictions),
         "predictions": predictions[:30],
-        "method": "Median and interquartile range of recorded execution durations, matched by operation type and priority with organisation-wide fallback",
-        "notice": "Estimates may be wrong. They use only this organisation's historical execution records and are not guaranteed completion times.",
+        "method": "Median and interquartile range of submitted or completed execution durations, matched by operation type and priority with organisation-wide fallback; rejected and unfinished attempts are excluded",
+        "notice": "Estimates may be wrong. They use only this organisation's historical execution records and are not guaranteed completion times. The 25th–75th percentile range is descriptive, not a confidence interval.",
     }), 200
 
 @analytics_bp.get("/predictions/anomalies")
