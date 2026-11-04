@@ -1259,7 +1259,7 @@ def analytics_overdue_risk():
     at_risk = []
     for operation in current_rows:
         status = str(operation.status or "").strip().lower()
-        if status in DONE_STATUSES or status in CANCELLED_STATUSES:
+        if status in DONE_STATUSES or status in CANCELLED_STATUSES or status in {"submitted", "verified"}:
             continue
         team_id, location_id, zone_id, employee_id = dimensions(operation)
         if selected["team_ids"] and team_id not in selected["team_ids"]:
