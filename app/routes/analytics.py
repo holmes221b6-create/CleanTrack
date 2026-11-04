@@ -1953,6 +1953,8 @@ def analytics_anomalies():
         day = (today_local - timedelta(days=offset)).isoformat()
         baseline_days.append(daily_counts.get(day, 0))
     baseline_mean = sum(baseline_days) / len(baseline_days) if baseline_days else 0
+    baseline_active_days = sum(1 for value in baseline_days if value > 0)
+    baseline_median = float(median(baseline_days)) if baseline_days else 0
     # Compare seven complete calendar days; exclude today because its
     # partial count would be biased downward against full-day baselines.
     recent_days = [
@@ -1961,15 +1963,28 @@ def analytics_anomalies():
     ]
     recent_total = sum(daily_counts.get(day, 0) for day in recent_days)
     recent_daily_mean = recent_total / 7
-    if baseline_mean > 0 and recent_daily_mean > baseline_mean * 1.8:
+    # A zero baseline is not silently treated as "no anomaly": a new burst
+    # of at least five operations in a previously inactive period is surfaced
+    # as an emerging-activity signal, not a percentage increase from zero.
+    zero_baseline_emerging = baseline_mean == 0 and recent_total >= 5
+    elevated_volume = baseline_mean > 0 and recent_daily_mean > baseline_mean * 1.8
+    if elevated_volume or zero_baseline_emerging:
         findings.append({
             "kind": "workload_spike",
             "severity": "elevated",
             "title": "Recent operation volume is unusually high",
-            "description": "The last seven complete calendar days averaged more incoming operations per day than the preceding historical baseline.",
+            "description": (
+                "At least five operations arrived in the last seven complete days after no operations were recorded in the preceding baseline period."
+                if zero_baseline_emerging else
+                "The last seven complete calendar days averaged more incoming operations per day than the preceding historical baseline."
+            ),
             "observed": round(recent_daily_mean, 2),
             "baseline": round(baseline_mean, 2),
-            "change_percent": round((recent_daily_mean / baseline_mean - 1) * 100, 1),
+            "baseline_median": round(baseline_median, 2),
+            "baseline_active_days": baseline_active_days,
+            "baseline_days": len(baseline_days),
+            "change_percent": round((recent_daily_mean / baseline_mean - 1) * 100, 1) if baseline_mean > 0 else None,
+            "emerging_after_zero_baseline": zero_baseline_emerging,
             "evidence_count": recent_total,
         })
 
@@ -2032,6 +2047,16 @@ def analytics_anomalies():
         "time_zone": time_zone_name,
         "historical_operation_count": len(scoped),
         "matured_deadline_outcomes": matured_total,
+        "analysis_evidence": {
+            "baseline_days": len(baseline_days),
+            "baseline_active_days": baseline_active_days,
+            "baseline_daily_mean": round(baseline_mean, 2),
+            "baseline_daily_median": round(baseline_median, 2),
+            "recent_complete_days": len(recent_days),
+            "recent_operations": recent_total,
+            "deadline_outcomes_with_reliable_timestamps": matured_total,
+            "overdue_rate_assessable": matured_total >= 3,
+        },
         "generated_at": now.isoformat(),
         "findings": findings,
         "summary": (
