@@ -1219,12 +1219,62 @@ def analytics_overdue_risk():
             continue
         matured.append({
             "late": bool(late),
+            "due_at": due,
             "task_type": str(operation.task_type or "General").casefold(),
             "priority": str(operation.priority or "Normal").casefold(),
         })
 
     total = len(matured)
     late_total = sum(1 for row in matured if row["late"])
+
+    # Temporal holdout: train on earlier matured deadlines and evaluate on
+    # the latest 20%. No held-out outcome contributes to its own estimate.
+    ordered_matured = sorted(matured, key=lambda row: row["due_at"])
+    split_at = int(len(ordered_matured) * 0.8)
+    validation_train = ordered_matured[:split_at]
+    validation_holdout = ordered_matured[split_at:]
+    validation = {
+        "status": "insufficient_history",
+        "method": "Chronological 80/20 holdout; cohort late-rate estimates compared with the training-period organisation-wide late-rate baseline using Brier score",
+        "training_sample_count": len(validation_train),
+        "holdout_sample_count": len(validation_holdout),
+        "model_brier_score": None,
+        "baseline_brier_score": None,
+        "beats_baseline": None,
+    }
+    if len(validation_train) >= 10 and len(validation_holdout) >= 5:
+        train_late = sum(1 for row in validation_train if row["late"])
+        train_rate = train_late / len(validation_train)
+        train_cohorts = {}
+        for row in validation_train:
+            key = (row["task_type"], row["priority"])
+            cohort = train_cohorts.setdefault(key, {"count": 0, "late": 0})
+            cohort["count"] += 1
+            cohort["late"] += int(row["late"])
+        model_squared_errors = []
+        baseline_squared_errors = []
+        for row in validation_holdout:
+            cohort = train_cohorts.get((row["task_type"], row["priority"]))
+            cohort_count = cohort["count"] if cohort else 0
+            if cohort_count >= 8:
+                cohort_rate = cohort["late"] / cohort_count
+                probability = (
+                    cohort_rate * cohort_count + train_rate * 8
+                ) / (cohort_count + 8)
+            else:
+                probability = train_rate
+            actual = 1.0 if row["late"] else 0.0
+            model_squared_errors.append((probability - actual) ** 2)
+            baseline_squared_errors.append((train_rate - actual) ** 2)
+        model_brier = sum(model_squared_errors) / len(model_squared_errors)
+        baseline_brier = sum(baseline_squared_errors) / len(baseline_squared_errors)
+        validation.update({
+            "status": "evaluated",
+            "training_late_rate_percent": round(train_rate * 100, 1),
+            "model_brier_score": round(model_brier, 4),
+            "baseline_brier_score": round(baseline_brier, 4),
+            "beats_baseline": model_brier < baseline_brier,
+        })
     global_rate = late_total / total if total else 0.0
     cohorts = {}
     for row in matured:
@@ -1241,6 +1291,7 @@ def analytics_overdue_risk():
         "historical_late_rate_percent": round(global_rate * 100, 1) if total else None,
         "generated_at": now.isoformat(),
         "method": "Smoothed empirical late-rate by operation type and priority, with organisation-wide fallback",
+        "validation": validation,
         "notice": "These estimates may be wrong. They use only this organisation's historical records and are not guarantees or individual performance assessments.",
     }
     if total == 0:
