@@ -1209,8 +1209,8 @@ def analytics_overdue_risk():
             continue
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
             continue
-        if employee_id is not None and employee_id not in active_people:
-            continue
+        # Keep historical outcomes when an assignee is later deactivated.
+        # An explicit employee filter above still scopes by the stored assignee ID.
         if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
             continue
         matured.append({
@@ -1583,8 +1583,7 @@ def analytics_completion_time():
             continue
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
             continue
-        if employee_id is not None and employee_id not in active_people:
-            continue
+        # Historical execution observations remain valid after staff deactivation.
         if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
             continue
         observations.append({
@@ -1775,9 +1774,18 @@ def analytics_anomalies():
         submitted = _to_utc(operation.submitted_at)
         status = str(operation.status or "").strip().lower()
         if due and due < now and status not in CANCELLED_STATUSES:
-            # An overdue, still-open operation is a late outcome; submitted work
-            # is late only when its submission timestamp exceeded its deadline.
-            late = submitted > due if submitted else status not in DONE_STATUSES
+            reviewed = _to_utc(operation.reviewed_at)
+            terminal_at = submitted or reviewed
+            # Completed records without a recorded terminal timestamp cannot
+            # be labelled on-time or late; exclude them from the denominator.
+            if status in DONE_STATUSES and terminal_at is None:
+                continue
+            # Submitted/verified states without their expected timestamp are
+            # also unobservable, not evidence of an on-time outcome.
+            if status in {"submitted", "verified"} and terminal_at is None:
+                continue
+            # Open work past its deadline is late; otherwise use its terminal event.
+            late = terminal_at > due if terminal_at is not None else True
             key = str(operation.task_type or "General")
             group = type_outcomes.setdefault(key, {"count": 0, "late": 0})
             group["count"] += 1
