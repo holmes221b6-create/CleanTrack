@@ -1954,7 +1954,13 @@ def analytics_anomalies():
         baseline_days.append(daily_counts.get(day, 0))
     baseline_mean = sum(baseline_days) / len(baseline_days) if baseline_days else 0
     baseline_active_days = sum(1 for value in baseline_days if value > 0)
-    baseline_median = float(median(baseline_days)) if baseline_days else 0
+    sorted_baseline_days = sorted(baseline_days)
+    baseline_middle = len(sorted_baseline_days) // 2
+    baseline_median = (
+        float(sorted_baseline_days[baseline_middle])
+        if len(sorted_baseline_days) % 2 else
+        float((sorted_baseline_days[baseline_middle - 1] + sorted_baseline_days[baseline_middle]) / 2)
+    ) if sorted_baseline_days else 0
     # Compare seven complete calendar days; exclude today because its
     # partial count would be biased downward against full-day baselines.
     recent_days = [
