@@ -1533,13 +1533,6 @@ def analytics_completion_time():
     zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
     location_by_id = {row.id: row for row in locations}
     zone_by_id = {row.id: row for row in zones}
-    active_people = {
-        row.id for row in User.query.filter(
-            User.organization_id == admin.organization_id,
-            User.account_status == "active",
-        ).all()
-    }
-
     def dimensions(operation):
         zone = zone_by_id.get(operation.zone_id)
         location_id = operation.location_id
@@ -1633,8 +1626,6 @@ def analytics_completion_time():
         if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
             continue
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
-            continue
-        if employee_id is not None and employee_id not in active_people:
             continue
         task_type = str(operation.task_type or "General").casefold()
         priority = str(operation.priority or "Normal").casefold()
