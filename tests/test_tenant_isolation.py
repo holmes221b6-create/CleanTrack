@@ -198,6 +198,12 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             created_by_id=admin_a.id, assigned_to_id=staff_a.id,
             status="Assigned", created_at=old, due_at=due_future,
         )
+        rejected_a = Operation(
+            title="Tenant A rejected operation awaiting rework", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            status="Rejected", created_at=old, due_at=due_future,
+            submitted_at=now - timedelta(hours=2), reviewed_at=now - timedelta(hours=1),
+        )
         future_b = Operation(
             title="Tenant B secret future operation", organization_id=admin_b.organization_id,
             created_by_id=admin_b.id, assigned_to_id=staff_b.id,
@@ -205,7 +211,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         )
         # Historical work must remain in training data after a staff account is deactivated.
         staff_a.account_status = "inactive"
-        db.session.add_all([open_a, completed_without_timestamp, future_a, future_b])
+        db.session.add_all([open_a, completed_without_timestamp, future_a, rejected_a, future_b])
         db.session.flush()
         execution_a = OperationExecution(
             operation_id=future_a.id, performed_by_id=staff_a.id,
@@ -220,14 +226,15 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         db.session.add_all([execution_a, execution_b])
         db.session.commit()
         future_a_id = future_a.id
+        rejected_a_id = rejected_a.id
 
     client = tenant_app.test_client()
     workload = client.get("/api/analytics/predictions", headers=headers)
     assert workload.status_code == 200
     workload_payload = workload.get_json()
     assert workload_payload["status"] == "available"
-    # Three historical Tenant A operations; Tenant B's operation is excluded.
-    assert workload_payload["sample_count"] == 3
+    # Four historical Tenant A operations; Tenant B's operation is excluded.
+    assert workload_payload["sample_count"] == 4
 
     risk = client.get("/api/analytics/predictions/overdue-risk", headers=headers)
     assert risk.status_code == 200
@@ -235,12 +242,14 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert risk_payload["historical_sample_count"] == 1
     assert all(row["title"] != "Tenant B secret future operation" for row in risk_payload["at_risk_operations"])
     assert any(row["operation_id"] == future_a_id for row in risk_payload["at_risk_operations"])
+    assert any(row["operation_id"] == rejected_a_id for row in risk_payload["at_risk_operations"])
 
     duration = client.get("/api/analytics/predictions/completion-time", headers=headers)
     assert duration.status_code == 200
     duration_payload = duration.get_json()
     assert duration_payload["historical_execution_sample_count"] == 1
     assert all(row["title"] != "Tenant B secret future operation" for row in duration_payload["predictions"])
+    assert any(row["operation_id"] == rejected_a_id for row in duration_payload["predictions"])
 
 
 def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
