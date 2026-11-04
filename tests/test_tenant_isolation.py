@@ -227,6 +227,11 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             attempt_number=1, status="Submitted", started_at=now - timedelta(hours=3),
             submitted_at=now - timedelta(hours=2), created_at=now - timedelta(hours=3),
         )
+        rejected_execution_a = OperationExecution(
+            operation_id=rejected_a.id, performed_by_id=staff_a.id,
+            attempt_number=1, status="Rejected", started_at=now - timedelta(hours=5),
+            submitted_at=now - timedelta(hours=2), created_at=now - timedelta(hours=5),
+        )
         execution_b = OperationExecution(
             operation_id=future_b.id, performed_by_id=staff_b.id,
             attempt_number=1, status="Submitted", started_at=now - timedelta(hours=5),
@@ -237,7 +242,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             attempt_number=2, status="Submitted", started_at=now - timedelta(hours=3),
             submitted_at=now - timedelta(hours=2), created_at=now - timedelta(hours=3),
         )
-        db.session.add_all([execution_a, execution_b, execution_b_retry])
+        db.session.add_all([execution_a, rejected_execution_a, execution_b, execution_b_retry])
         db.session.commit()
         future_a_id = future_a.id
         rejected_a_id = rejected_a.id
