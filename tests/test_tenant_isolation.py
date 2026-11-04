@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from flask_jwt_extended import create_access_token
 
@@ -8,6 +10,7 @@ from app.models.organization import Organization
 from app.models.user import User
 from app.models.team import Team
 from app.models.operation import Operation
+from app.models.operation_execution import OperationExecution
 from app.services.permissions import VALID_ROLES
 
 
@@ -157,3 +160,103 @@ def test_admin_cannot_assign_another_organizations_team_to_an_operation(tenant_a
         },
     )
     assert response.status_code == 400
+
+
+
+def _prediction_admin_headers(tenant_app, monkeypatch):
+    import app.routes.analytics as analytics_routes
+
+    # These tests exercise the prediction calculations, not billing entitlement.
+    monkeypatch.setattr(analytics_routes, "_analytics_access_error", lambda _admin: None)
+    ids = tenant_app.config["TENANT_TEST_IDS"]
+    return {"Authorization": "Bearer " + ids["admin_a_token"]}
+
+
+def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        admin_b = User.query.filter_by(email="admin-b@example.test").one()
+        staff_b = User.query.filter_by(email="staff-b@example.test").one()
+        old = now - timedelta(days=12)
+        due_past = now - timedelta(days=2)
+        due_future = now + timedelta(days=2)
+        open_a = Operation(
+            title="Tenant A open overdue", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            status="Assigned", created_at=old, due_at=due_past,
+        )
+        completed_without_timestamp = Operation(
+            title="Tenant A completed without timestamp", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            status="Completed", created_at=old, due_at=due_past,
+        )
+        future_a = Operation(
+            title="Tenant A future operation", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            status="Assigned", created_at=old, due_at=due_future,
+        )
+        future_b = Operation(
+            title="Tenant B secret future operation", organization_id=admin_b.organization_id,
+            created_by_id=admin_b.id, assigned_to_id=staff_b.id,
+            status="Assigned", created_at=old, due_at=due_future,
+        )
+        db.session.add_all([open_a, completed_without_timestamp, future_a, future_b])
+        db.session.flush()
+        execution_a = OperationExecution(
+            operation_id=future_a.id, performed_by_id=staff_a.id,
+            attempt_number=1, status="Submitted", started_at=now - timedelta(hours=3),
+            submitted_at=now - timedelta(hours=2), created_at=now - timedelta(hours=3),
+        )
+        execution_b = OperationExecution(
+            operation_id=future_b.id, performed_by_id=staff_b.id,
+            attempt_number=1, status="Submitted", started_at=now - timedelta(hours=5),
+            submitted_at=now - timedelta(hours=4), created_at=now - timedelta(hours=5),
+        )
+        db.session.add_all([execution_a, execution_b])
+        db.session.commit()
+        open_a_id = open_a.id
+
+    client = tenant_app.test_client()
+    risk = client.get("/api/analytics/predictions/overdue-risk", headers=headers)
+    assert risk.status_code == 200
+    risk_payload = risk.get_json()
+    assert risk_payload["historical_sample_count"] == 1
+    assert all(row["title"] != "Tenant B secret future operation" for row in risk_payload["at_risk_operations"])
+    assert any(row["operation_id"] == open_a_id for row in risk_payload["at_risk_operations"])
+
+    duration = client.get("/api/analytics/predictions/completion-time", headers=headers)
+    assert duration.status_code == 200
+    duration_payload = duration.get_json()
+    assert duration_payload["historical_execution_sample_count"] == 1
+    assert all(row["title"] != "Tenant B secret future operation" for row in duration_payload["predictions"])
+
+
+def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        old = now - timedelta(days=12)
+        db.session.add_all([
+            Operation(
+                title="Open overdue outcome", organization_id=admin_a.organization_id,
+                created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+                status="Assigned", created_at=old, due_at=now - timedelta(days=2),
+            ),
+            Operation(
+                title="Completed but un-timestamped", organization_id=admin_a.organization_id,
+                created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+                status="Completed", created_at=old, due_at=now - timedelta(days=2),
+            ),
+        ])
+        db.session.commit()
+
+    response = tenant_app.test_client().get("/api/analytics/predictions/anomalies", headers=headers)
+    assert response.status_code == 200
+    payload = response.get_json()
+    # Only the still-open overdue operation has a defensible matured outcome.
+    assert payload["matured_deadline_outcomes"] == 1
