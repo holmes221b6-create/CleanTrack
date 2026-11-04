@@ -1249,6 +1249,7 @@ def analytics_overdue_risk():
 
     current_rows = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
+        Operation.submitted_at.is_(None),
         Operation.due_at.isnot(None),
         Operation.due_at > now,
     ).all()
