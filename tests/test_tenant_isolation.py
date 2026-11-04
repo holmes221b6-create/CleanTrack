@@ -704,3 +704,26 @@ def test_workload_forecast_empty_history_returns_no_history_state(tenant_app, mo
     payload = response.get_json()
     assert payload["status"] == "no_history"
     assert payload["forecast"] == []
+
+
+def test_anomaly_detection_returns_baseline_evidence_and_assessment_limits(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    response = tenant_app.test_client().get(
+        "/api/analytics/predictions/anomalies", headers=headers
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    evidence = payload["analysis_evidence"]
+    assert evidence["baseline_days"] == 82
+    assert evidence["recent_complete_days"] == 7
+    assert evidence["recent_operations"] >= 0
+    assert evidence["deadline_outcomes_with_reliable_timestamps"] == payload["matured_deadline_outcomes"]
+    assert evidence["overdue_rate_assessable"] is (payload["matured_deadline_outcomes"] >= 3)
+    spike = next((item for item in payload["findings"] if item["kind"] == "workload_spike"), None)
+    if spike:
+        assert spike["evidence_count"] == evidence["recent_operations"]
+        if spike["emerging_after_zero_baseline"]:
+            assert spike["baseline"] == 0
+            assert spike["change_percent"] is None
+        else:
+            assert spike["change_percent"] is not None
