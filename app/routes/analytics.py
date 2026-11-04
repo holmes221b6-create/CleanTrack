@@ -1609,6 +1609,7 @@ def analytics_completion_time():
         Operation.organization_id == admin.organization_id,
         OperationExecution.started_at >= history_start,
         OperationExecution.submitted_at.isnot(None),
+        func.lower(OperationExecution.status).in_(["submitted", "completed"]),
     ).all()
 
     observations = []
