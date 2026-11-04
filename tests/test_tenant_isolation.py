@@ -727,3 +727,53 @@ def test_anomaly_detection_returns_baseline_evidence_and_assessment_limits(tenan
             assert spike["change_percent"] is None
         else:
             assert spike["change_percent"] is not None
+
+
+def test_recurring_overdue_anomaly_compares_against_other_operation_types(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin = User.query.filter_by(email="admin-a@example.test").one()
+        staff = User.query.filter_by(email="staff-a@example.test").one()
+        rows = []
+        for index in range(3):
+            rows.append(Operation(
+                title="Late cleaning " + str(index),
+                organization_id=admin.organization_id,
+                created_by_id=admin.id,
+                assigned_to_id=staff.id,
+                status="Completed",
+                task_type="Cleaning",
+                priority="Normal",
+                created_at=now - timedelta(days=5),
+                due_at=now - timedelta(days=2),
+                submitted_at=now - timedelta(days=1),
+            ))
+            rows.append(Operation(
+                title="On-time inspection " + str(index),
+                organization_id=admin.organization_id,
+                created_by_id=admin.id,
+                assigned_to_id=staff.id,
+                status="Completed",
+                task_type="Inspection",
+                priority="Normal",
+                created_at=now - timedelta(days=5),
+                due_at=now - timedelta(days=2),
+                submitted_at=now - timedelta(days=3),
+            ))
+        db.session.add_all(rows)
+        db.session.commit()
+
+    response = tenant_app.test_client().get(
+        "/api/analytics/predictions/anomalies", headers=headers
+    )
+    assert response.status_code == 200
+    findings = response.get_json()["findings"]
+    pattern = next(
+        item for item in findings
+        if item["kind"] == "recurring_overdue_pattern"
+        and item["title"].endswith("Cleaning")
+    )
+    assert pattern["observed_late_rate_percent"] == 100.0
+    assert pattern["comparison_late_rate_percent"] == 0.0
+    assert pattern["comparison_sample_count"] == 3
