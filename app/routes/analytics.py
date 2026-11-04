@@ -1315,3 +1315,195 @@ def analytics_overdue_risk():
         "evaluated_open_operations": len(at_risk),
     }), 200
 
+@analytics_bp.get("/predictions/workforce-demand")
+@roles_required("Admin")
+def analytics_workforce_demand():
+    """Estimate team-level incoming workload and staffing distribution."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        values = set()
+        for part in (request.args.get(key) or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                return jsonify({"error": key + " must contain numeric IDs."}), 400
+            if value <= 0:
+                return jsonify({"error": key + " must contain positive IDs."}), 400
+            values.add(value)
+        selected[key] = values
+    task_type_filter = (request.args.get("task_type") or "").strip()
+    try:
+        zone_name = (request.args.get("time_zone") or "UTC").strip()
+        report_timezone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "time_zone must be a valid IANA time-zone name."}), 400
+
+    teams = Team.query.filter_by(
+        organization_id=admin.organization_id, status="active"
+    ).order_by(Team.name.asc()).all()
+    team_by_id = {team.id: team for team in teams}
+    locations = Location.query.filter_by(organization_id=admin.organization_id).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    memberships = db.session.query(TeamMember.team_id, TeamMember.user_id).join(
+        Team, Team.id == TeamMember.team_id
+    ).join(User, User.id == TeamMember.user_id).filter(
+        Team.organization_id == admin.organization_id,
+        User.organization_id == admin.organization_id,
+        User.account_status == "active",
+        User.role.in_(["Staff", "Supervisor"]),
+    ).all()
+    staff_by_team = {team.id: set() for team in teams}
+    for team_id, user_id in memberships:
+        if team_id in staff_by_team:
+            staff_by_team[team_id].add(user_id)
+
+    def team_for(operation):
+        zone = zone_by_id.get(operation.zone_id)
+        location_id = operation.location_id
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_by_id else None
+        if team_id is None and zone:
+            candidate = zone.team_id
+            location = location_by_id.get(zone.location_id)
+            if candidate not in team_by_id and location:
+                candidate = location.team_id
+            if candidate in team_by_id:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_by_id:
+                team_id = location.team_id
+        return team_id, location_id
+
+    now_local = datetime.now(report_timezone)
+    today = now_local.date()
+    start_day = today - timedelta(days=56)
+    start_at = datetime.combine(start_day, time.min, tzinfo=report_timezone).astimezone(timezone.utc)
+    end_at = datetime.combine(today, time.min, tzinfo=report_timezone).astimezone(timezone.utc)
+    historical = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.created_at >= start_at,
+        Operation.created_at < end_at,
+    ).all()
+    team_daily = {
+        team.id: {
+            (start_day + timedelta(days=i)).isoformat(): 0 for i in range(56)
+        } for team in teams
+    }
+    team_effort = {team.id: [] for team in teams}
+    team_samples = {team.id: 0 for team in teams}
+    team_assigned = {team.id: set() for team in teams}
+    included_total = 0
+    for operation in historical:
+        team_id, location_id = team_for(operation)
+        if team_id not in team_daily:
+            continue
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and operation.zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and operation.assigned_to_id not in selected["employee_ids"]:
+            continue
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            continue
+        created = _to_utc(operation.created_at)
+        if not created:
+            continue
+        local_day = created.astimezone(report_timezone).date().isoformat()
+        if local_day in team_daily[team_id]:
+            team_daily[team_id][local_day] += 1
+            included_total += 1
+            team_samples[team_id] += 1
+            if operation.estimated_minutes and operation.estimated_minutes > 0:
+                team_effort[team_id].append(operation.estimated_minutes)
+            if operation.assigned_to_id in staff_by_team[team_id]:
+                team_assigned[team_id].add(operation.assigned_to_id)
+
+    if included_total < 20:
+        return jsonify({
+            "status": "insufficient_data",
+            "message": "At least 20 historical operations across the last 56 days are needed to estimate team workload.",
+            "scope": "This organisation only",
+            "history_days": 56,
+            "historical_sample_count": included_total,
+            "teams": [],
+            "notice": "Estimates may be wrong and use only this organisation's historical operational data.",
+        }), 200
+
+    results = []
+    for team in teams:
+        if selected["team_ids"] and team.id not in selected["team_ids"]:
+            continue
+        if not team_samples[team.id]:
+            continue
+        daily = team_daily[team.id]
+        weekday_values = {weekday: [] for weekday in range(7)}
+        for day_text, count in daily.items():
+            weekday_values[date.fromisoformat(day_text).weekday()].append(count)
+        recent = list(daily.values())[-28:]
+        earlier = list(daily.values())[:28]
+        recent_mean = sum(recent) / 28
+        earlier_mean = sum(earlier) / 28
+        trend = 1.0 if earlier_mean <= 0 else max(0.75, min(1.25, recent_mean / earlier_mean))
+        next_seven = []
+        for offset in range(7):
+            target = today + timedelta(days=offset)
+            weekday_history = weekday_values[target.weekday()]
+            expected = (sum(weekday_history) / len(weekday_history)) * trend
+            next_seven.append(expected)
+        forecast_operations = sum(next_seven)
+        staff_count = len(staff_by_team.get(team.id, set()))
+        avg_minutes = (
+            sum(team_effort[team.id]) / len(team_effort[team.id])
+            if team_effort[team.id] else None
+        )
+        estimated_hours = (
+            forecast_operations * avg_minutes / 60
+            if avg_minutes is not None else None
+        )
+        results.append({
+            "team_id": team.id,
+            "team_name": team.name,
+            "historical_operations": team_samples[team.id],
+            "forecast_operations_next_7_days": round(forecast_operations, 1),
+            "forecast_by_day": [
+                {"date": (today + timedelta(days=i)).isoformat(), "expected_operations": round(next_seven[i], 1)}
+                for i in range(7)
+            ],
+            "active_team_members": staff_count,
+            "currently_assigned_historical_members": len(team_assigned[team.id]),
+            "expected_operations_per_active_member": round(forecast_operations / staff_count, 1) if staff_count else None,
+            "average_recorded_estimate_minutes": round(avg_minutes, 1) if avg_minutes is not None else None,
+            "estimated_effort_hours_next_7_days": round(estimated_hours, 1) if estimated_hours is not None else None,
+            "effort_estimate_sample_count": len(team_effort[team.id]),
+            "staffing_capacity_status": "not_assessed",
+        })
+
+    return jsonify({
+        "status": "available",
+        "scope": "This organisation only",
+        "history_days": 56,
+        "history_start": start_day.isoformat(),
+        "history_end": (today - timedelta(days=1)).isoformat(),
+        "historical_sample_count": included_total,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "method": "Weekday team-level workload baseline with capped recent-trend adjustment",
+        "teams": results,
+        "notice": "Workload estimates may be wrong. They use only this organisation's historical operational data. Active membership is not proof of shift availability; OMNIX does not claim staffing capacity without working-hour and leave data. Effort hours are derived from recorded estimates, not measured actual duration.",
+    }), 200
+
