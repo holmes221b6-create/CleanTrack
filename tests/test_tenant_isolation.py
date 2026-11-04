@@ -292,6 +292,44 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert "Tenant B secret future operation" not in str(anomalies.get_json()["findings"])
 
 
+
+    # All five prediction modules must apply the same selected team scope.
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        other_team = Team(name="Tenant A Other Team", organization_id=admin_a.organization_id)
+        db.session.add(other_team)
+        db.session.flush()
+        db.session.add(Operation(
+            title="Other team operation", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, status="Assigned", team_id=other_team.id,
+            created_at=now - timedelta(days=12), due_at=now + timedelta(days=4),
+        ))
+        db.session.commit()
+        other_team_id = other_team.id
+
+    scoped = "?team_ids=" + str(team_a.id)
+    scoped_workload = client.get("/api/analytics/predictions" + scoped, headers=headers).get_json()
+    scoped_risk = client.get("/api/analytics/predictions/overdue-risk" + scoped, headers=headers).get_json()
+    scoped_workforce = client.get("/api/analytics/predictions/workforce-demand" + scoped, headers=headers).get_json()
+    scoped_duration = client.get("/api/analytics/predictions/completion-time" + scoped, headers=headers).get_json()
+    scoped_anomalies = client.get("/api/analytics/predictions/anomalies" + scoped, headers=headers).get_json()
+    assert scoped_workload["sample_count"] == 5
+    assert scoped_risk["historical_sample_count"] == 1
+    assert scoped_workforce["historical_sample_count"] == 5
+    assert [row["team_name"] for row in scoped_workforce["teams"]] == ["Tenant A Team"]
+    assert scoped_duration["historical_execution_sample_count"] == 1
+    assert scoped_anomalies["historical_operation_count"] == 5
+
+    other_scope = "?team_ids=" + str(other_team_id)
+    other_workload = client.get("/api/analytics/predictions" + other_scope, headers=headers).get_json()
+    other_workforce = client.get("/api/analytics/predictions/workforce-demand" + other_scope, headers=headers).get_json()
+    other_anomalies = client.get("/api/analytics/predictions/anomalies" + other_scope, headers=headers).get_json()
+    assert other_workload["sample_count"] == 1
+    assert other_workforce["historical_sample_count"] == 1
+    assert [row["team_name"] for row in other_workforce["teams"]] == ["Tenant A Other Team"]
+    assert other_anomalies["historical_operation_count"] == 1
+
+
 def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
     headers = _prediction_admin_headers(tenant_app, monkeypatch)
     now = datetime.now(timezone.utc)
