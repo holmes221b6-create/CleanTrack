@@ -1999,16 +1999,26 @@ def analytics_anomalies():
         if not outcome["count"]:
             continue
         rate = outcome["late"] / outcome["count"]
-        # Highlight a materially higher rate than the organisation-wide
-        # baseline. No finding is produced if there is no comparison baseline.
-        if organisation_late_rate is not None and rate > organisation_late_rate + 0.15 and outcome["count"] >= 3:
+        # Compare each operation type with the rest of the organisation,
+        # excluding the cohort itself to avoid diluting its own signal.
+        peer_count = matured_total - outcome["count"]
+        peer_late = late_total - outcome["late"]
+        peer_rate = peer_late / peer_count if peer_count else None
+        if (
+            peer_rate is not None
+            and outcome["count"] >= 3
+            and peer_count >= 3
+            and rate > peer_rate + 0.15
+        ):
             findings.append({
                 "kind": "recurring_overdue_pattern",
                 "severity": "elevated",
                 "title": "Repeated overdue pattern: " + task_type,
-                "description": "This operation type has a higher historical late rate than the organisation-wide rate.",
+                "description": "This operation type has a higher historical late rate than other operation types in this organisation. Its own outcomes are excluded from the comparison baseline.",
                 "observed_late_rate_percent": round(rate * 100, 1),
-                "organisation_late_rate_percent": round(organisation_late_rate * 100, 1),
+                "organisation_late_rate_percent": round(organisation_late_rate * 100, 1) if organisation_late_rate is not None else None,
+                "comparison_late_rate_percent": round(peer_rate * 100, 1),
+                "comparison_sample_count": peer_count,
                 "evidence_count": outcome["count"],
                 "late_count": outcome["late"],
             })
