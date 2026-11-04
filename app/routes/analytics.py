@@ -1934,7 +1934,7 @@ def analytics_anomalies():
                 str(len(findings)) + " operational pattern(s) identified for review."
             )
         ),
-        "method": "Historical volume comparison, operation-type overdue-rate comparison, and repeated execution-attempt analysis",
+        "method": "Workload spike: recent 7-day daily average exceeds the prior 82-day baseline by 1.8x; overdue pattern: at least 3 matured outcomes and 15 percentage points above the organisation-wide late rate; repeat execution: 2 or more recorded attempts. These are screening thresholds, not statistical significance tests.",
         "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
     }), 200
 
