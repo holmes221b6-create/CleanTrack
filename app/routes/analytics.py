@@ -1077,11 +1077,48 @@ def analytics_predictions():
             "weekday_sample_count": len(samples),
         })
 
+    # Rolling holdout: fit on the first 42 days and evaluate on the final
+    # 14 days. This is historical validation, not a guarantee of future accuracy.
+    train = history[:42]
+    holdout = history[42:]
+    train_weekdays = {weekday: [] for weekday in range(7)}
+    for row in train:
+        train_weekdays[date.fromisoformat(row["date"]).weekday()].append(row["actual"])
+    first_half_mean = sum(row["actual"] for row in train[:21]) / 21
+    second_half_mean = sum(row["actual"] for row in train[21:]) / 21
+    validation_trend = 1.0 if first_half_mean <= 0 else max(
+        0.75, min(1.25, second_half_mean / first_half_mean)
+    )
+    naive_mean = sum(row["actual"] for row in train) / len(train)
+    model_errors = []
+    baseline_errors = []
+    for row in holdout:
+        samples = train_weekdays[date.fromisoformat(row["date"]).weekday()]
+        prediction = (sum(samples) / len(samples)) * validation_trend if samples else naive_mean
+        model_errors.append(abs(row["actual"] - prediction))
+        baseline_errors.append(abs(row["actual"] - naive_mean))
+    actual_total = sum(row["actual"] for row in holdout)
+    model_mae = sum(model_errors) / len(model_errors)
+    baseline_mae = sum(baseline_errors) / len(baseline_errors)
+    model_wape = (sum(model_errors) / actual_total * 100) if actual_total else None
+    baseline_wape = (sum(baseline_errors) / actual_total * 100) if actual_total else None
+    validation = {
+        "method": "42-day training window; following 14 days held out",
+        "holdout_days": len(holdout),
+        "actual_operations": actual_total,
+        "model_mae": round(model_mae, 2),
+        "baseline_mae": round(baseline_mae, 2),
+        "model_wape_percent": round(model_wape, 1) if model_wape is not None else None,
+        "baseline_wape_percent": round(baseline_wape, 1) if baseline_wape is not None else None,
+        "beats_baseline": model_mae < baseline_mae,
+    }
+
     return jsonify({
         **base_response,
         "status": "available",
         "message": "Forecast generated from 56 days of organisation-specific operation history.",
         "trend_adjustment": round(trend_factor, 3),
+        "validation": validation,
         "forecast": forecast,
         "history": history,
     }), 200
