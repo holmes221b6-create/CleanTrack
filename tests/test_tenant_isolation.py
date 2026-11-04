@@ -630,3 +630,65 @@ def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operation
     assert anomalies.get_json()["status"] == "no_history"
     assert anomalies.get_json()["historical_operation_count"] == 0
     assert anomalies.get_json()["findings"] == []
+
+
+
+def test_completion_time_reports_chronological_holdout_validation(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin = User.query.filter_by(email="admin-a@example.test").one()
+        staff = User.query.filter_by(email="staff-a@example.test").one()
+        rows = []
+        for index in range(30):
+            started = now - timedelta(days=35 - index)
+            submitted = started + timedelta(minutes=30 + index)
+            operation = Operation(
+                title="Duration history " + str(index),
+                organization_id=admin.organization_id,
+                created_by_id=admin.id,
+                assigned_to_id=staff.id,
+                status="Completed",
+                task_type="Cleaning",
+                priority="Normal",
+                created_at=started,
+                submitted_at=submitted,
+            )
+            db.session.add(operation)
+            db.session.flush()
+            db.session.add(OperationExecution(
+                operation_id=operation.id,
+                performed_by_id=staff.id,
+                attempt_number=1,
+                status="Completed",
+                started_at=started,
+                submitted_at=submitted,
+                created_at=started,
+            ))
+        pending = Operation(
+            title="Open duration prediction",
+            organization_id=admin.organization_id,
+            created_by_id=admin.id,
+            assigned_to_id=staff.id,
+            status="Assigned",
+            task_type="Cleaning",
+            priority="Normal",
+            created_at=now,
+            due_at=now + timedelta(days=2),
+        )
+        db.session.add(pending)
+        db.session.commit()
+
+    response = tenant_app.test_client().get(
+        "/api/analytics/predictions/completion-time", headers=headers
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    validation = payload["validation"]
+    assert validation["status"] == "evaluated"
+    assert validation["training_sample_count"] == 24
+    assert validation["holdout_sample_count"] == 6
+    assert isinstance(validation["model_mae_minutes"], float)
+    assert isinstance(validation["baseline_mae_minutes"], float)
+    assert payload["predicted_open_operations"] == 1
+    assert payload["predictions"][0]["historical_comparable_sample"] == 30
