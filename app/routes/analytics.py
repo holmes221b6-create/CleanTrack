@@ -1099,15 +1099,19 @@ def analytics_predictions():
     baseline_mae = sum(baseline_errors) / len(baseline_errors)
     model_wape = (sum(model_errors) / actual_total * 100) if actual_total else None
     baseline_wape = (sum(baseline_errors) / actual_total * 100) if actual_total else None
+    validation_ready = total_operations >= 10 and len(holdout) == 14 and actual_total >= 5
     validation = {
-        "method": "42-day training window; following 14 days held out",
+        "status": "evaluated" if validation_ready else "insufficient_data",
+        "method": "42-day training window; following 14 complete days held out; at least 10 training operations and 5 holdout operations required for a performance verdict",
+        "training_days": len(train),
         "holdout_days": len(holdout),
+        "training_operations": sum(row["actual"] for row in train),
         "actual_operations": actual_total,
         "model_mae": round(model_mae, 2),
         "baseline_mae": round(baseline_mae, 2),
         "model_wape_percent": round(model_wape, 1) if model_wape is not None else None,
         "baseline_wape_percent": round(baseline_wape, 1) if baseline_wape is not None else None,
-        "beats_baseline": model_mae < baseline_mae,
+        "beats_baseline": model_mae < baseline_mae if validation_ready else None,
     }
 
     return jsonify({
