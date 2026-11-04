@@ -352,9 +352,16 @@ def test_anomaly_detection_excludes_completed_records_without_terminal_timestamp
         ])
         db.session.commit()
 
-    response = tenant_app.test_client().get("/api/analytics/predictions/anomalies", headers=headers)
+    response = tenant_app.test_client().get(
+        "/api/analytics/predictions/anomalies?time_zone=Asia/Kolkata", headers=headers
+    )
     assert response.status_code == 200
     payload = response.get_json()
+    assert payload["time_zone"] == "Asia/Kolkata"
+    invalid_zone = tenant_app.test_client().get(
+        "/api/analytics/predictions/anomalies?time_zone=Not/A_Real_Zone", headers=headers
+    )
+    assert invalid_zone.status_code == 400
     # Only the still-open overdue operation has a defensible matured outcome.
     assert payload["matured_deadline_outcomes"] == 1
     assert "1.8x" in payload["method"]
