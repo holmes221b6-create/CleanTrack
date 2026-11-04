@@ -220,6 +220,12 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         open_a_id = open_a.id
 
     client = tenant_app.test_client()
+    workload = client.get("/api/analytics/predictions", headers=headers)
+    assert workload.status_code == 200
+    workload_payload = workload.get_json()
+    assert workload_payload["status"] == "no_history"
+    assert workload_payload["forecast"] == []
+
     risk = client.get("/api/analytics/predictions/overdue-risk", headers=headers)
     assert risk.status_code == 200
     risk_payload = risk.get_json()
