@@ -550,14 +550,14 @@ def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operation
     assert workforce_payload["teams"] == []
 
     risk = tenant_app.test_client().get(
-        "/api/analytics/predictions/overdue-risk", headers=headers
+        "/api/analytics/predictions/overdue-risk?employee_ids=999999", headers=headers
     )
     assert risk.status_code == 200
     assert risk.get_json()["status"] == "no_history"
     assert risk.get_json()["at_risk_operations"] == []
 
     completion = tenant_app.test_client().get(
-        "/api/analytics/predictions/completion-time", headers=headers
+        "/api/analytics/predictions/completion-time?employee_ids=999999", headers=headers
     )
     assert completion.status_code == 200
     assert completion.get_json()["status"] == "no_history"
@@ -565,7 +565,7 @@ def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operation
     assert completion.get_json()["predictions"] == []
 
     anomalies = tenant_app.test_client().get(
-        "/api/analytics/predictions/anomalies", headers=headers
+        "/api/analytics/predictions/anomalies?employee_ids=999999", headers=headers
     )
     assert anomalies.status_code == 200
     assert anomalies.get_json()["status"] == "no_history"
