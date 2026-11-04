@@ -1123,3 +1123,195 @@ def analytics_predictions():
         "history": history,
     }), 200
 
+@analytics_bp.get("/predictions/overdue-risk")
+@roles_required("Admin")
+def analytics_overdue_risk():
+    """Estimate overdue likelihood from this organisation's matured history."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        values = set()
+        for part in (request.args.get(key) or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                return jsonify({"error": key + " must contain numeric IDs."}), 400
+            if value <= 0:
+                return jsonify({"error": key + " must contain positive IDs."}), 400
+            values.add(value)
+        selected[key] = values
+    task_type_filter = (request.args.get("task_type") or "").strip()
+
+    teams = Team.query.filter_by(organization_id=admin.organization_id).all()
+    locations = Location.query.filter_by(organization_id=admin.organization_id).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
+    team_ids = {row.id for row in teams}
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    active_people = {
+        row.id for row in User.query.filter(
+            User.organization_id == admin.organization_id,
+            User.account_status == "active",
+        ).all()
+    }
+
+    def dimensions(operation):
+        zone = zone_by_id.get(operation.zone_id)
+        location_id = operation.location_id
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_ids else None
+        if team_id is None and zone:
+            candidate = zone.team_id
+            location = location_by_id.get(zone.location_id)
+            if candidate not in team_ids and location:
+                candidate = location.team_id
+            if candidate in team_ids:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_ids:
+                team_id = location.team_id
+        return team_id, location_id, operation.zone_id, operation.assigned_to_id
+
+    now = datetime.now(timezone.utc)
+    history_start = now - timedelta(days=180)
+    history_rows = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.created_at >= history_start,
+        Operation.due_at.isnot(None),
+        Operation.due_at < now.replace(tzinfo=None),
+    ).all()
+    # Only matured, non-cancelled records with an observable outcome are labels.
+    matured = []
+    for operation in history_rows:
+        status = str(operation.status or "").strip().lower()
+        if status in CANCELLED_STATUSES:
+            continue
+        submitted = _to_utc(operation.submitted_at)
+        due = _to_utc(operation.due_at)
+        if due is None:
+            continue
+        if submitted is None and status in DONE_STATUSES:
+            continue
+        late = submitted > due if submitted is not None else True
+        team_id, location_id, zone_id, employee_id = dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if employee_id is not None and employee_id not in active_people:
+            continue
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            continue
+        matured.append({
+            "late": bool(late),
+            "task_type": str(operation.task_type or "General").casefold(),
+            "priority": str(operation.priority or "Normal").casefold(),
+        })
+
+    total = len(matured)
+    late_total = sum(1 for row in matured if row["late"])
+    global_rate = late_total / total if total else 0.0
+    cohorts = {}
+    for row in matured:
+        key = (row["task_type"], row["priority"])
+        cohort = cohorts.setdefault(key, {"count": 0, "late": 0})
+        cohort["count"] += 1
+        cohort["late"] += int(row["late"])
+
+    base = {
+        "scope": "This organisation only",
+        "history_days": 180,
+        "historical_sample_count": total,
+        "historical_late_count": late_total,
+        "historical_late_rate_percent": round(global_rate * 100, 1) if total else None,
+        "generated_at": now.isoformat(),
+        "method": "Smoothed empirical late-rate by operation type and priority, with organisation-wide fallback",
+        "notice": "These estimates may be wrong. They use only this organisation's historical records and are not guarantees or individual performance assessments.",
+    }
+    if total < 20:
+        return jsonify({
+            **base,
+            "status": "insufficient_data",
+            "message": "At least 20 matured, non-cancelled operations with due dates are needed before OMNIX can estimate overdue risk.",
+            "at_risk_operations": [],
+        }), 200
+
+    current_rows = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.due_at.isnot(None),
+        Operation.due_at > now.replace(tzinfo=None),
+    ).all()
+    at_risk = []
+    for operation in current_rows:
+        status = str(operation.status or "").strip().lower()
+        if status in DONE_STATUSES or status in CANCELLED_STATUSES:
+            continue
+        team_id, location_id, zone_id, employee_id = dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if employee_id is not None and employee_id not in active_people:
+            continue
+        task_type = str(operation.task_type or "General").casefold()
+        if task_type_filter and task_type != task_type_filter.casefold():
+            continue
+        priority = str(operation.priority or "Normal").casefold()
+        cohort = cohorts.get((task_type, priority))
+        cohort_count = cohort["count"] if cohort else 0
+        if cohort_count >= 8:
+            observed_rate = cohort["late"] / cohort_count
+            sample_size = cohort_count
+            basis = "Matching operation type and priority"
+        else:
+            observed_rate = global_rate
+            sample_size = total
+            basis = "Organisation-wide history (fallback)"
+        # Empirical-Bayes style shrinkage avoids extreme rates from small cohorts.
+        smoothing_weight = 8
+        risk = (observed_rate * sample_size + global_rate * smoothing_weight) / (sample_size + smoothing_weight)
+        due = _to_utc(operation.due_at)
+        hours_remaining = max(0, (due - now).total_seconds() / 3600) if due else None
+        at_risk.append({
+            "operation_id": operation.id,
+            "title": operation.title,
+            "task_type": operation.task_type or "General",
+            "priority": operation.priority or "Normal",
+            "due_at": due.isoformat() if due else None,
+            "hours_until_due": round(hours_remaining, 1) if hours_remaining is not None else None,
+            "estimated_late_risk_percent": round(risk * 100, 1),
+            "historical_comparable_sample": sample_size,
+            "basis": basis,
+        })
+
+    at_risk.sort(key=lambda row: (
+        -row["estimated_late_risk_percent"],
+        row["hours_until_due"] if row["hours_until_due"] is not None else float("inf"),
+    ))
+    return jsonify({
+        **base,
+        "status": "available",
+        "message": "Risk estimates are historical cohort rates, not a trained individual-operation classifier.",
+        "at_risk_operations": at_risk[:20],
+        "evaluated_open_operations": len(at_risk),
+    }), 200
+
