@@ -1748,7 +1748,7 @@ def analytics_anomalies():
         team_id, location_id, zone_id, employee_id = dimensions(operation)
         if selected["team_ids"] and team_id not in selected["team_ids"]:
             return False
-        if selected["locations_ids"] and location_id not in selected["location_ids"]:
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
             return False
         if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
             return False
