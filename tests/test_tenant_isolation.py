@@ -695,12 +695,12 @@ def test_completion_time_reports_chronological_holdout_validation(tenant_app, mo
     assert target["historical_comparable_sample"] == 30
 
 
-def test_workload_forecast_does_not_claim_validation_without_holdout_activity(tenant_app, monkeypatch):
+def test_workload_forecast_empty_history_returns_no_history_state(tenant_app, monkeypatch):
     headers = _prediction_admin_headers(tenant_app, monkeypatch)
     response = tenant_app.test_client().get(
         "/api/analytics/predictions", headers=headers
     )
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["validation"]["status"] == "insufficient_data"
-    assert payload["validation"]["beats_baseline"] is None
+    assert payload["status"] == "no_history"
+    assert payload["forecast"] == []
