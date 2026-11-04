@@ -1677,3 +1677,203 @@ def analytics_completion_time():
         "notice": "Estimates may be wrong. They use only this organisation's historical execution records and are not guaranteed completion times.",
     }), 200
 
+@analytics_bp.get("/predictions/anomalies")
+@roles_required("Admin")
+def analytics_anomalies():
+    """Detect recurring operational patterns from this organisation's own history."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        values = set()
+        for part in (request.args.get(key) or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                return jsonify({"error": key + " must contain numeric IDs."}), 400
+            if value <= 0:
+                return jsonify({"error": key + " must contain positive IDs."}), 400
+            values.add(value)
+        selected[key] = values
+    task_type_filter = (request.args.get("task_type") or "").strip()
+
+    teams = Team.query.filter_by(organization_id=admin.organization_id).all()
+    team_ids = {row.id for row in teams}
+    locations = Location.query.filter_by(organization_id=admin.organization_id).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    active_people = {
+        row.id for row in User.query.filter(
+            User.organization_id == admin.organization_id,
+            User.account_status == "active",
+        ).all()
+    }
+
+    def dimensions(operation):
+        zone = zone_by_id.get(operation.zone_id)
+        location_id = operation.location_id
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_ids else None
+        if team_id is None and zone:
+            candidate = zone.team_id
+            location = location_by_id.get(zone.location_id)
+            if candidate not in team_ids and location:
+                candidate = location.team_id
+            if candidate in team_ids:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_ids:
+                team_id = location.team_id
+        return team_id, location_id, operation.zone_id, operation.assigned_to_id
+
+    now = datetime.now(timezone.utc)
+    history_start = now - timedelta(days=90)
+    operations = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.created_at >= history_start,
+    ).all()
+
+    def included(operation):
+        team_id, location_id, zone_id, employee_id = dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            return False
+        if selected["locations_ids"] and location_id not in selected["location_ids"]:
+            return False
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            return False
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            return False
+        if employee_id is not None and employee_id not in active_people:
+            return False
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            return False
+        return True
+
+    scoped = [row for row in operations if included(row)]
+    daily_counts = {}
+    type_outcomes = {}
+    late_total = 0
+    matured_total = 0
+    for operation in scoped:
+        created = _to_utc(operation.created_at)
+        if created:
+            day_key = created.date().isoformat()
+            daily_counts[day_key] = daily_counts.get(day_key, 0) + 1
+        due = _to_utc(operation.due_at)
+        submitted = _to_utc(operation.submitted_at)
+        status = str(operation.status or "").strip().lower()
+        if due and due < now and status not in CANCELLED_STATUSES:
+            # An overdue, still-open operation is a late outcome; submitted work
+            # is late only when its submission timestamp exceeded its deadline.
+            late = submitted > due if submitted else status not in DONE_STATUSES
+            key = str(operation.task_type or "General")
+            group = type_outcomes.setdefault(key, {"count": 0, "late": 0})
+            group["count"] += 1
+            group["late"] += int(late)
+            matured_total += 1
+            late_total += int(late)
+
+    findings = []
+    baseline_days = []
+    for offset in range(8, 90):
+        day = (now.date() - timedelta(days=offset)).isoformat()
+        baseline_days.append(daily_counts.get(day, 0))
+    baseline_mean = sum(baseline_days) / len(baseline_days) if baseline_days else 0
+    recent_days = [
+        (now.date() - timedelta(days=offset)).isoformat()
+        for offset in range(7)
+    ]
+    recent_total = sum(daily_counts.get(day, 0) for day in recent_days)
+    recent_daily_mean = recent_total / 7
+    if baseline_mean > 0 and recent_daily_mean > baseline_mean * 1.8:
+        findings.append({
+            "kind": "workload_spike",
+            "severity": "elevated",
+            "title": "Recent operation volume is unusually high",
+            "description": "The last seven days averaged more incoming operations per day than the preceding historical baseline.",
+            "observed": round(recent_daily_mean, 2),
+            "baseline": round(baseline_mean, 2),
+            "change_percent": round((recent_daily_mean / baseline_mean - 1) * 100, 1),
+            "evidence_count": recent_total,
+        })
+
+    organisation_late_rate = late_total / matured_total if matured_total else None
+    for task_type, outcome in type_outcomes.items():
+        if not outcome["count"]:
+            continue
+        rate = outcome["late"] / outcome["count"]
+        # Highlight a materially higher rate than the organisation-wide
+        # baseline. No finding is produced if there is no comparison baseline.
+        if organisation_late_rate is not None and rate > organisation_late_rate + 0.15 and outcome["count"] >= 3:
+            findings.append({
+                "kind": "recurring_overdue_pattern",
+                "severity": "elevated",
+                "title": "Repeated overdue pattern: " + task_type,
+                "description": "This operation type has a higher historical late rate than the organisation-wide rate.",
+                "observed_late_rate_percent": round(rate * 100, 1),
+                "organisation_late_rate_percent": round(organisation_late_rate * 100, 1),
+                "evidence_count": outcome["count"],
+                "late_count": outcome["late"],
+            })
+
+    execution_rows = db.session.query(
+        OperationExecution.operation_id,
+        func.count(OperationExecution.id),
+    ).join(
+        Operation, Operation.id == OperationExecution.operation_id
+    ).filter(
+        Operation.organization_id == admin.organization_id,
+        OperationExecution.created_at >= history_start,
+    ).group_by(OperationExecution.operation_id).all()
+    operation_by_id = {row.id: row for row in scoped}
+    repeat_counts = []
+    for operation_id, attempts in execution_rows:
+        operation = operation_by_id.get(operation_id)
+        if not operation or attempts < 2:
+            continue
+        repeat_counts.append({
+            "operation_id": operation.id,
+            "title": operation.title,
+            "task_type": operation.task_type or "General",
+            "attempts": attempts,
+        })
+    repeat_counts.sort(key=lambda row: (-row["attempts"], row["title"] or ""))
+    if repeat_counts:
+        findings.append({
+            "kind": "repeat_execution",
+            "severity": "watch",
+            "title": "Operations requiring repeated execution",
+            "description": "These operations have multiple recorded execution attempts. This can indicate rework or a retry, but does not by itself prove a verification failure.",
+            "evidence_count": len(repeat_counts),
+            "examples": repeat_counts[:8],
+        })
+
+    findings.sort(key=lambda row: (0 if row["severity"] == "elevated" else 1, row["kind"]))
+    return jsonify({
+        "status": "available",
+        "scope": "This organisation only",
+        "history_days": 90,
+        "historical_operation_count": len(scoped),
+        "matured_deadline_outcomes": matured_total,
+        "generated_at": now.isoformat(),
+        "findings": findings,
+        "summary": (
+            "No unusual recurring patterns were detected in the selected historical scope."
+            if not findings else
+            str(len(findings)) + " operational pattern(s) identified for review."
+        ),
+        "method": "Historical volume comparison, operation-type overdue-rate comparison, and repeated execution-attempt analysis",
+        "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
+    }), 200
+
