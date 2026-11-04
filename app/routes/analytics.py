@@ -7,7 +7,7 @@ import zipfile
 from xml.sax.saxutils import escape as xml_escape
 
 from flask import Blueprint, jsonify, make_response, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.extensions import db
 from app.models.operation import Operation
@@ -1249,7 +1249,7 @@ def analytics_overdue_risk():
 
     current_rows = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
-        Operation.submitted_at.is_(None),
+        or_(Operation.submitted_at.is_(None), func.lower(Operation.status) == "rejected"),
         Operation.due_at.isnot(None),
         Operation.due_at > now,
     ).all()
@@ -1608,7 +1608,7 @@ def analytics_completion_time():
 
     open_operations = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
-        Operation.submitted_at.is_(None),
+        or_(Operation.submitted_at.is_(None), func.lower(Operation.status) == "rejected"),
     ).all()
     predictions = []
     for operation in open_operations:
