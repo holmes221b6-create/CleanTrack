@@ -1185,7 +1185,7 @@ def analytics_overdue_risk():
         Operation.organization_id == admin.organization_id,
         Operation.created_at >= history_start,
         Operation.due_at.isnot(None),
-        Operation.due_at < now.replace(tzinfo=None),
+        Operation.due_at < now,
     ).all()
     # Only matured, non-cancelled records with an observable outcome are labels.
     matured = []
@@ -1250,7 +1250,7 @@ def analytics_overdue_risk():
     current_rows = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
         Operation.due_at.isnot(None),
-        Operation.due_at > now.replace(tzinfo=None),
+        Operation.due_at > now,
     ).all()
     at_risk = []
     for operation in current_rows:
