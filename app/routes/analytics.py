@@ -1690,6 +1690,7 @@ def analytics_completion_time():
             "minutes": minutes,
             "task_type": str(operation.task_type or "General").casefold(),
             "priority": str(operation.priority or "Normal").casefold(),
+            "observed_at": submitted,
         })
 
     def quantile(values, fraction):
@@ -1702,13 +1703,55 @@ def analytics_completion_time():
         weight = position - lower
         return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
-    all_minutes = [row["minutes"] for row in observations]
+    # Chronological holdout validation: later execution sessions are never
+    # allowed to influence the estimates evaluated against them.
+    observations.sort(key=lambda row: row["observed_at"])
+    split_at = int(len(observations) * 0.8)
+    training = observations[:split_at]
+    holdout = observations[split_at:]
+
+    def build_duration_groups(rows):
+        all_values = [row["minutes"] for row in rows]
+        by_type = {}
+        by_cohort = {}
+        for row in rows:
+            by_type.setdefault(row["task_type"], []).append(row["minutes"])
+            by_cohort.setdefault((row["task_type"], row["priority"]), []).append(row["minutes"])
+        return all_values, by_type, by_cohort
+
+    all_minutes, type_values, cohort_values = build_duration_groups(observations)
+    train_all, train_types, train_cohorts = build_duration_groups(training)
     organisation_median = quantile(all_minutes, 0.5)
-    type_values = {}
-    cohort_values = {}
-    for row in observations:
-        type_values.setdefault(row["task_type"], []).append(row["minutes"])
-        cohort_values.setdefault((row["task_type"], row["priority"]), []).append(row["minutes"])
+
+    validation_errors = []
+    baseline_errors = []
+    for row in holdout:
+        exact = train_cohorts.get((row["task_type"], row["priority"]), [])
+        by_type = train_types.get(row["task_type"], [])
+        if len(exact) >= 5:
+            validation_estimate = quantile(exact, 0.5)
+        elif len(by_type) >= 5:
+            validation_estimate = quantile(by_type, 0.5)
+        elif train_all:
+            validation_estimate = quantile(train_all, 0.5)
+        else:
+            continue
+        validation_errors.append(abs(row["minutes"] - validation_estimate))
+        if train_all:
+            baseline_errors.append(abs(row["minutes"] - quantile(train_all, 0.5)))
+
+    validation_ready = len(training) >= 10 and len(validation_errors) >= 5
+    model_mae = sum(validation_errors) / len(validation_errors) if validation_errors else None
+    baseline_mae = sum(baseline_errors) / len(baseline_errors) if baseline_errors else None
+    validation = {
+        "status": "evaluated" if validation_ready else "insufficient_data",
+        "method": "Chronological 80/20 holdout; training-only type/priority cohorts with organisation-median fallback, compared against the training organisation-median baseline",
+        "training_sample_count": len(training),
+        "holdout_sample_count": len(validation_errors),
+        "model_mae_minutes": round(model_mae, 2) if model_mae is not None else None,
+        "baseline_mae_minutes": round(baseline_mae, 2) if baseline_mae is not None else None,
+        "beats_baseline": model_mae < baseline_mae if validation_ready and model_mae is not None and baseline_mae is not None else None,
+    }
 
     open_operations = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
@@ -1735,12 +1778,12 @@ def analytics_completion_time():
 
         exact = cohort_values.get((task_type, priority), [])
         by_type = type_values.get(task_type, [])
-        if exact:
+        if len(exact) >= 5:
             source, basis = exact, "Matching operation type and priority"
-        elif by_type:
+        elif len(by_type) >= 5:
             source, basis = by_type, "Matching operation type"
         else:
-            source, basis = all_minutes, "Organisation-wide execution history"
+            source, basis = all_minutes, "Organisation-wide execution history (small cohorts pooled)"
         if not source:
             continue
         predictions.append({
@@ -1769,6 +1812,7 @@ def analytics_completion_time():
         "history_start": history_start.isoformat(),
         "generated_at": now.isoformat(),
         "organisation_median_minutes": round(organisation_median, 1) if organisation_median is not None else None,
+        "validation": validation,
         "predicted_open_operations": len(predictions),
         "predictions": predictions[:30],
         "method": "Median and interquartile range of submitted or completed execution durations, matched by operation type and priority with organisation-wide fallback; rejected and unfinished attempts are excluded",
