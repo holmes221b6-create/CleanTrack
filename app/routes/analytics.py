@@ -1858,7 +1858,7 @@ def analytics_anomalies():
 
     findings.sort(key=lambda row: (0 if row["severity"] == "elevated" else 1, row["kind"]))
     return jsonify({
-        "status": "available",
+        "status": "available" if scoped else "no_history",
         "scope": "This organisation only",
         "history_days": 90,
         "historical_operation_count": len(scoped),
@@ -1866,9 +1866,12 @@ def analytics_anomalies():
         "generated_at": now.isoformat(),
         "findings": findings,
         "summary": (
-            "No unusual recurring patterns were detected in the selected historical scope."
-            if not findings else
-            str(len(findings)) + " operational pattern(s) identified for review."
+            "No historical operations are available in this selected scope yet."
+            if not scoped else (
+                "No unusual recurring patterns were detected in the selected historical scope."
+                if not findings else
+                str(len(findings)) + " operational pattern(s) identified for review."
+            )
         ),
         "method": "Historical volume comparison, operation-type overdue-rate comparison, and repeated execution-attempt analysis",
         "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
