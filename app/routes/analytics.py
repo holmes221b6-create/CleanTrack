@@ -2087,3 +2087,68 @@ def analytics_anomalies():
         "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
     }), 200
 
+@analytics_bp.get("/predictions/history")
+@roles_required("Admin")
+def analytics_prediction_history():
+    """Return recent prediction snapshots for the authenticated organisation only."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    limit = min(50, max(1, request.args.get("limit", 20, type=int)))
+    rows = AuditLog.query.filter_by(
+        organization_id=admin.organization_id,
+        action="analytics_prediction_snapshot",
+        resource_type="prediction",
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit).all()
+    return jsonify({
+        "items": [{
+            "id": row.id,
+            "prediction_type": (row.details or {}).get("prediction_type"),
+            "label": (row.details or {}).get("label"),
+            "generated_at": row.created_at.isoformat() if row.created_at else None,
+            "summary": (row.details or {}).get("summary"),
+            "evidence": (row.details or {}).get("evidence", {}),
+        } for row in rows],
+        "count": len(rows),
+    }), 200
+
+
+@analytics_bp.post("/predictions/history")
+@roles_required("Admin")
+def save_analytics_prediction_snapshot():
+    """Persist a compact, organisation-scoped snapshot for audit/history."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    payload = request.get_json(silent=True) or {}
+    prediction_type = str(payload.get("prediction_type") or "").strip()
+    allowed = {"workload", "overdue_risk", "workforce", "completion_time", "anomalies"}
+    if prediction_type not in allowed:
+        return jsonify({"error": "Unsupported prediction type."}), 400
+    summary = str(payload.get("summary") or "").strip()[:500]
+    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    # Keep snapshots compact and avoid accepting arbitrary operation records or
+    # personal data from the browser. Only aggregate evidence is persisted.
+    safe_evidence = {}
+    for key, value in list(evidence.items())[:24]:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            safe_evidence[str(key)[:80]] = value
+    row = AuditLog(
+        actor_id=admin.id,
+        organization_id=admin.organization_id,
+        action="analytics_prediction_snapshot",
+        resource_type="prediction",
+        resource_id=prediction_type,
+        details={
+            "prediction_type": prediction_type,
+            "label": str(payload.get("label") or prediction_type.replace("_", " ").title())[:120],
+            "summary": summary,
+            "evidence": safe_evidence,
+        },
+    )
+    db.session.add(row)
+    db.session.commit()
+    return jsonify({"saved": True, "id": row.id}), 201
+
