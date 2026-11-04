@@ -252,8 +252,9 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert workload.status_code == 200
     workload_payload = workload.get_json()
     assert workload_payload["status"] == "available"
-    # Four historical Tenant A operations; Tenant B's operation is excluded.
-    assert workload_payload["sample_count"] == 4
+    # Five historical Tenant A operations; Tenant B's operation is excluded.
+    # Rejected work remains part of incoming workload volume.
+    assert workload_payload["sample_count"] == 5
 
     risk = client.get("/api/analytics/predictions/overdue-risk", headers=headers)
     assert risk.status_code == 200
@@ -274,9 +275,9 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert workforce.status_code == 200
     workforce_payload = workforce.get_json()
     assert workforce_payload["status"] == "available"
-    assert workforce_payload["historical_sample_count"] == 4
+    assert workforce_payload["historical_sample_count"] == 5
     assert [row["team_name"] for row in workforce_payload["teams"]] == ["Tenant A Team"]
-    assert workforce_payload["teams"][0]["historical_operations"] == 4
+    assert workforce_payload["teams"][0]["historical_operations"] == 5
     team_forecast = workforce_payload["teams"][0]
     assert len(team_forecast["forecast_by_day"]) == 7
     assert all(day["lower_estimate"] <= day["expected_operations"] <= day["upper_estimate"] for day in team_forecast["forecast_by_day"])
