@@ -183,24 +183,27 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         old = now - timedelta(days=12)
         due_past = now - timedelta(days=2)
         due_future = now + timedelta(days=2)
+        team_a = Team(name="Tenant A Team", organization_id=admin_a.organization_id)
+        db.session.add(team_a)
+        db.session.flush()
         open_a = Operation(
             title="Tenant A open overdue", organization_id=admin_a.organization_id,
-            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id, team_id=team_a.id,
             status="Assigned", created_at=old, due_at=due_past,
         )
         completed_without_timestamp = Operation(
             title="Tenant A completed without timestamp", organization_id=admin_a.organization_id,
-            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id, team_id=team_a.id,
             status="Completed", created_at=old, due_at=due_past,
         )
         future_a = Operation(
             title="Tenant A future operation", organization_id=admin_a.organization_id,
-            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id, team_id=team_a.id,
             status="Assigned", created_at=old, due_at=due_future,
         )
         rejected_a = Operation(
             title="Tenant A rejected operation awaiting rework", organization_id=admin_a.organization_id,
-            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id, team_id=team_a.id,
             status="Rejected", created_at=old, due_at=due_future,
             submitted_at=now - timedelta(hours=2), reviewed_at=now - timedelta(hours=1),
         )
@@ -250,6 +253,14 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert duration_payload["historical_execution_sample_count"] == 1
     assert all(row["title"] != "Tenant B secret future operation" for row in duration_payload["predictions"])
     assert any(row["operation_id"] == rejected_a_id for row in duration_payload["predictions"])
+
+    workforce = client.get("/api/analytics/predictions/workforce-demand", headers=headers)
+    assert workforce.status_code == 200
+    workforce_payload = workforce.get_json()
+    assert workforce_payload["status"] == "available"
+    assert workforce_payload["historical_sample_count"] == 4
+    assert [row["team_name"] for row in workforce_payload["teams"]] == ["Tenant A Team"]
+    assert workforce_payload["teams"][0]["historical_operations"] == 4
 
 
 def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
