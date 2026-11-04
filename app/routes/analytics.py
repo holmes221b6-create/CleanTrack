@@ -1436,21 +1436,70 @@ def analytics_workforce_demand():
         if not team_samples[team.id]:
             continue
         daily = team_daily[team.id]
+        daily_rows = list(daily.items())
+        # Validate the same weekday model on the final 14 historical days.
+        # The holdout is not used to fit the validation predictions.
+        train_rows, holdout_rows = daily_rows[:42], daily_rows[42:]
+        train_weekdays = {weekday: [] for weekday in range(7)}
+        for day_text, count in train_rows:
+            train_weekdays[date.fromisoformat(day_text).weekday()].append(count)
+        first_half_mean = sum(value for _, value in train_rows[:21]) / 21
+        second_half_mean = sum(value for _, value in train_rows[21:]) / 21
+        validation_trend = 1.0 if first_half_mean <= 0 else max(
+            0.75, min(1.25, second_half_mean / first_half_mean)
+        )
+        naive_baseline = sum(value for _, value in train_rows) / max(1, len(train_rows))
+        model_errors, baseline_errors = [], []
+        for day_text, actual in holdout_rows:
+            weekday = date.fromisoformat(day_text).weekday()
+            samples = train_weekdays[weekday]
+            predicted = (sum(samples) / len(samples)) * validation_trend if samples else naive_baseline
+            model_errors.append(abs(actual - predicted))
+            baseline_errors.append(abs(actual - naive_baseline))
+        model_mae = sum(model_errors) / len(model_errors) if model_errors else None
+        baseline_mae = sum(baseline_errors) / len(baseline_errors) if baseline_errors else None
+        validation = {
+            "method": "42-day training window; following 14 days held out; compared with flat daily-mean baseline",
+            "training_days": len(train_rows),
+            "holdout_days": len(holdout_rows),
+            "actual_operations": sum(value for _, value in holdout_rows),
+            "model_mae": round(model_mae, 2) if model_mae is not None else None,
+            "baseline_mae": round(baseline_mae, 2) if baseline_mae is not None else None,
+            "beats_baseline": model_mae < baseline_mae if model_mae is not None and baseline_mae is not None else None,
+        }
+
         weekday_values = {weekday: [] for weekday in range(7)}
-        for day_text, count in daily.items():
+        for day_text, count in daily_rows:
             weekday_values[date.fromisoformat(day_text).weekday()].append(count)
         recent = list(daily.values())[-28:]
         earlier = list(daily.values())[:28]
         recent_mean = sum(recent) / 28
         earlier_mean = sum(earlier) / 28
         trend = 1.0 if earlier_mean <= 0 else max(0.75, min(1.25, recent_mean / earlier_mean))
+
+        def empirical_quantile(values, fraction):
+            ordered = sorted(values)
+            if not ordered:
+                return 0.0
+            position = (len(ordered) - 1) * fraction
+            lower_index = int(position)
+            upper_index = min(lower_index + 1, len(ordered) - 1)
+            weight = position - lower_index
+            return ordered[lower_index] * (1 - weight) + ordered[upper_index] * weight
+
         next_seven = []
         for offset in range(7):
             target = today + timedelta(days=offset)
             weekday_history = weekday_values[target.weekday()]
-            expected = (sum(weekday_history) / len(weekday_history)) * trend
-            next_seven.append(expected)
-        forecast_operations = sum(next_seven)
+            expected = (sum(weekday_history) / len(weekday_history)) * trend if weekday_history else 0.0
+            next_seven.append({
+                "date": target.isoformat(),
+                "expected_operations": round(expected, 1),
+                "lower_estimate": round(max(0, empirical_quantile(weekday_history, 0.1) * trend), 1),
+                "upper_estimate": round(max(0, empirical_quantile(weekday_history, 0.9) * trend), 1),
+                "weekday_sample_count": len(weekday_history),
+            })
+        forecast_operations = sum(row["expected_operations"] for row in next_seven)
         staff_count = len(staff_by_team.get(team.id, set()))
         avg_minutes = (
             sum(team_effort[team.id]) / len(team_effort[team.id])
@@ -1465,10 +1514,9 @@ def analytics_workforce_demand():
             "team_name": team.name,
             "historical_operations": team_samples[team.id],
             "forecast_operations_next_7_days": round(forecast_operations, 1),
-            "forecast_by_day": [
-                {"date": (today + timedelta(days=i)).isoformat(), "expected_operations": round(next_seven[i], 1)}
-                for i in range(7)
-            ],
+            "forecast_by_day": next_seven,
+            "validation": validation,
+            "range_method": "Descriptive 10th–90th percentile of matching weekdays in the 56-day history, adjusted by the capped trend; not a confidence interval.",
             "active_team_members": staff_count,
             "currently_assigned_historical_members": len(team_assigned[team.id]),
             "expected_operations_per_active_member": round(forecast_operations / staff_count, 1) if staff_count else None,
