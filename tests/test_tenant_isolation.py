@@ -266,6 +266,14 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert workforce_payload["historical_sample_count"] == 4
     assert [row["team_name"] for row in workforce_payload["teams"]] == ["Tenant A Team"]
     assert workforce_payload["teams"][0]["historical_operations"] == 4
+    team_forecast = workforce_payload["teams"][0]
+    assert len(team_forecast["forecast_by_day"]) == 7
+    assert all(day["lower_estimate"] <= day["expected_operations"] <= day["upper_estimate"] for day in team_forecast["forecast_by_day"])
+    assert all(day["weekday_sample_count"] >= 7 for day in team_forecast["forecast_by_day"])
+    assert team_forecast["validation"]["training_days"] == 42
+    assert team_forecast["validation"]["holdout_days"] == 14
+    assert team_forecast["validation"]["model_mae"] is not None
+    assert "not a confidence interval" in team_forecast["range_method"]
 
     anomalies = client.get("/api/analytics/predictions/anomalies", headers=headers)
     assert anomalies.status_code == 200
