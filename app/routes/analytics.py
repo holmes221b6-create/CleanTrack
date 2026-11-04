@@ -1751,6 +1751,11 @@ def analytics_anomalies():
             values.add(value)
         selected[key] = values
     task_type_filter = (request.args.get("task_type") or "").strip()
+    time_zone_name = (request.args.get("time_zone") or "UTC").strip()
+    try:
+        report_timezone = ZoneInfo(time_zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "time_zone must be a valid IANA time-zone name."}), 400
 
     teams = Team.query.filter_by(organization_id=admin.organization_id).all()
     team_ids = {row.id for row in teams}
@@ -1785,6 +1790,7 @@ def analytics_anomalies():
         return team_id, location_id, operation.zone_id, operation.assigned_to_id
 
     now = datetime.now(timezone.utc)
+    today_local = now.astimezone(report_timezone).date()
     history_start = now - timedelta(days=90)
     operations = Operation.query.filter(
         Operation.organization_id == admin.organization_id,
@@ -1814,7 +1820,7 @@ def analytics_anomalies():
     for operation in scoped:
         created = _to_utc(operation.created_at)
         if created:
-            day_key = created.date().isoformat()
+            day_key = created.astimezone(report_timezone).date().isoformat()
             daily_counts[day_key] = daily_counts.get(day_key, 0) + 1
         due = _to_utc(operation.due_at)
         submitted = _to_utc(operation.submitted_at)
@@ -1845,13 +1851,13 @@ def analytics_anomalies():
     findings = []
     baseline_days = []
     for offset in range(8, 90):
-        day = (now.date() - timedelta(days=offset)).isoformat()
+        day = (today_local - timedelta(days=offset)).isoformat()
         baseline_days.append(daily_counts.get(day, 0))
     baseline_mean = sum(baseline_days) / len(baseline_days) if baseline_days else 0
     # Compare seven complete calendar days; exclude today because its
     # partial count would be biased downward against full-day baselines.
     recent_days = [
-        (now.date() - timedelta(days=offset)).isoformat()
+        (today_local - timedelta(days=offset)).isoformat()
         for offset in range(1, 8)
     ]
     recent_total = sum(daily_counts.get(day, 0) for day in recent_days)
@@ -1924,6 +1930,7 @@ def analytics_anomalies():
         "status": "available" if scoped else "no_history",
         "scope": "This organisation only",
         "history_days": 90,
+        "time_zone": time_zone_name,
         "historical_operation_count": len(scoped),
         "matured_deadline_outcomes": matured_total,
         "generated_at": now.isoformat(),
@@ -1936,7 +1943,7 @@ def analytics_anomalies():
                 str(len(findings)) + " operational pattern(s) identified for review."
             )
         ),
-        "method": "Workload spike: 7 complete calendar days (excluding today) exceed the prior 82-day daily baseline by 1.8x; overdue pattern: at least 3 matured outcomes and 15 percentage points above the organisation-wide late rate; repeat execution: 2 or more recorded attempts. These are screening thresholds, not statistical significance tests.",
+        "method": "Workload spike: 7 complete calendar days in "+time_zone_name+" (excluding today) exceed the prior 82-day daily baseline by 1.8x; overdue pattern: at least 3 matured outcomes and 15 percentage points above the organisation-wide late rate; repeat execution: 2 or more recorded attempts. These are screening thresholds, not statistical significance tests.",
         "notice": "Detected patterns may be coincidental or incomplete. They are based only on this organisation's historical operational data and should be reviewed by an administrator.",
     }), 200
 
