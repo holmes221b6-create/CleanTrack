@@ -919,3 +919,170 @@ def export_team_analytics():
         response.headers["Content-Disposition"] = f'attachment; filename="cleantrack-team-analytics-{date_stamp}.pdf"'
         return response
     return jsonify({"error": "Unsupported export format. Use csv, xlsx, or pdf."}), 400
+
+@analytics_bp.get("/predictions")
+@roles_required("Admin")
+def analytics_predictions():
+    """Forecast near-term operation demand from this organisation's own history."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    # Keep prediction scope identical to the Analytics filters, but use a fixed
+    # historical training window rather than the currently selected report dates.
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        raw = request.args.get(key, "")
+        values = []
+        for part in str(raw).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                return jsonify({"error": key + " must contain numeric IDs."}), 400
+            if value <= 0:
+                return jsonify({"error": key + " must contain positive IDs."}), 400
+            if value not in values:
+                values.append(value)
+        selected[key] = set(values)
+
+    task_type_filter = (request.args.get("task_type") or "").strip()
+    time_zone_name = (request.args.get("time_zone") or "UTC").strip()
+    try:
+        report_timezone = ZoneInfo(time_zone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return jsonify({"error": "time_zone must be a valid IANA time-zone name."}), 400
+
+    teams = Team.query.filter_by(organization_id=admin.organization_id).all()
+    locations = Location.query.filter_by(organization_id=admin.organization_id).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
+    employees = User.query.filter(
+        User.organization_id == admin.organization_id,
+        User.account_status == "active",
+        User.role.in_(["Staff", "Supervisor"]),
+    ).all()
+    team_ids = {row.id for row in teams}
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    employee_ids = {row.id for row in employees}
+
+    def resolved_dimensions(operation):
+        zone = zone_by_id.get(operation.zone_id)
+        location_id = operation.location_id
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_ids else None
+        if team_id is None and zone:
+            candidate = zone.team_id or (
+                location_by_id.get(zone.location_id).team_id
+                if location_by_id.get(zone.location_id) else None
+            )
+            if candidate in team_ids:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_ids:
+                team_id = location.team_id
+        return team_id, location_id, operation.zone_id, operation.assigned_to_id
+
+    now_local = datetime.now(report_timezone)
+    today = now_local.date()
+    history_start = today - timedelta(days=56)
+    history_start_at = datetime.combine(history_start, time.min, tzinfo=report_timezone).astimezone(timezone.utc)
+    today_start_at = datetime.combine(today, time.min, tzinfo=report_timezone).astimezone(timezone.utc)
+
+    # Explicit organisation predicate is mandatory: no cross-tenant training data.
+    operations = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.created_at >= history_start_at,
+        Operation.created_at < today_start_at,
+    ).all()
+
+    daily_counts = {(history_start + timedelta(days=i)).isoformat(): 0 for i in range(56)}
+    for operation in operations:
+        team_id, location_id, zone_id, employee_id = resolved_dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if employee_id is not None and employee_id not in employee_ids:
+            continue
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            continue
+        created_at = _to_utc(operation.created_at)
+        if created_at is None:
+            continue
+        local_day = created_at.astimezone(report_timezone).date()
+        key = local_day.isoformat()
+        if key in daily_counts:
+            daily_counts[key] += 1
+
+    history = [
+        {"date": (history_start + timedelta(days=i)).isoformat(),
+         "actual": daily_counts[(history_start + timedelta(days=i)).isoformat()]}
+        for i in range(56)
+    ]
+    total_operations = sum(row["actual"] for row in history)
+    weekday_samples = {weekday: [] for weekday in range(7)}
+    for row in history:
+        weekday_samples[date.fromisoformat(row["date"]).weekday()].append(row["actual"])
+
+    base_response = {
+        "scope": "This organisation only",
+        "history_days": 56,
+        "history_start": history_start.isoformat(),
+        "history_end": (today - timedelta(days=1)).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model": "Weekday seasonal baseline with capped recent-trend adjustment",
+        "sample_count": total_operations,
+        "notice": "AI-generated estimates may be wrong. They are based only on this organisation's historical operational data and are not guaranteed outcomes.",
+    }
+    if total_operations < 20 or any(len(values) < 7 for values in weekday_samples.values()):
+        return jsonify({
+            **base_response,
+            "status": "insufficient_data",
+            "message": "There is not enough historical activity to produce a dependable workload forecast yet. OMNIX needs at least 20 operations across the 56-day history window.",
+            "forecast": [],
+            "history": history,
+        }), 200
+
+    recent_days = history[-28:]
+    earlier_days = history[:28]
+    recent_mean = sum(row["actual"] for row in recent_days) / 28
+    earlier_mean = sum(row["actual"] for row in earlier_days) / 28
+    trend_factor = 1.0 if earlier_mean <= 0 else max(0.75, min(1.25, recent_mean / earlier_mean))
+
+    forecast = []
+    for offset in range(7):
+        target_day = today + timedelta(days=offset)
+        samples = weekday_samples[target_day.weekday()]
+        mean = sum(samples) / len(samples)
+        adjusted = mean * trend_factor
+        variance = sum((value - mean) ** 2 for value in samples) / max(1, len(samples) - 1)
+        spread = (variance ** 0.5) * 1.28
+        forecast.append({
+            "date": target_day.isoformat(),
+            "predicted_operations": round(max(0, adjusted), 1),
+            "lower_estimate": round(max(0, adjusted - spread), 1),
+            "upper_estimate": round(max(0, adjusted + spread), 1),
+            "weekday_sample_count": len(samples),
+        })
+
+    return jsonify({
+        **base_response,
+        "status": "available",
+        "message": "Forecast generated from 56 days of organisation-specific operation history.",
+        "trend_adjustment": round(trend_factor, 3),
+        "forecast": forecast,
+        "history": history,
+    }), 200
+
