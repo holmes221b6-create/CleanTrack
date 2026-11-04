@@ -334,6 +334,27 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert other_anomalies["historical_operation_count"] == 1
 
 
+def test_all_prediction_endpoints_enforce_admin_and_premium_access(tenant_app):
+    client = tenant_app.test_client()
+    ids = tenant_app.config["TENANT_TEST_IDS"]
+    admin_headers = {"Authorization": "Bearer " + ids["admin_a_token"]}
+    staff_headers = {"Authorization": "Bearer " + ids["staff_a_token"]}
+    endpoints = [
+        "/api/analytics/predictions",
+        "/api/analytics/predictions/overdue-risk",
+        "/api/analytics/predictions/workforce-demand",
+        "/api/analytics/predictions/completion-time",
+        "/api/analytics/predictions/anomalies",
+    ]
+    for endpoint in endpoints:
+        premium_response = client.get(endpoint, headers=admin_headers)
+        assert premium_response.status_code == 403, (endpoint, premium_response.get_json())
+        assert premium_response.get_json()["required_plan"] == "premium"
+        role_response = client.get(endpoint, headers=staff_headers)
+        assert role_response.status_code == 403, (endpoint, role_response.get_json())
+
+
+
 def test_all_prediction_filters_apply_to_every_module(tenant_app, monkeypatch):
     headers = _prediction_admin_headers(tenant_app, monkeypatch)
     now = datetime.now(timezone.utc)
