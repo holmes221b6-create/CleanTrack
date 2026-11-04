@@ -279,3 +279,12 @@ def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operation
     payload = response.get_json()
     assert payload["status"] == "no_history"
     assert payload["forecast"] == []
+
+    workforce = tenant_app.test_client().get(
+        "/api/analytics/predictions/workforce-demand", headers=headers
+    )
+    assert workforce.status_code == 200
+    workforce_payload = workforce.get_json()
+    assert workforce_payload["status"] == "no_history"
+    assert workforce_payload["historical_sample_count"] == 0
+    assert workforce_payload["teams"] == []
