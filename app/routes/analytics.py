@@ -1273,8 +1273,6 @@ def analytics_overdue_risk():
             continue
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
             continue
-        if employee_id is not None and employee_id not in active_people:
-            continue
         task_type = str(operation.task_type or "General").casefold()
         if task_type_filter and task_type != task_type_filter.casefold():
             continue
