@@ -11,6 +11,7 @@ from sqlalchemy import func
 
 from app.extensions import db
 from app.models.operation import Operation
+from app.models.operation_execution import OperationExecution
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -1243,11 +1244,11 @@ def analytics_overdue_risk():
         "method": "Smoothed empirical late-rate by operation type and priority, with organisation-wide fallback",
         "notice": "These estimates may be wrong. They use only this organisation's historical records and are not guarantees or individual performance assessments.",
     }
-    if total < 20:
+    if total == 0:
         return jsonify({
             **base,
-            "status": "insufficient_data",
-            "message": "At least 20 matured, non-cancelled operations with due dates are needed before OMNIX can estimate overdue risk.",
+            "status": "no_history",
+            "message": "No matured overdue outcomes are available in the selected historical scope yet.",
             "at_risk_operations": [],
         }), 200
 
@@ -1434,40 +1435,11 @@ def analytics_workforce_demand():
             if operation.assigned_to_id in staff_by_team[team_id]:
                 team_assigned[team_id].add(operation.assigned_to_id)
 
-    if included_total < 20:
-        return jsonify({
-            "status": "insufficient_data",
-            "message": "At least 20 historical operations across the last 56 days are needed to estimate team workload.",
-            "scope": "This organisation only",
-            "history_days": 56,
-            "historical_sample_count": included_total,
-            "teams": [],
-            "notice": "Estimates may be wrong and use only this organisation's historical operational data.",
-        }), 200
-
     results = []
     for team in teams:
         if selected["team_ids"] and team.id not in selected["team_ids"]:
             continue
         if not team_samples[team.id]:
-            continue
-        if team_samples[team.id] < 7:
-            results.append({
-                "team_id": team.id,
-                "team_name": team.name,
-                "historical_operations": team_samples[team.id],
-                "status": "insufficient_team_data",
-                "message": "This team needs at least 7 historical operations before a team-specific forecast is shown.",
-                "forecast_operations_next_7_days": None,
-                "forecast_by_day": [],
-                "active_team_members": len(staff_by_team.get(team.id, set())),
-                "currently_assigned_historical_members": len(team_assigned[team.id]),
-                "expected_operations_per_active_member": None,
-                "average_recorded_estimate_minutes": None,
-                "estimated_effort_hours_next_7_days": None,
-                "effort_estimate_sample_count": len(team_effort[team.id]),
-                "staffing_capacity_status": "not_assessed",
-            })
             continue
         daily = team_daily[team.id]
         weekday_values = {weekday: [] for weekday in range(7)}
@@ -1523,5 +1495,190 @@ def analytics_workforce_demand():
         "method": "Weekday team-level workload baseline with capped recent-trend adjustment",
         "teams": results,
         "notice": "Workload estimates may be wrong. They use only this organisation's historical operational data. Active membership is not proof of shift availability; OMNIX does not claim staffing capacity without working-hour and leave data. Effort hours are derived from recorded estimates, not measured actual duration.",
+    }), 200
+
+@analytics_bp.get("/predictions/completion-time")
+@roles_required("Admin")
+def analytics_completion_time():
+    """Estimate execution duration from this organisation's recorded attempts."""
+    admin = get_current_user()
+    access_error = _analytics_access_error(admin)
+    if access_error:
+        return access_error
+    if not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+
+    selected = {}
+    for key in ("team_ids", "location_ids", "zone_ids", "employee_ids"):
+        values = set()
+        for part in (request.args.get(key) or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                return jsonify({"error": key + " must contain numeric IDs."}), 400
+            if value <= 0:
+                return jsonify({"error": key + " must contain positive IDs."}), 400
+            values.add(value)
+        selected[key] = values
+    task_type_filter = (request.args.get("task_type") or "").strip()
+
+    teams = Team.query.filter_by(organization_id=admin.organization_id).all()
+    team_ids = {row.id for row in teams}
+    locations = Location.query.filter_by(organization_id=admin.organization_id).all()
+    zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
+    location_by_id = {row.id: row for row in locations}
+    zone_by_id = {row.id: row for row in zones}
+    active_people = {
+        row.id for row in User.query.filter(
+            User.organization_id == admin.organization_id,
+            User.account_status == "active",
+        ).all()
+    }
+
+    def dimensions(operation):
+        zone = zone_by_id.get(operation.zone_id)
+        location_id = operation.location_id
+        if location_id not in location_by_id and zone and zone.location_id in location_by_id:
+            location_id = zone.location_id
+        team_id = operation.team_id if operation.team_id in team_ids else None
+        if team_id is None and zone:
+            candidate = zone.team_id
+            location = location_by_id.get(zone.location_id)
+            if candidate not in team_ids and location:
+                candidate = location.team_id
+            if candidate in team_ids:
+                team_id = candidate
+        if team_id is None:
+            location = location_by_id.get(location_id)
+            if location and location.team_id in team_ids:
+                team_id = location.team_id
+        return team_id, location_id, operation.zone_id, operation.assigned_to_id
+
+    now = datetime.now(timezone.utc)
+    history_start = now - timedelta(days=180)
+    executions = db.session.query(OperationExecution, Operation).join(
+        Operation, Operation.id == OperationExecution.operation_id
+    ).filter(
+        Operation.organization_id == admin.organization_id,
+        OperationExecution.started_at >= history_start,
+        OperationExecution.submitted_at.isnot(None),
+    ).all()
+
+    observations = []
+    for execution, operation in executions:
+        started = _to_utc(execution.started_at)
+        submitted = _to_utc(execution.submitted_at)
+        if not started or not submitted:
+            continue
+        minutes = (submitted - started).total_seconds() / 60
+        # Exclude malformed timestamps and extreme idle sessions from the
+        # operational-duration estimate; do not substitute planned estimates.
+        if minutes < 1 or minutes > 72 * 60:
+            continue
+        team_id, location_id, zone_id, employee_id = dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if employee_id is not None and employee_id not in active_people:
+            continue
+        if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
+            continue
+        observations.append({
+            "minutes": minutes,
+            "task_type": str(operation.task_type or "General").casefold(),
+            "priority": str(operation.priority or "Normal").casefold(),
+        })
+
+    def quantile(values, fraction):
+        ordered = sorted(values)
+        if not ordered:
+            return None
+        position = (len(ordered) - 1) * fraction
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = position - lower
+        return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+    all_minutes = [row["minutes"] for row in observations]
+    organisation_median = quantile(all_minutes, 0.5)
+    type_values = {}
+    cohort_values = {}
+    for row in observations:
+        type_values.setdefault(row["task_type"], []).append(row["minutes"])
+        cohort_values.setdefault((row["task_type"], row["priority"]), []).append(row["minutes"])
+
+    open_operations = Operation.query.filter(
+        Operation.organization_id == admin.organization_id,
+        Operation.submitted_at.is_(None),
+    ).all()
+    predictions = []
+    for operation in open_operations:
+        status = str(operation.status or "").strip().lower()
+        if status in DONE_STATUSES or status in CANCELLED_STATUSES or status in {"submitted", "verified"}:
+            continue
+        team_id, location_id, zone_id, employee_id = dimensions(operation)
+        if selected["team_ids"] and team_id not in selected["team_ids"]:
+            continue
+        if selected["location_ids"] and location_id not in selected["location_ids"]:
+            continue
+        if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
+            continue
+        if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
+            continue
+        if employee_id is not None and employee_id not in active_people:
+            continue
+        task_type = str(operation.task_type or "General").casefold()
+        priority = str(operation.priority or "Normal").casefold()
+        if task_type_filter and task_type != task_type_filter.casefold():
+            continue
+
+        exact = cohort_values.get((task_type, priority), [])
+        by_type = type_values.get(task_type, [])
+        if exact:
+            source, basis = exact, "Matching operation type and priority"
+        elif by_type:
+            source, basis = by_type, "Matching operation type"
+        else:
+            source, basis = all_minutes, "Organisation-wide execution history"
+        if not source:
+            continue
+        predictions.append({
+            "operation_id": operation.id,
+            "title": operation.title,
+            "task_type": operation.task_type or "General",
+            "priority": operation.priority or "Normal",
+            "estimated_minutes": round(quantile(source, 0.5), 1),
+            "lower_estimate_minutes": round(quantile(source, 0.25), 1),
+            "upper_estimate_minutes": round(quantile(source, 0.75), 1),
+            "historical_comparable_sample": len(source),
+            "basis": basis,
+        })
+
+    predictions.sort(key=lambda row: row["estimated_minutes"], reverse=True)
+    return jsonify({
+        "status": "available" if observations else "no_history",
+        "message": (
+            "Completion-time estimates use recorded execution durations."
+            if observations else
+            "No usable submitted execution durations are available in this organisation's history yet."
+        ),
+        "scope": "This organisation only",
+        "history_days": 180,
+        "historical_execution_sample_count": len(observations),
+        "history_start": history_start.isoformat(),
+        "generated_at": now.isoformat(),
+        "organisation_median_minutes": round(organisation_median, 1) if organisation_median is not None else None,
+        "predicted_open_operations": len(predictions),
+        "predictions": predictions[:30],
+        "method": "Median and interquartile range of recorded execution durations, matched by operation type and priority with organisation-wide fallback",
+        "notice": "Estimates may be wrong. They use only this organisation's historical execution records and are not guaranteed completion times.",
     }), 200
 
