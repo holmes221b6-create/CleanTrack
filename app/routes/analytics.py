@@ -1185,7 +1185,11 @@ def analytics_overdue_risk():
     matured = []
     for operation in history_rows:
         status = str(operation.status or "").strip().lower()
-        if status in CANCELLED_STATUSES:
+        if status in CANCELLED_STATUSES or status == "rejected":
+            # Rejection is a review outcome for one attempt, not a completed
+            # operation outcome: the assignee may correct and resubmit it.
+            # Rejected operations remain eligible in the current open-work
+            # query below, but must not become historical on-time/late labels.
             continue
         submitted = _to_utc(operation.submitted_at)
         reviewed = _to_utc(operation.reviewed_at)
