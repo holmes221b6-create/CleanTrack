@@ -1451,6 +1451,24 @@ def analytics_workforce_demand():
             continue
         if not team_samples[team.id]:
             continue
+        if team_samples[team.id] < 7:
+            results.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "historical_operations": team_samples[team.id],
+                "status": "insufficient_team_data",
+                "message": "This team needs at least 7 historical operations before a team-specific forecast is shown.",
+                "forecast_operations_next_7_days": None,
+                "forecast_by_day": [],
+                "active_team_members": len(staff_by_team.get(team.id, set())),
+                "currently_assigned_historical_members": len(team_assigned[team.id]),
+                "expected_operations_per_active_member": None,
+                "average_recorded_estimate_minutes": None,
+                "estimated_effort_hours_next_7_days": None,
+                "effort_estimate_sample_count": len(team_effort[team.id]),
+                "staffing_capacity_status": "not_assessed",
+            })
+            continue
         daily = team_daily[team.id]
         weekday_values = {weekday: [] for weekday in range(7)}
         for day_text, count in daily.items():
