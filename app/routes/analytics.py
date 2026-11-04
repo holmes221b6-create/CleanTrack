@@ -1025,6 +1025,16 @@ def analytics_predictions():
         for i in range(56)
     ]
     total_operations = sum(row["actual"] for row in history)
+    base_response = {
+        "scope": "This organisation only",
+        "history_days": 56,
+        "history_start": history_start.isoformat(),
+        "history_end": (today - timedelta(days=1)).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "model": "Weekday seasonal baseline with capped recent-trend adjustment",
+        "sample_count": total_operations,
+        "notice": "AI-generated estimates may be wrong. They are based only on this organisation's historical operational data and are not guaranteed outcomes.",
+    }
     if total_operations == 0:
         return jsonify({
             **base_response,
@@ -1038,16 +1048,6 @@ def analytics_predictions():
     for row in history:
         weekday_samples[date.fromisoformat(row["date"]).weekday()].append(row["actual"])
 
-    base_response = {
-        "scope": "This organisation only",
-        "history_days": 56,
-        "history_start": history_start.isoformat(),
-        "history_end": (today - timedelta(days=1)).isoformat(),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "model": "Weekday seasonal baseline with capped recent-trend adjustment",
-        "sample_count": total_operations,
-        "notice": "AI-generated estimates may be wrong. They are based only on this organisation's historical operational data and are not guaranteed outcomes.",
-    }
     recent_days = history[-28:]
     earlier_days = history[:28]
     recent_mean = sum(row["actual"] for row in recent_days) / 28
