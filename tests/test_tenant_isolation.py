@@ -226,7 +226,12 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             attempt_number=1, status="Submitted", started_at=now - timedelta(hours=5),
             submitted_at=now - timedelta(hours=4), created_at=now - timedelta(hours=5),
         )
-        db.session.add_all([execution_a, execution_b])
+        execution_b_retry = OperationExecution(
+            operation_id=future_b.id, performed_by_id=staff_b.id,
+            attempt_number=2, status="Submitted", started_at=now - timedelta(hours=3),
+            submitted_at=now - timedelta(hours=2), created_at=now - timedelta(hours=3),
+        )
+        db.session.add_all([execution_a, execution_b, execution_b_retry])
         db.session.commit()
         future_a_id = future_a.id
         rejected_a_id = rejected_a.id
@@ -261,6 +266,10 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert workforce_payload["historical_sample_count"] == 4
     assert [row["team_name"] for row in workforce_payload["teams"]] == ["Tenant A Team"]
     assert workforce_payload["teams"][0]["historical_operations"] == 4
+
+    anomalies = client.get("/api/analytics/predictions/anomalies", headers=headers)
+    assert anomalies.status_code == 200
+    assert "Tenant B secret future operation" not in str(anomalies.get_json()["findings"])
 
 
 def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
