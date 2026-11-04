@@ -962,15 +962,9 @@ def analytics_predictions():
     teams = Team.query.filter_by(organization_id=admin.organization_id).all()
     locations = Location.query.filter_by(organization_id=admin.organization_id).all()
     zones = Zone.query.filter_by(organization_id=admin.organization_id).all()
-    employees = User.query.filter(
-        User.organization_id == admin.organization_id,
-        User.account_status == "active",
-        User.role.in_(["Staff", "Supervisor"]),
-    ).all()
     team_ids = {row.id for row in teams}
     location_by_id = {row.id: row for row in locations}
     zone_by_id = {row.id: row for row in zones}
-    employee_ids = {row.id for row in employees}
 
     def resolved_dimensions(operation):
         zone = zone_by_id.get(operation.zone_id)
@@ -1014,8 +1008,6 @@ def analytics_predictions():
         if selected["zone_ids"] and zone_id not in selected["zone_ids"]:
             continue
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
-            continue
-        if employee_id is not None and employee_id not in employee_ids:
             continue
         if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
             continue
