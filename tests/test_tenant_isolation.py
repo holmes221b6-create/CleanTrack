@@ -318,6 +318,9 @@ def test_anomaly_detection_excludes_completed_records_without_terminal_timestamp
     payload = response.get_json()
     # Only the still-open overdue operation has a defensible matured outcome.
     assert payload["matured_deadline_outcomes"] == 1
+    assert "1.8x" in payload["method"]
+    assert "15 percentage points" in payload["method"]
+    assert "screening thresholds" in payload["method"]
     # A rejected attempt is not a final operation deadline outcome.
     with tenant_app.app_context():
         admin_a = User.query.filter_by(email="admin-a@example.test").one()
