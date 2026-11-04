@@ -207,6 +207,12 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             status="Rejected", created_at=old, due_at=due_future,
             submitted_at=now - timedelta(hours=2), reviewed_at=now - timedelta(hours=1),
         )
+        rejected_past_a = Operation(
+            title="Tenant A rejected past-deadline attempt", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id, team_id=team_a.id,
+            status="Rejected", created_at=old, due_at=due_past,
+            submitted_at=now - timedelta(days=3), reviewed_at=now - timedelta(days=2),
+        )
         future_b = Operation(
             title="Tenant B secret future operation", organization_id=admin_b.organization_id,
             created_by_id=admin_b.id, assigned_to_id=staff_b.id,
@@ -214,7 +220,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         )
         # Historical work must remain in training data after a staff account is deactivated.
         staff_a.account_status = "inactive"
-        db.session.add_all([open_a, completed_without_timestamp, future_a, rejected_a, future_b])
+        db.session.add_all([open_a, completed_without_timestamp, future_a, rejected_a, rejected_past_a, future_b])
         db.session.flush()
         execution_a = OperationExecution(
             operation_id=future_a.id, performed_by_id=staff_a.id,
@@ -306,6 +312,22 @@ def test_anomaly_detection_excludes_completed_records_without_terminal_timestamp
     payload = response.get_json()
     # Only the still-open overdue operation has a defensible matured outcome.
     assert payload["matured_deadline_outcomes"] == 1
+    # A rejected attempt is not a final operation deadline outcome.
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        now = datetime.now(timezone.utc)
+        db.session.add(Operation(
+            title="Rejected attempt, not final outcome", organization_id=admin_a.organization_id,
+            created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+            status="Rejected", created_at=now - timedelta(days=12),
+            due_at=now - timedelta(days=2), submitted_at=now - timedelta(days=3),
+            reviewed_at=now - timedelta(days=2),
+        ))
+        db.session.commit()
+    second_response = tenant_app.test_client().get("/api/analytics/predictions/anomalies", headers=headers)
+    assert second_response.status_code == 200
+    assert second_response.get_json()["matured_deadline_outcomes"] == 1
 
 
 
