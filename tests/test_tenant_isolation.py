@@ -203,6 +203,8 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
             created_by_id=admin_b.id, assigned_to_id=staff_b.id,
             status="Assigned", created_at=old, due_at=due_future,
         )
+        # Historical work must remain in training data after a staff account is deactivated.
+        staff_a.account_status = "inactive"
         db.session.add_all([open_a, completed_without_timestamp, future_a, future_b])
         db.session.flush()
         execution_a = OperationExecution(
