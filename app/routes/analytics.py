@@ -1818,7 +1818,10 @@ def analytics_anomalies():
         due = _to_utc(operation.due_at)
         submitted = _to_utc(operation.submitted_at)
         status = str(operation.status or "").strip().lower()
-        if due and due < now and status not in CANCELLED_STATUSES:
+        if due and due < now and status not in CANCELLED_STATUSES and status != "rejected":
+            # A rejection closes an execution attempt, not the operation itself.
+            # Keep it out of matured deadline outcomes until the operation is
+            # ultimately completed or remains genuinely open past its deadline.
             reviewed = _to_utc(operation.reviewed_at)
             terminal_at = submitted or reviewed
             # Completed records without a recorded terminal timestamp cannot
