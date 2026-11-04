@@ -9,6 +9,9 @@ from app.extensions import db
 from app.models.organization import Organization
 from app.models.user import User
 from app.models.team import Team
+from app.models.team_member import TeamMember
+from app.models.location import Location
+from app.models.zone import Zone
 from app.models.operation import Operation
 from app.models.operation_execution import OperationExecution
 from app.services.permissions import VALID_ROLES
@@ -329,6 +332,98 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     assert other_workforce["historical_sample_count"] == 1
     assert [row["team_name"] for row in other_workforce["teams"]] == ["Tenant A Other Team"]
     assert other_anomalies["historical_operation_count"] == 1
+
+
+def test_all_prediction_filters_apply_to_every_module(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        staff_b = User(
+            email="staff-filter-b@example.test", full_name="Staff Filter B", role="Staff",
+            account_status="active", organization_id=admin.organization_id, password_hash="unused",
+        )
+        team = Team(name="Filter Coverage Team", organization_id=admin.organization_id)
+        db.session.add_all([staff_b, team])
+        db.session.flush()
+        location_a = Location(name="Filter Location A", organization_id=admin.organization_id, team_id=team.id)
+        location_b = Location(name="Filter Location B", organization_id=admin.organization_id, team_id=team.id)
+        db.session.add_all([location_a, location_b])
+        db.session.flush()
+        zone_a = Zone(name="Filter Zone A", organization_id=admin.organization_id, location_id=location_a.id, team_id=team.id)
+        zone_b = Zone(name="Filter Zone B", organization_id=admin.organization_id, location_id=location_b.id, team_id=team.id)
+        db.session.add_all([zone_a, zone_b])
+        db.session.flush()
+        db.session.add_all([
+            TeamMember(team_id=team.id, user_id=staff_a.id),
+            TeamMember(team_id=team.id, user_id=staff_b.id),
+        ])
+        fixtures = []
+        for label, staff, location, zone, task_type in [
+            ("A", staff_a, location_a, zone_a, "Cleaning"),
+            ("B", staff_b, location_b, zone_b, "Maintenance"),
+        ]:
+            completed = Operation(
+                title="Filter " + label + " completed",
+                organization_id=admin.organization_id, created_by_id=admin.id,
+                assigned_to_id=staff.id, team_id=team.id, location_id=location.id,
+                zone_id=zone.id, task_type=task_type, status="Completed",
+                created_at=now - timedelta(days=12), due_at=now - timedelta(days=2),
+                submitted_at=now - timedelta(days=1),
+            )
+            upcoming = Operation(
+                title="Filter " + label + " upcoming",
+                organization_id=admin.organization_id, created_by_id=admin.id,
+                assigned_to_id=staff.id, team_id=team.id, location_id=location.id,
+                zone_id=zone.id, task_type=task_type, status="Assigned",
+                created_at=now - timedelta(days=12), due_at=now + timedelta(days=2),
+            )
+            db.session.add_all([completed, upcoming])
+            fixtures.append((completed, staff, label))
+        db.session.flush()
+        for completed, staff, label in fixtures:
+            db.session.add(OperationExecution(
+                operation_id=completed.id, performed_by_id=staff.id,
+                attempt_number=1, status="Completed",
+                started_at=now - timedelta(hours=3), submitted_at=now - timedelta(hours=2),
+                created_at=now - timedelta(hours=3),
+            ))
+        ids = {
+            "location": (location_a.id, location_b.id),
+            "zone": (zone_a.id, zone_b.id),
+            "employee": (staff_a.id, staff_b.id),
+        }
+        db.session.commit()
+
+    client = tenant_app.test_client()
+    endpoint_expectations = [
+        ("/api/analytics/predictions", "sample_count", 2),
+        ("/api/analytics/predictions/overdue-risk", "historical_sample_count", 1),
+        ("/api/analytics/predictions/workforce-demand", "historical_sample_count", 2),
+        ("/api/analytics/predictions/completion-time", "historical_execution_sample_count", 1),
+        ("/api/analytics/predictions/anomalies", "historical_operation_count", 2),
+    ]
+    filter_cases = [
+        ("location_ids", "location", "location"),
+        ("zone_ids", "zone", "zone"),
+        ("employee_ids", "employee", "employee"),
+    ]
+    for query_key, id_key, _label in filter_cases:
+        for index in (0, 1):
+            query = "?" + query_key + "=" + str(ids[id_key][index])
+            for endpoint, response_key, expected in endpoint_expectations:
+                response = client.get(endpoint + query, headers=headers)
+                assert response.status_code == 200, (endpoint, query, response.get_json())
+                assert response.get_json()[response_key] == expected, (endpoint, query, response.get_json())
+
+    for task_type in ("Cleaning", "Maintenance"):
+        query = "?task_type=" + task_type
+        for endpoint, response_key, expected in endpoint_expectations:
+            response = client.get(endpoint + query, headers=headers)
+            assert response.status_code == 200, (endpoint, query, response.get_json())
+            assert response.get_json()[response_key] == expected, (endpoint, query, response.get_json())
+
 
 
 def test_anomaly_detection_excludes_completed_records_without_terminal_timestamps(tenant_app, monkeypatch):
