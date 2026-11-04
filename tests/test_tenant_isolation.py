@@ -246,6 +246,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         db.session.commit()
         future_a_id = future_a.id
         rejected_a_id = rejected_a.id
+        team_a_id = team_a.id
 
     client = tenant_app.test_client()
     workload = client.get("/api/analytics/predictions", headers=headers)
@@ -307,7 +308,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         db.session.commit()
         other_team_id = other_team.id
 
-    scoped = "?team_ids=" + str(team_a.id)
+    scoped = "?team_ids=" + str(team_a_id)
     scoped_workload = client.get("/api/analytics/predictions" + scoped, headers=headers).get_json()
     scoped_risk = client.get("/api/analytics/predictions/overdue-risk" + scoped, headers=headers).get_json()
     scoped_workforce = client.get("/api/analytics/predictions/workforce-demand" + scoped, headers=headers).get_json()
