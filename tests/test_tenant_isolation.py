@@ -219,7 +219,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
         )
         db.session.add_all([execution_a, execution_b])
         db.session.commit()
-        open_a_id = open_a.id
+        future_a_id = future_a.id
 
     client = tenant_app.test_client()
     workload = client.get("/api/analytics/predictions", headers=headers)
@@ -234,7 +234,7 @@ def test_prediction_endpoints_keep_all_queries_within_the_current_tenant(tenant_
     risk_payload = risk.get_json()
     assert risk_payload["historical_sample_count"] == 1
     assert all(row["title"] != "Tenant B secret future operation" for row in risk_payload["at_risk_operations"])
-    assert any(row["operation_id"] == open_a_id for row in risk_payload["at_risk_operations"])
+    assert any(row["operation_id"] == future_a_id for row in risk_payload["at_risk_operations"])
 
     duration = client.get("/api/analytics/predictions/completion-time", headers=headers)
     assert duration.status_code == 200
