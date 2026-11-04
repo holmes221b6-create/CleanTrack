@@ -1479,7 +1479,12 @@ def analytics_workforce_demand():
         })
 
     return jsonify({
-        "status": "available",
+        "status": "available" if included_total else "no_history",
+        "message": (
+            "No historical operations matched the selected team, location, zone, employee and operation-type scope, so workforce demand cannot be estimated."
+            if not included_total else
+            "Team-level workload estimates generated from organisation history."
+        ),
         "scope": "This organisation only",
         "history_days": 56,
         "history_start": start_day.isoformat(),
