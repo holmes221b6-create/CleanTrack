@@ -1047,15 +1047,6 @@ def analytics_predictions():
         "sample_count": total_operations,
         "notice": "AI-generated estimates may be wrong. They are based only on this organisation's historical operational data and are not guaranteed outcomes.",
     }
-    if total_operations < 20 or any(len(values) < 7 for values in weekday_samples.values()):
-        return jsonify({
-            **base_response,
-            "status": "insufficient_data",
-            "message": "There is not enough historical activity to produce a dependable workload forecast yet. OMNIX needs at least 20 operations across the 56-day history window.",
-            "forecast": [],
-            "history": history,
-        }), 200
-
     recent_days = history[-28:]
     earlier_days = history[:28]
     recent_mean = sum(row["actual"] for row in recent_days) / 28
@@ -1066,7 +1057,11 @@ def analytics_predictions():
     for offset in range(7):
         target_day = today + timedelta(days=offset)
         samples = weekday_samples[target_day.weekday()]
-        mean = sum(samples) / len(samples)
+        # If this weekday has no observations, fall back to the organisation-wide
+        # daily average. With an empty history, report zero rather than fabricate data.
+        mean = (sum(samples) / len(samples)) if samples else (
+            total_operations / len(history) if history else 0.0
+        )
         adjusted = mean * trend_factor
         variance = sum((value - mean) ** 2 for value in samples) / max(1, len(samples) - 1)
         spread = (variance ** 0.5) * 1.28
