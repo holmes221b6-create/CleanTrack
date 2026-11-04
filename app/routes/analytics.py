@@ -1815,7 +1815,7 @@ def analytics_completion_time():
         "validation": validation,
         "predicted_open_operations": len(predictions),
         "predictions": predictions[:30],
-        "method": "Median and interquartile range of submitted or completed execution durations, matched by operation type and priority with organisation-wide fallback; rejected and unfinished attempts are excluded",
+        "method": "Median and interquartile range of submitted or completed execution durations; type/priority cohorts require at least five sessions or are pooled into broader history. Chronological 80/20 holdout validation is reported separately; rejected and unfinished attempts are excluded",
         "notice": "Estimates may be wrong. They use only this organisation's historical execution records and are not guaranteed completion times. The 25th–75th percentile range is descriptive, not a confidence interval.",
     }), 200
 
