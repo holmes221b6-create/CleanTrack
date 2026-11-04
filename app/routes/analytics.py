@@ -1033,6 +1033,15 @@ def analytics_predictions():
         for i in range(56)
     ]
     total_operations = sum(row["actual"] for row in history)
+    if total_operations == 0:
+        return jsonify({
+            **base_response,
+            "status": "no_history",
+            "message": "No historical operations were recorded in the selected organisation scope, so a workload forecast cannot be calculated yet.",
+            "forecast": [],
+            "history": history,
+        }), 200
+
     weekday_samples = {weekday: [] for weekday in range(7)}
     for row in history:
         weekday_samples[date.fromisoformat(row["date"]).weekday()].append(row["actual"])
