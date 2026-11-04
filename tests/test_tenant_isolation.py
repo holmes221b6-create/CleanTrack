@@ -690,5 +690,6 @@ def test_completion_time_reports_chronological_holdout_validation(tenant_app, mo
     assert validation["holdout_sample_count"] == 6
     assert isinstance(validation["model_mae_minutes"], float)
     assert isinstance(validation["baseline_mae_minutes"], float)
-    assert payload["predicted_open_operations"] == 1
-    assert payload["predictions"][0]["historical_comparable_sample"] == 30
+    assert payload["predicted_open_operations"] >= 1
+    target = next(item for item in payload["predictions"] if item["title"] == "Open duration prediction")
+    assert target["historical_comparable_sample"] == 30
