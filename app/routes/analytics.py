@@ -953,6 +953,9 @@ def analytics_predictions():
         selected[key] = set(values)
 
     task_type_filter = (request.args.get("task_type") or "").strip()
+    forecast_horizon = request.args.get("horizon", 7, type=int)
+    if forecast_horizon not in (7, 14, 30):
+        return jsonify({"error": "horizon must be 7, 14, or 30 days."}), 400
     time_zone_name = (request.args.get("time_zone") or "UTC").strip()
     try:
         report_timezone = ZoneInfo(time_zone_name)
@@ -1028,6 +1031,7 @@ def analytics_predictions():
     base_response = {
         "scope": "This organisation only",
         "history_days": 56,
+        "forecast_horizon_days": forecast_horizon,
         "history_start": history_start.isoformat(),
         "history_end": (today - timedelta(days=1)).isoformat(),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1055,7 +1059,7 @@ def analytics_predictions():
     trend_factor = 1.0 if earlier_mean <= 0 else max(0.75, min(1.25, recent_mean / earlier_mean))
 
     forecast = []
-    for offset in range(7):
+    for offset in range(forecast_horizon):
         target_day = today + timedelta(days=offset)
         samples = weekday_samples[target_day.weekday()]
         # If this weekday has no observations, fall back to the organisation-wide
@@ -1117,7 +1121,7 @@ def analytics_predictions():
     return jsonify({
         **base_response,
         "status": "available",
-        "message": "Forecast generated from 56 days of organisation-specific operation history.",
+        "message": f"{forecast_horizon}-day forecast generated from 56 days of organisation-specific operation history.",
         "trend_adjustment": round(trend_factor, 3),
         "validation": validation,
         "forecast": forecast,
