@@ -1194,12 +1194,18 @@ def analytics_overdue_risk():
         if status in CANCELLED_STATUSES:
             continue
         submitted = _to_utc(operation.submitted_at)
+        reviewed = _to_utc(operation.reviewed_at)
+        terminal_at = submitted or reviewed
         due = _to_utc(operation.due_at)
         if due is None:
             continue
-        if submitted is None and status in DONE_STATUSES:
+        # A terminal status without any recorded terminal timestamp is not
+        # a usable training label. Never infer an on-time outcome from absence.
+        if status in DONE_STATUSES and terminal_at is None:
             continue
-        late = submitted > due if submitted is not None else True
+        if status in {"submitted", "verified"} and terminal_at is None:
+            continue
+        late = terminal_at > due if terminal_at is not None else True
         team_id, location_id, zone_id, employee_id = dimensions(operation)
         if selected["team_ids"] and team_id not in selected["team_ids"]:
             continue
@@ -1754,8 +1760,7 @@ def analytics_anomalies():
             return False
         if selected["employee_ids"] and employee_id not in selected["employee_ids"]:
             return False
-        if employee_id is not None and employee_id not in active_people:
-            return False
+        # Historical operations remain in scope after their assignee leaves.
         if task_type_filter and str(operation.task_type or "General").casefold() != task_type_filter.casefold():
             return False
         return True
