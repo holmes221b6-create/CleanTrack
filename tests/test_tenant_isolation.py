@@ -340,6 +340,52 @@ def test_anomaly_detection_excludes_completed_records_without_terminal_timestamp
 
 
 
+def test_anomaly_workload_spike_uses_seven_complete_days_not_partial_today(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        rows = []
+        # One operation per day in the 82-day baseline (offsets 8–89).
+        for offset in range(8, 90):
+            rows.append(Operation(
+                title="Baseline operation " + str(offset),
+                organization_id=admin_a.organization_id,
+                created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+                status="Assigned", created_at=now - timedelta(days=offset),
+            ))
+        # Two operations on each of the seven most recent complete days.
+        for offset in range(1, 8):
+            for attempt in range(2):
+                rows.append(Operation(
+                    title="Recent complete-day operation " + str(offset) + "-" + str(attempt),
+                    organization_id=admin_a.organization_id,
+                    created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+                    status="Assigned", created_at=now - timedelta(days=offset, minutes=attempt),
+                ))
+        # Today's partial count is deliberately large and must not enter the comparison.
+        for attempt in range(20):
+            rows.append(Operation(
+                title="Partial today operation " + str(attempt),
+                organization_id=admin_a.organization_id,
+                created_by_id=admin_a.id, assigned_to_id=staff_a.id,
+                status="Assigned", created_at=now - timedelta(minutes=attempt + 1),
+            ))
+        db.session.add_all(rows)
+        db.session.commit()
+
+    response = tenant_app.test_client().get("/api/analytics/predictions/anomalies", headers=headers)
+    assert response.status_code == 200
+    payload = response.get_json()
+    spike = next(item for item in payload["findings"] if item["kind"] == "workload_spike")
+    assert spike["baseline"] == 1.0
+    assert spike["observed"] == 2.0
+    assert spike["evidence_count"] == 14
+    assert spike["change_percent"] == 100.0
+    assert "complete calendar days" in spike["description"]
+
+
 def test_workload_forecast_returns_no_history_when_tenant_has_no_prior_operations(tenant_app, monkeypatch):
     headers = _prediction_admin_headers(tenant_app, monkeypatch)
     response = tenant_app.test_client().get("/api/analytics/predictions", headers=headers)
