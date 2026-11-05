@@ -433,7 +433,7 @@ def analytics_workspace():
     events; they are not inferred from a task's current status.
     """
     admin = get_current_user()
-    access_error = _prediction_history_access_error(admin)
+    access_error = _analytics_access_error(admin)
     if access_error:
         return access_error
     if not admin.organization_id:
@@ -857,7 +857,7 @@ def analytics_workspace():
 @roles_required("Admin")
 def team_analytics():
     admin = get_current_user()
-    access_error = _prediction_history_access_error(admin)
+    access_error = _analytics_access_error(admin)
     if access_error:
         return access_error
     if not admin.organization_id:
