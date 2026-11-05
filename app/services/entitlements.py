@@ -24,9 +24,10 @@ def get_organization_entitlements(organization):
         "premium_access": premium,
         "features": {
             "core_operations": True, "locations_and_zones": True, "standard_reports": True,
-            "advanced_reports": premium, "extended_audit_history": premium,
+            "advanced_reports": True, "prediction_history": premium,
+            "advanced_ai_predictions": premium, "extended_audit_history": premium,
             "integrations": premium, "priority_support": premium,
         },
         "enforcement_status": "partial",
-        "enforced_features": ["advanced_reports"],
+        "enforced_features": ["prediction_history", "advanced_ai_predictions"],
     }
