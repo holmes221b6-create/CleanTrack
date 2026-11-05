@@ -491,9 +491,9 @@ def analytics_workspace():
     zones = Zone.query.filter_by(organization_id=admin.organization_id).order_by(
         func.lower(Zone.name), Zone.id
     ).all()
+    # Include inactive staff/supervisors so historical assignments remain reportable.
     employees = User.query.filter(
         User.organization_id == admin.organization_id,
-        User.account_status == "active",
         User.role.in_(["Staff", "Supervisor"]),
     ).order_by(func.lower(User.full_name), User.id).all()
 
