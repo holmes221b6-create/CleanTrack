@@ -885,3 +885,70 @@ def test_workload_forecast_accepts_only_supported_horizons(tenant_app, monkeypat
             assert response.get_json()["forecast_horizon_days"] == horizon
             assert len(response.get_json()["forecast"]) == horizon
 
+
+def test_prediction_history_is_premium_only_tenant_scoped_and_deduplicated(tenant_app):
+    from app.models.audit_log import AuditLog
+    from app.models.subscription import OrganizationSubscription
+
+    ids = tenant_app.config["TENANT_TEST_IDS"]
+    headers = {"Authorization": "Bearer " + ids["admin_a_token"]}
+    client = tenant_app.test_client()
+    payload = {
+        "prediction_type": "workload",
+        "label": "Workload forecast",
+        "summary": "Expected workload is stable.",
+        "evidence": {"sample_count": 12, "horizon_days": 7},
+    }
+
+    # Free plans can use standard predictions, but cannot read or write history.
+    denied_read = client.get("/api/analytics/predictions/history", headers=headers)
+    denied_write = client.post("/api/analytics/predictions/history", headers=headers, json=payload)
+    assert denied_read.status_code == 403
+    assert denied_read.get_json()["required_plan"] == "premium"
+    assert denied_write.status_code == 403
+    assert denied_write.get_json()["required_plan"] == "premium"
+
+    with tenant_app.app_context():
+        admin_a = User.query.filter_by(email="admin-a@example.test").one()
+        db.session.add(OrganizationSubscription(
+            organization_id=admin_a.organization_id, plan_key="premium", status="active"
+        ))
+        # Old snapshots must not appear in the rolling 24-hour window.
+        db.session.add(AuditLog(
+            actor_id=admin_a.id, organization_id=admin_a.organization_id,
+            action="analytics_prediction_snapshot", resource_type="prediction",
+            resource_id="workload",
+            details={"prediction_type": "workload", "label": "Old", "summary": "Expired", "evidence": {}},
+            created_at=datetime.now(timezone.utc) - timedelta(hours=25),
+        ))
+        db.session.commit()
+
+    first = client.post("/api/analytics/predictions/history", headers=headers, json=payload)
+    second = client.post("/api/analytics/predictions/history", headers=headers, json=payload)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.get_json()["duplicate"] is True
+
+    history = client.get("/api/analytics/predictions/history?limit=50", headers=headers)
+    assert history.status_code == 200
+    items = history.get_json()["items"]
+    assert len(items) == 1
+    assert items[0]["summary"] == payload["summary"]
+
+    # A different organisation cannot read or receive this tenant's snapshots.
+    with tenant_app.app_context():
+        admin_b = User.query.filter_by(email="admin-b@example.test").one()
+        db.session.add(OrganizationSubscription(
+            organization_id=admin_b.organization_id, plan_key="premium", status="active"
+        ))
+        db.session.commit()
+        token_b = create_access_token(
+            identity=str(admin_b.id), additional_claims={"user_id": admin_b.id}
+        )
+    foreign_history = client.get(
+        "/api/analytics/predictions/history",
+        headers={"Authorization": "Bearer " + token_b},
+    )
+    assert foreign_history.status_code == 200
+    assert foreign_history.get_json()["items"] == []
+
