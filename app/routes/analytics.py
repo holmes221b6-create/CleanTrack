@@ -2110,7 +2110,7 @@ def analytics_anomalies():
 def analytics_prediction_history():
     """Return recent prediction snapshots for the authenticated organisation only."""
     admin = get_current_user()
-    access_error = _analytics_access_error(admin)
+    access_error = _prediction_history_access_error(admin)
     if access_error:
         return access_error
     limit = min(50, max(1, request.args.get("limit", 20, type=int)))
@@ -2139,7 +2139,7 @@ def analytics_prediction_history():
 def save_analytics_prediction_snapshot():
     """Persist a compact, organisation-scoped snapshot for audit/history."""
     admin = get_current_user()
-    access_error = _analytics_access_error(admin)
+    access_error = _prediction_history_access_error(admin)
     if access_error:
         return access_error
     payload = request.get_json(silent=True) or {}
