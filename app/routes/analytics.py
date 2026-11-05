@@ -2155,6 +2155,21 @@ def save_analytics_prediction_snapshot():
     for key, value in list(evidence.items())[:24]:
         if isinstance(value, (str, int, float, bool)) or value is None:
             safe_evidence[str(key)[:80]] = value
+    # Refreshes and page reloads must not create duplicate history entries
+    # when the prediction evidence has not changed.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent_rows = AuditLog.query.filter(
+        AuditLog.organization_id == admin.organization_id,
+        AuditLog.action == "analytics_prediction_snapshot",
+        AuditLog.resource_type == "prediction",
+        AuditLog.resource_id == prediction_type,
+        AuditLog.created_at >= cutoff,
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(100).all()
+    for existing in recent_rows:
+        details = existing.details or {}
+        if details.get("summary") == summary and details.get("evidence", {}) == safe_evidence:
+            return jsonify({"saved": True, "duplicate": True, "id": existing.id}), 200
+
     row = AuditLog(
         actor_id=admin.id,
         organization_id=admin.organization_id,
