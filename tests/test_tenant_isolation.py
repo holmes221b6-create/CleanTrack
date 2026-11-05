@@ -776,3 +776,112 @@ def test_recurring_overdue_anomaly_compares_against_other_operation_types(tenant
     assert pattern["observed_late_rate_percent"] == 100.0
     assert pattern["comparison_late_rate_percent"] == 0.0
     assert pattern["comparison_sample_count"] == 3
+
+
+def test_analytics_workspace_filters_and_exports_match_tenant_records(tenant_app, monkeypatch):
+    import csv
+    from io import StringIO
+
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    now = datetime.now(timezone.utc)
+    start = (now - timedelta(days=20)).date().isoformat()
+    end = now.date().isoformat()
+    with tenant_app.app_context():
+        admin = User.query.filter_by(email="admin-a@example.test").one()
+        staff_a = User.query.filter_by(email="staff-a@example.test").one()
+        staff_b = User(
+            email="analytics-filter-b@example.test", full_name="Analytics Staff B",
+            role="Staff", account_status="active",
+            organization_id=admin.organization_id, password_hash="unused",
+        )
+        team = Team(name="Analytics Filter Team", organization_id=admin.organization_id)
+        db.session.add_all([staff_b, team])
+        db.session.flush()
+        location_a = Location(name="Analytics Location A", organization_id=admin.organization_id, team_id=team.id)
+        location_b = Location(name="Analytics Location B", organization_id=admin.organization_id, team_id=team.id)
+        db.session.add_all([location_a, location_b])
+        db.session.flush()
+        zone_a = Zone(name="Analytics Zone A", organization_id=admin.organization_id, location_id=location_a.id, team_id=team.id)
+        zone_b = Zone(name="Analytics Zone B", organization_id=admin.organization_id, location_id=location_b.id, team_id=team.id)
+        db.session.add_all([zone_a, zone_b])
+        db.session.flush()
+        rows = [
+            Operation(
+                title="Filtered cleaning operation", organization_id=admin.organization_id,
+                created_by_id=admin.id, assigned_to_id=staff_a.id, team_id=team.id,
+                location_id=location_a.id, zone_id=zone_a.id, task_type="Cleaning",
+                status="Completed", created_at=now - timedelta(days=5),
+                due_at=now - timedelta(days=2), submitted_at=now - timedelta(days=3),
+            ),
+            Operation(
+                title="Excluded maintenance operation", organization_id=admin.organization_id,
+                created_by_id=admin.id, assigned_to_id=staff_b.id, team_id=team.id,
+                location_id=location_b.id, zone_id=zone_b.id, task_type="Maintenance",
+                status="Assigned", created_at=now - timedelta(days=5),
+                due_at=now + timedelta(days=2),
+            ),
+        ]
+        db.session.add_all(rows)
+        db.session.commit()
+        selected = {
+            "team": team.id, "location": location_a.id, "zone": zone_a.id,
+            "employee": staff_a.id,
+        }
+
+    client = tenant_app.test_client()
+    query = (
+        f"?start_date={start}&end_date={end}"
+        f"&team_ids={selected['team']}&location_ids={selected['location']}"
+        f"&zone_ids={selected['zone']}&employee_ids={selected['employee']}"
+        "&task_type=Cleaning"
+    )
+    response = client.get("/api/analytics/workspace" + query, headers=headers)
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload["summary"]["total_tasks"] == 1
+    assert payload["summary"]["completed_tasks"] == 1
+    assert payload["summary"]["open_tasks"] == 0
+    assert sum(row["total_tasks"] for row in payload["breakdowns"]["teams"]) == 1
+    assert sum(row["total_tasks"] for row in payload["breakdowns"]["locations"]) == 1
+    assert sum(row["total_tasks"] for row in payload["breakdowns"]["zones"]) == 1
+    assert sum(row["total_tasks"] for row in payload["breakdowns"]["employees"]) == 1
+    assert [row["name"] for row in payload["breakdowns"]["operation_types"]] == ["Cleaning"]
+
+    export = client.get("/api/analytics/workspace" + query + "&format=csv&view=teams", headers=headers)
+    assert export.status_code == 200
+    assert "text/csv" in export.headers["Content-Type"]
+    exported_rows = list(csv.reader(StringIO(export.get_data(as_text=True).lstrip("\ufeff"))))
+    assert len(exported_rows) == 2
+    assert exported_rows[1][0] == "Analytics Filter Team"
+    assert exported_rows[1][1] == "1"
+
+    # Foreign-tenant IDs cannot cause another tenant's rows to appear in either
+    # the analytics response or a filtered export.
+    foreign = tenant_app.config["TENANT_TEST_IDS"]["team_b"]
+    foreign_response = client.get(
+        f"/api/analytics/workspace?start_date={start}&end_date={end}&team_ids={foreign}",
+        headers=headers,
+    )
+    assert foreign_response.status_code == 200
+    assert foreign_response.get_json()["summary"]["total_tasks"] == 0
+    foreign_export = client.get(
+        f"/api/analytics/workspace?start_date={start}&end_date={end}&team_ids={foreign}&format=csv&view=teams",
+        headers=headers,
+    )
+    assert foreign_export.status_code == 200
+    foreign_rows = list(csv.reader(StringIO(foreign_export.get_data(as_text=True).lstrip("\ufeff"))))
+    assert all("Tenant B" not in str(row) for row in foreign_rows)
+
+
+def test_workload_forecast_accepts_only_supported_horizons(tenant_app, monkeypatch):
+    headers = _prediction_admin_headers(tenant_app, monkeypatch)
+    client = tenant_app.test_client()
+    for horizon, expected_status in ((7, 200), (14, 200), (30, 200), (8, 400), (0, 400)):
+        response = client.get(
+            f"/api/analytics/predictions?horizon={horizon}", headers=headers
+        )
+        assert response.status_code == expected_status, (horizon, response.get_json())
+        if expected_status == 200 and response.get_json()["status"] == "available":
+            assert response.get_json()["forecast_horizon_days"] == horizon
+            assert len(response.get_json()["forecast"]) == horizon
+
