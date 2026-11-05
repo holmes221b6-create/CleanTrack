@@ -1400,6 +1400,9 @@ def analytics_workforce_demand():
             values.add(value)
         selected[key] = values
     task_type_filter = (request.args.get("task_type") or "").strip()
+    forecast_horizon = request.args.get("horizon", 7, type=int)
+    if forecast_horizon not in (7, 14, 30):
+        return jsonify({"error": "horizon must be 7, 14, or 30 days."}), 400
     try:
         zone_name = (request.args.get("time_zone") or "UTC").strip()
         report_timezone = ZoneInfo(zone_name)
@@ -1551,7 +1554,7 @@ def analytics_workforce_demand():
             return ordered[lower_index] * (1 - weight) + ordered[upper_index] * weight
 
         next_seven = []
-        for offset in range(7):
+        for offset in range(forecast_horizon):
             target = today + timedelta(days=offset)
             weekday_history = weekday_values[target.weekday()]
             expected = (sum(weekday_history) / len(weekday_history)) * trend if weekday_history else 0.0
@@ -1577,6 +1580,8 @@ def analytics_workforce_demand():
             "team_name": team.name,
             "historical_operations": team_samples[team.id],
             "forecast_operations_next_7_days": round(forecast_operations, 1),
+            "forecast_operations": round(forecast_operations, 1),
+            "forecast_horizon_days": forecast_horizon,
             "forecast_by_day": next_seven,
             "validation": validation,
             "range_method": "Descriptive 10th–90th percentile of matching weekdays in the 56-day history, adjusted by the capped trend; not a confidence interval.",
@@ -1585,6 +1590,7 @@ def analytics_workforce_demand():
             "expected_operations_per_active_member": round(forecast_operations / staff_count, 1) if staff_count else None,
             "average_recorded_estimate_minutes": round(avg_minutes, 1) if avg_minutes is not None else None,
             "estimated_effort_hours_next_7_days": round(estimated_hours, 1) if estimated_hours is not None else None,
+            "estimated_effort_hours": round(estimated_hours, 1) if estimated_hours is not None else None,
             "effort_estimate_sample_count": len(team_effort[team.id]),
             "staffing_capacity_status": "not_assessed",
         })
@@ -1598,6 +1604,7 @@ def analytics_workforce_demand():
         ),
         "scope": "This organisation only",
         "history_days": 56,
+        "forecast_horizon_days": forecast_horizon,
         "history_start": start_day.isoformat(),
         "history_end": (today - timedelta(days=1)).isoformat(),
         "historical_sample_count": included_total,
@@ -2100,10 +2107,12 @@ def analytics_prediction_history():
     if access_error:
         return access_error
     limit = min(50, max(1, request.args.get("limit", 20, type=int)))
-    rows = AuditLog.query.filter_by(
-        organization_id=admin.organization_id,
-        action="analytics_prediction_snapshot",
-        resource_type="prediction",
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    rows = AuditLog.query.filter(
+        AuditLog.organization_id == admin.organization_id,
+        AuditLog.action == "analytics_prediction_snapshot",
+        AuditLog.resource_type == "prediction",
+        AuditLog.created_at >= cutoff,
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit).all()
     return jsonify({
         "items": [{
