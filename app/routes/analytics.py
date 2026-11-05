@@ -29,15 +29,22 @@ DONE_STATUSES = {"completed", "complete", "approved", "done", "closed"}
 CANCELLED_STATUSES = {"cancelled", "canceled", "archived"}
 
 def _analytics_access_error(admin):
-    """Advanced analytics are available to active Premium subscriptions and trials."""
+    """Core analytics and AI predictions are available to every organisation."""
+    if not admin or not admin.organization_id:
+        return jsonify({"error": "Your account is not linked to an organization."}), 403
+    return None
+
+
+def _prediction_history_access_error(admin):
+    """Prediction history remains a Premium-only feature."""
     if not admin or not admin.organization_id:
         return jsonify({"error": "Your account is not linked to an organization."}), 403
     subscription = OrganizationSubscription.query.filter_by(organization_id=admin.organization_id).first()
     if not subscription_has_premium(subscription):
         return jsonify({
-            "error": "Advanced analytics require CleanTrack Premium. Start an eligible 14-day trial or subscribe to Premium.",
+            "error": "Prediction history requires CleanTrack Premium.",
             "required_plan": "premium",
-            "feature": "advanced_reports",
+            "feature": "prediction_history",
         }), 403
     return None
 
@@ -426,7 +433,7 @@ def analytics_workspace():
     events; they are not inferred from a task's current status.
     """
     admin = get_current_user()
-    access_error = _analytics_access_error(admin)
+    access_error = _prediction_history_access_error(admin)
     if access_error:
         return access_error
     if not admin.organization_id:
@@ -850,7 +857,7 @@ def analytics_workspace():
 @roles_required("Admin")
 def team_analytics():
     admin = get_current_user()
-    access_error = _analytics_access_error(admin)
+    access_error = _prediction_history_access_error(admin)
     if access_error:
         return access_error
     if not admin.organization_id:
