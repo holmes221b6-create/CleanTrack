@@ -372,7 +372,7 @@ def test_overdue_risk_validation_uses_chronological_holdout(tenant_app, monkeypa
 
 
 
-def test_all_prediction_endpoints_enforce_admin_and_premium_access(tenant_app):
+def test_all_standard_prediction_endpoints_are_free_for_admins_and_admin_only(tenant_app):
     client = tenant_app.test_client()
     ids = tenant_app.config["TENANT_TEST_IDS"]
     admin_headers = {"Authorization": "Bearer " + ids["admin_a_token"]}
@@ -385,9 +385,8 @@ def test_all_prediction_endpoints_enforce_admin_and_premium_access(tenant_app):
         "/api/analytics/predictions/anomalies",
     ]
     for endpoint in endpoints:
-        premium_response = client.get(endpoint, headers=admin_headers)
-        assert premium_response.status_code == 403, (endpoint, premium_response.get_json())
-        assert premium_response.get_json()["required_plan"] == "premium"
+        free_response = client.get(endpoint, headers=admin_headers)
+        assert free_response.status_code == 200, (endpoint, free_response.get_json())
         role_response = client.get(endpoint, headers=staff_headers)
         assert role_response.status_code == 403, (endpoint, role_response.get_json())
 
