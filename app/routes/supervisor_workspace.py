@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify
+from sqlalchemy import or_
 
 from app.extensions import db
 from app.models.operation import Operation
@@ -60,7 +61,7 @@ def supervisor_workspace():
     operations = (
         _scoped_operation_query(user)
         .filter(
-            db.or_(
+            or_(
                 Operation.team_id == team_id,
                 Operation.assigned_supervisor_id == user.id,
                 Operation.assigned_to_id == user.id,
