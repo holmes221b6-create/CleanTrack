@@ -455,6 +455,10 @@ def login():
                 403,
             )
 
+        first_login = user.last_login_at is None
+        user.last_login_at = datetime.now(timezone.utc)
+        db.session.commit()
+
         access_token = create_access_token(
             identity=str(user.id),
             additional_claims={"user_id": user.id},
@@ -463,6 +467,7 @@ def login():
 
         response = jsonify({
             "message": "Login successful.",
+            "first_login": first_login,
             "user": user.to_dict(),
             "token": access_token,
             "refresh_token": refresh_token,
