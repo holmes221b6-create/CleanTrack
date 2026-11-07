@@ -58,16 +58,11 @@ def supervisor_workspace():
     staff = [row.user for row in memberships]
     staff_ids = [person.id for person in staff]
 
+    # _scoped_operation_query already applies organization, team, assigned-supervisor,
+    # assigned-staff, location and zone boundaries. Do not narrow it a second time:
+    # legacy operations may be linked to the team through a location or zone.
     operations = (
         _scoped_operation_query(user)
-        .filter(
-            or_(
-                Operation.team_id == team_id,
-                Operation.assigned_supervisor_id == user.id,
-                Operation.assigned_to_id == user.id,
-                Operation.assigned_to_id.in_(staff_ids) if staff_ids else Operation.id == -1,
-            )
-        )
         .order_by(Operation.due_at.asc().nullslast(), Operation.created_at.desc())
         .all()
     )
@@ -152,7 +147,7 @@ def supervisor_workspace():
                 "created_at": log.created_at.isoformat() if log.created_at else None,
             })
 
-    total = len(operations)
+    total = len(operations) - sum(1 for item in operations if str(item.status or "").strip().lower() in {"cancelled", "canceled"})
     finished = status_counts["completed"]
     submitted_for_review = status_counts["submitted"]
     metrics = {
