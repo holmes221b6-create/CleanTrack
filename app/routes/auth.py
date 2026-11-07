@@ -450,10 +450,13 @@ def login():
         return json_error("Login failed due to a server error.", 500)
 
 def _send_password_reset_email(recipient, code):
-    """Send MECHNAR password-reset codes using the configured email provider."""
+    """Send MECHNAR password-reset codes through the configured email provider."""
+    import json
     import os
     import smtplib
     import ssl
+    import urllib.error
+    import urllib.request
     from email.message import EmailMessage
 
     subject = "Your MECHNAR password recovery code"
@@ -471,7 +474,40 @@ def _send_password_reset_email(recipient, code):
         "<p>— MECHNAR</p></div>"
     )
 
-    # HTTPS delivery is available on Render Free when a verified Resend sender is configured.
+    # Google Apps Script sends through the owner's Gmail account over HTTPS.
+    mail_webapp_url = os.getenv("MECHNAR_MAIL_WEBAPP_URL", "").strip()
+    mail_secret = os.getenv("MECHNAR_SECRET", "").strip()
+    if mail_webapp_url or mail_secret:
+        if not mail_webapp_url or not mail_secret:
+            current_app.logger.error("Both MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET must be configured.")
+            return False
+        try:
+            payload = json.dumps({
+                "email": recipient,
+                "code": code,
+                "secret": mail_secret,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                mail_webapp_url,
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=25) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            if result.get("success") is True:
+                current_app.logger.info("MECHNAR password recovery email accepted by Google Apps Script.")
+                return True
+            current_app.logger.error("Google Apps Script rejected a MECHNAR password recovery email request.")
+            return False
+        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
+            current_app.logger.exception("Google Apps Script failed to send a MECHNAR password recovery email.")
+            return False
+        except Exception:
+            current_app.logger.exception("Unexpected Google Apps Script email delivery error.")
+            return False
+
+    # Resend is an optional HTTPS provider if a verified sender is configured.
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
     if api_key and resend_sender:
@@ -491,8 +527,7 @@ def _send_password_reset_email(recipient, code):
             current_app.logger.exception("Resend failed to send a MECHNAR password recovery email.")
             return False
 
-    # Gmail SMTP uses the SMTP_* variables configured for MECHNAR.
-    # Note: Render Free blocks outbound SMTP ports, so SMTP requires a host/plan that permits it.
+    # SMTP fallback; Render Free blocks outbound SMTP ports.
     host = (os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or "smtp.gmail.com").strip()
     try:
         port = int(os.getenv("SMTP_PORT") or os.getenv("MAIL_PORT") or "587")
@@ -506,7 +541,7 @@ def _send_password_reset_email(recipient, code):
     use_tls = os.getenv("SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")).strip().lower() in {"1", "true", "yes", "on"}
 
     if not username or not password:
-        current_app.logger.error("Set SMTP_EMAIL and SMTP_PASSWORD, or configure RESEND_API_KEY and RESEND_FROM_EMAIL.")
+        current_app.logger.error("Configure MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET, or a supported email provider.")
         return False
 
     message = EmailMessage()
