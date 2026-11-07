@@ -1,13 +1,9 @@
 import os, uuid, random, io, base64, json
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 from datetime import datetime, timedelta
 from functools import wraps
 
 import bcrypt
 import qrcode
-import resend
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
 from flask_cors import CORS
@@ -24,12 +20,14 @@ from io import BytesIO
 from reportlab.platypus import SimpleDocTemplate, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 load_dotenv("back.env")
-resend.api_key = os.getenv("RESEND_API_KEY")
 
-GMAIL_SENDER = os.getenv("GMAIL_SENDER")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
+# Transactional email provider configuration (Gmail SMTP for the initial release).
+# SMTP_* is the preferred naming; GMAIL_* aliases keep older Render configs compatible.
+SMTP_EMAIL = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or "").strip()
+SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or "").replace(" ", "").strip()
+SMTP_HOST = (os.getenv("SMTP_HOST") or "smtp.gmail.com").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT") or "587")
+MAIL_DEFAULT_SENDER = (os.getenv("MAIL_DEFAULT_SENDER") or f"MECHNAR <{SMTP_EMAIL}>").strip()
 
 app = Flask(__name__, static_folder="../frontend", static_url_path="")
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET", "dev_secret_change_me")
@@ -57,49 +55,35 @@ CORS(
 jwt = JWTManager(app)
 
 def send_gmail(to_email, subject, body):
+    """Send a transactional email through the configured SMTP provider."""
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        print("Email failed: SMTP_EMAIL or SMTP_PASSWORD is not configured.")
+        return False
+
     try:
-        token_json = os.getenv("GMAIL_TOKEN_JSON")
-
-        if token_json:
-            import json
-            creds = Credentials.from_authorized_user_info(
-                json.loads(token_json),
-                SCOPES
-            )
-        else:
-            creds = Credentials.from_authorized_user_file(
-                "token.json",
-                SCOPES
-            )
-
-        service = build(
-            "gmail",
-            "v1",
-            credentials=creds
-        )
-
         message = EmailMessage()
+        message["From"] = MAIL_DEFAULT_SENDER
         message["To"] = to_email
         message["Subject"] = subject
         message.set_content(body)
 
-        encoded_message = base64.urlsafe_b64encode(
-            message.as_bytes()
-        ).decode()
-
-        service.users().messages().send(
-            userId="me",
-            body={"raw": encoded_message}
-        ).execute()
+        import ssl
+        context = ssl.create_default_context()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.send_message(message)
 
         print(f"Email sent successfully to {to_email}")
         return True
 
     except Exception as e:
-        print(f"Email failed: {e}")
+        # Do not log credentials or message contents.
+        print(f"Email failed ({type(e).__name__}): {e}")
         return False
-    
-    print("SEND EMAIL FUNCTION LOADED")
+
     
 @app.route("/api/send-email", methods=["POST"])
 @jwt_required()
