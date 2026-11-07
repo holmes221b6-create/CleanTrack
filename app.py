@@ -108,6 +108,44 @@ def send_email_route():
     ), 200
     
 
+@app.route("/api/admin/test-email", methods=["POST"])
+@jwt_required()
+def test_admin_email():
+    """Send a configuration test only to the authenticated admin's own account."""
+    claims = get_jwt()
+    if claims.get("role") != "admin":
+        return jsonify(error="Only workspace admins can run the email test."), 403
+
+    uid = get_jwt_identity()
+    conn = get_db()
+    user = row_to_dict(conn.execute(
+        "SELECT name, email, is_active, membership_status FROM users WHERE id=?",
+        (uid,)
+    ).fetchone())
+    conn.close()
+
+    if not user or not user.get("email"):
+        return jsonify(error="A verified account email was not found."), 404
+    if not user.get("is_active", 1) or user.get("membership_status") == "pending":
+        return jsonify(error="Your account does not have active workspace access."), 403
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        return jsonify(error="Email is not configured. Check the SMTP environment variables in Render."), 503
+
+    recipient = user["email"].strip()
+    subject = "MECHNAR email configuration test"
+    body = (
+        f"Hello {user.get('name') or 'Admin'},\\n\\n"
+        "This is a test email from MECHNAR. Your application's SMTP configuration "
+        "successfully sent this message.\\n\\n"
+        "You can now use MECHNAR email notifications.\\n\\n"
+        "— MECHNAR"
+    )
+    if not send_gmail(recipient, subject, body):
+        return jsonify(error="SMTP could not send the test email. Check the Render logs for the SMTP error."), 502
+
+    return jsonify(success=True, message="Test email sent to your account email address.", recipient=recipient), 200
+
+
 @app.route("/api/feedback", methods=["POST"])
 @jwt_required()
 def submit_feedback():
