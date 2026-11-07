@@ -150,7 +150,6 @@ def supervisor_workspace():
 
     total = len(operations) - sum(1 for item in operations if str(item.status or "").strip().lower() in {"cancelled", "canceled"})
     finished = status_counts["completed"]
-    submitted_for_review = status_counts["submitted"]
     metrics = {
         "total_operations": total,
         **status_counts,
