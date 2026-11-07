@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify
-from sqlalchemy import or_
 
 from app.extensions import db
 from app.models.operation import Operation
@@ -56,8 +55,6 @@ def supervisor_workspace():
         .all()
     )
     staff = [row.user for row in memberships]
-    staff_ids = [person.id for person in staff]
-
     # _scoped_operation_query already applies organization, team, assigned-supervisor,
     # assigned-staff, location and zone boundaries. Do not narrow it a second time:
     # legacy operations may be linked to the team through a location or zone.
