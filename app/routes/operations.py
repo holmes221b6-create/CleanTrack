@@ -38,6 +38,7 @@ def _team_ids(user):
         .filter(
             TeamMember.user_id == user.id,
             Team.organization_id == user.organization_id,
+            Team.status == "active",
         ).all()
     }
 
