@@ -558,7 +558,7 @@ def forgot_password():
         if not _send_password_reset_email(user.email, code):
             db.session.delete(record)
             db.session.commit()
-            return json_error("Password recovery email is not configured. Please contact CleanTrack support.", 503)
+            return json_error("Password recovery email is not configured. Please contact MECHNAR support.", 503)
     except Exception:
         db.session.rollback()
         current_app.logger.exception("Could not issue password reset code.")
