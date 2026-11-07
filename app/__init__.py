@@ -71,9 +71,18 @@ def create_app(config_class=Config):
                     "preferences": "JSON",
                     "last_login_at": "TIMESTAMP WITH TIME ZONE",
                 }
+                first_login_tracking_column_missing = "last_login_at" not in user_columns
                 for column, sql_type in termination_columns.items():
                     if column not in user_columns:
                         connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} {sql_type}"))
+                # Existing accounts predate first-login tracking, so seed their
+                # marker from account creation time exactly once. New accounts
+                # created after this migration keep NULL until their first login.
+                if first_login_tracking_column_missing:
+                    connection.execute(text(
+                        "UPDATE users SET last_login_at = created_at "
+                        "WHERE last_login_at IS NULL AND created_at IS NOT NULL"
+                    ))
             if "teams" in tables:
                 team_columns = {item["name"] for item in inspect(connection).get_columns("teams")}
                 if "capacity" not in team_columns:
