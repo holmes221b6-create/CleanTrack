@@ -43,6 +43,8 @@ class User(db.Model):
         nullable=False,
         default=utc_now,
     )
+    last_login_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     updated_at = db.Column(
         db.DateTime(timezone=True),
         nullable=False,
@@ -76,6 +78,7 @@ class User(db.Model):
                 if self.organization is not None
                 else None
             ),
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
             "created_at": (
                 self.created_at.isoformat()
                 if self.created_at
