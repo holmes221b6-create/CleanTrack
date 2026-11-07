@@ -95,6 +95,10 @@ def supervisor_workspace():
             workload[operation.assigned_to_id] += 1
 
         row = operation.to_dict()
+        row["location_name"] = operation.location.name if operation.location else None
+        row["zone_name"] = operation.zone.name if operation.zone else None
+        row["team_name"] = operation.team.name if operation.team else None
+        row["created_by_role"] = operation.creator.role if operation.creator else None
         row["overdue"] = overdue
         row["calendar_at"] = (
             operation.due_at.isoformat() if operation.due_at else
