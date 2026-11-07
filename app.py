@@ -134,10 +134,10 @@ def test_admin_email():
     recipient = user["email"].strip()
     subject = "MECHNAR email configuration test"
     body = (
-        f"Hello {user.get('name') or 'Admin'},\\n\\n"
+        f"Hello {user.get('name') or 'Admin'},\n\n"
         "This is a test email from MECHNAR. Your application's SMTP configuration "
-        "successfully sent this message.\\n\\n"
-        "You can now use MECHNAR email notifications.\\n\\n"
+        "successfully sent this message.\n\n"
+        "You can now use MECHNAR email notifications.\n\n"
         "— MECHNAR"
     )
     if not send_gmail(recipient, subject, body):
@@ -1320,7 +1320,7 @@ def upload_location_floor_plan(location_id):
         return jsonify(error="Choose a non-empty floor plan no larger than 15 MB."), 413
     signatures = [
         (".pdf", b"%PDF-", "application/pdf"),
-        (".png", b"\\x89PNG\\r\\n\\x1a\\n", "image/png"),
+        (".png", b"\\x89PNG\\r\n\\x1a\n", "image/png"),
         (".jpg", b"\\xff\\xd8\\xff", "image/jpeg"),
         (".jpeg", b"\\xff\\xd8\\xff", "image/jpeg"),
     ]
