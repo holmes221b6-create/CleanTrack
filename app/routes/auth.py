@@ -235,6 +235,34 @@ def register():
         db.session.rollback()
         return json_error("Registration could not be completed.", 500)
 
+    # Registration confirmation is sent after the account and membership request
+    # are committed. Email delivery must not undo a successful registration.
+    account_state = "active" if role == "Admin" else "pending Admin approval"
+    registration_subject = "Welcome to MECHNAR — registration successful"
+    registration_text = (
+        f"Hello {user.full_name},\\n\\n"
+        "Your MECHNAR registration was successful.\\n"
+        f"Account role: {role}\\n"
+        f"Organization: {organization.name}\\n"
+        f"Account status: {account_state}.\\n\\n"
+        + ("You can now sign in and set up your organization." if role == "Admin"
+           else "Your membership request has been sent to the organization Admin. You will be able to sign in after approval.")
+        + "\\n\\nIf you did not create this account, contact MECHNAR support.\\n— MECHNAR"
+    )
+    registration_html = (
+        "<div style='font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#172033'>"
+        "<h2>Welcome to MECHNAR</h2>"
+        f"<p>Hello {user.full_name}, your registration was successful.</p>"
+        f"<p><b>Role:</b> {role}<br><b>Organization:</b> {organization.name}<br>"
+        f"<b>Account status:</b> {account_state}</p>"
+        + ("<p>Your account is ready. You can now sign in and set up your organization.</p>"
+           if role == "Admin" else
+           "<p>Your membership request has been sent to the organization Admin. You can sign in after approval.</p>")
+        + "<p>If you did not create this account, contact MECHNAR support.</p><p>— MECHNAR</p></div>"
+    )
+    if not _send_mechnar_email(email, registration_subject, registration_text, registration_html):
+        current_app.logger.warning("Registration succeeded, but confirmation email could not be delivered to %s.", email)
+
     if role == "Admin":
         return jsonify({
             "message": "Admin account created. Email verification has not yet been configured.",
@@ -449,8 +477,8 @@ def login():
         current_app.logger.exception("Login failed unexpectedly.")
         return json_error("Login failed due to a server error.", 500)
 
-def _send_password_reset_email(recipient, code):
-    """Send MECHNAR password-reset codes through the configured email provider."""
+def _send_mechnar_email(recipient, subject, text_body, html_body=None):
+    """Send a MECHNAR transactional email through the configured provider."""
     import json
     import os
     import smtplib
@@ -459,22 +487,6 @@ def _send_password_reset_email(recipient, code):
     import urllib.request
     from email.message import EmailMessage
 
-    subject = "Your MECHNAR password recovery code"
-    text_body = (
-        f"Your MECHNAR password recovery code is: {code}\n\n"
-        "This one-time code expires in 10 minutes. If you did not request this, "
-        "you can ignore this email."
-    )
-    html_body = (
-        "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
-        "<h2>Reset your MECHNAR password</h2>"
-        "<p>Use this one-time code to reset your password:</p>"
-        f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
-        "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
-        "<p>— MECHNAR</p></div>"
-    )
-
-    # Google Apps Script sends through the owner's Gmail account over HTTPS.
     mail_webapp_url = os.getenv("MECHNAR_MAIL_WEBAPP_URL", "").strip()
     mail_secret = os.getenv("MECHNAR_SECRET", "").strip()
     if mail_webapp_url or mail_secret:
@@ -484,30 +496,26 @@ def _send_password_reset_email(recipient, code):
         try:
             payload = json.dumps({
                 "email": recipient,
-                "code": code,
+                "subject": subject,
+                "text": text_body,
+                "html": html_body or "",
                 "secret": mail_secret,
             }).encode("utf-8")
             req = urllib.request.Request(
-                mail_webapp_url,
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+                mail_webapp_url, data=payload,
+                headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=25) as response:
                 result = json.loads(response.read().decode("utf-8"))
             if result.get("success") is True:
-                current_app.logger.info("MECHNAR password recovery email accepted by Google Apps Script.")
+                current_app.logger.info("MECHNAR transactional email accepted by Google Apps Script.")
                 return True
-            current_app.logger.error("Google Apps Script rejected a MECHNAR password recovery email request.")
-            return False
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError):
-            current_app.logger.exception("Google Apps Script failed to send a MECHNAR password recovery email.")
+            current_app.logger.error("Google Apps Script rejected a MECHNAR transactional email.")
             return False
         except Exception:
-            current_app.logger.exception("Unexpected Google Apps Script email delivery error.")
+            current_app.logger.exception("Google Apps Script failed to send a MECHNAR transactional email.")
             return False
 
-    # Resend is an optional HTTPS provider if a verified sender is configured.
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
     if api_key and resend_sender:
@@ -515,41 +523,34 @@ def _send_password_reset_email(recipient, code):
             import resend
             resend.api_key = api_key
             resend.Emails.send({
-                "from": resend_sender,
-                "to": [recipient],
-                "subject": subject,
-                "html": html_body,
-                "text": text_body,
+                "from": resend_sender, "to": [recipient], "subject": subject,
+                "html": html_body or "", "text": text_body,
             })
-            current_app.logger.info("MECHNAR password recovery email accepted by Resend.")
             return True
         except Exception:
-            current_app.logger.exception("Resend failed to send a MECHNAR password recovery email.")
+            current_app.logger.exception("Resend failed to send a MECHNAR transactional email.")
             return False
 
-    # SMTP fallback; Render Free blocks outbound SMTP ports.
     host = (os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or "smtp.gmail.com").strip()
     try:
         port = int(os.getenv("SMTP_PORT") or os.getenv("MAIL_PORT") or "587")
     except (TypeError, ValueError):
-        current_app.logger.error("Password recovery SMTP port must be numeric.")
+        current_app.logger.error("Transactional email SMTP port must be numeric.")
         return False
-
     username = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or os.getenv("MAIL_USERNAME") or "").strip()
     password = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or os.getenv("MAIL_PASSWORD") or "").replace(" ", "").strip()
     sender = (os.getenv("MAIL_DEFAULT_SENDER") or f"MECHNAR <{username}>").strip()
     use_tls = os.getenv("SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")).strip().lower() in {"1", "true", "yes", "on"}
-
     if not username or not password:
         current_app.logger.error("Configure MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET, or a supported email provider.")
         return False
-
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
     message["Subject"] = subject
     message.set_content(text_body)
-    message.add_alternative(html_body, subtype="html")
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
     try:
         with smtplib.SMTP(host, port, timeout=15) as smtp:
             smtp.ehlo()
@@ -558,11 +559,27 @@ def _send_password_reset_email(recipient, code):
                 smtp.ehlo()
             smtp.login(username, password)
             smtp.send_message(message, from_addr=username, to_addrs=[recipient])
-        current_app.logger.info("MECHNAR password recovery email accepted by SMTP.")
         return True
     except Exception:
-        current_app.logger.exception("SMTP failed to send a MECHNAR password recovery email.")
+        current_app.logger.exception("SMTP failed to send a MECHNAR transactional email.")
         return False
+
+
+def _send_password_reset_email(recipient, code):
+    subject = "Your MECHNAR password recovery code"
+    text_body = (
+        f"Your MECHNAR password recovery code is: {code}\\n\\n"
+        "This one-time code expires in 10 minutes. If you did not request this, "
+        "you can ignore this email."
+    )
+    html_body = (
+        "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
+        "<h2>Reset your MECHNAR password</h2><p>Use this one-time code:</p>"
+        f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
+        "<p>This code expires in 10 minutes. If you did not request this, ignore this email.</p>"
+        "<p>— MECHNAR Security</p></div>"
+    )
+    return _send_mechnar_email(recipient, subject, text_body, html_body)
 
 
 @auth_bp.post("/forgot-password")
@@ -639,6 +656,28 @@ def reset_password():
         db.session.rollback()
         current_app.logger.exception("Could not reset password.")
         return json_error("Your password could not be changed. Please try again.", 500)
+
+    # The password change is already committed. A mail delivery issue must not
+    # misreport the successful reset or roll back the credential update.
+    changed_subject = "Your MECHNAR password has been changed"
+    changed_text = (
+        f"Hello {user.full_name},\\n\\n"
+        "Your MECHNAR account password was successfully changed.\\n\\n"
+        "If you made this change, no further action is needed. If you did not "
+        "change your password, contact MECHNAR support immediately and secure "
+        "your email account.\\n\\n— MECHNAR Security"
+    )
+    changed_html = (
+        "<div style='font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#172033'>"
+        "<h2>MECHNAR password changed</h2>"
+        f"<p>Hello {user.full_name},</p>"
+        "<p>Your MECHNAR account password was successfully changed.</p>"
+        "<p>If you made this change, no further action is needed. If you did not, "
+        "contact MECHNAR support immediately and secure your email account.</p>"
+        "<p>— MECHNAR Security</p></div>"
+    )
+    if not _send_mechnar_email(user.email, changed_subject, changed_text, changed_html):
+        current_app.logger.warning("Password reset succeeded, but security notification could not be delivered to %s.", user.email)
 
     response = jsonify({"message": "Password updated. You can now sign in with your new password."})
     response.headers["Cache-Control"] = "no-store"
