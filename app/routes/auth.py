@@ -450,96 +450,83 @@ def login():
         return json_error("Login failed due to a server error.", 500)
 
 def _send_password_reset_email(recipient, code):
-    """Send password-reset codes through Resend's HTTPS API, which works on Render Free."""
+    """Send MECHNAR password-reset codes using the configured email provider."""
     import os
-
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
-
-    # Render Free blocks outbound SMTP ports 25, 465, and 587. Prefer the Resend
-    # HTTPS API whenever configured; keep SMTP only as a fallback for paid hosts.
-    if api_key and sender:
-        try:
-            import resend
-
-            resend.api_key = api_key
-            resend.Emails.send({
-                "from": sender,
-                "to": [recipient],
-                "subject": "Your CleanTrack password reset code",
-                "html": (
-                    "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
-                    "<h2>Reset your CleanTrack password</h2>"
-                    "<p>Use this one-time code to reset your password:</p>"
-                    f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
-                    "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
-                    "</div>"
-                ),
-                "text": (
-                    f"Your CleanTrack password reset code is: {code}\n\n"
-                    "This one-time code expires in 10 minutes. If you did not request this, "
-                    "you can ignore this email."
-                ),
-            })
-            current_app.logger.info("Password reset email accepted by Resend.")
-            return True
-        except Exception:
-            current_app.logger.exception("Resend API failed to send a password reset email.")
-            return False
-
-    # SMTP is supported only where the hosting plan permits outbound SMTP.
     import smtplib
     import ssl
     from email.message import EmailMessage
 
-    host = os.getenv("MAIL_SERVER", "smtp.gmail.com").strip()
-    try:
-        port = int(os.getenv("MAIL_PORT", "587"))
-    except (TypeError, ValueError):
-        current_app.logger.error("Password reset email is not configured: MAIL_PORT must be a number.")
-        return False
-    username = os.getenv("MAIL_USERNAME", "").strip()
-    password = os.getenv("MAIL_PASSWORD", "").strip().replace(" ", "")
-    smtp_sender = os.getenv("MAIL_DEFAULT_SENDER", username).strip()
-    use_tls = os.getenv("MAIL_USE_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
-
-    if not host or not username or not password or not smtp_sender:
-        current_app.logger.error(
-            "Password reset email is not configured: set RESEND_API_KEY and RESEND_FROM_EMAIL "
-            "for Render Free, or configure MAIL_* on a host that permits SMTP."
-        )
-        return False
-
-    message = EmailMessage()
-    message["From"] = smtp_sender
-    message["To"] = recipient
-    message["Subject"] = "Your CleanTrack password reset code"
-    message.set_content(
-        f"Your CleanTrack password reset code is: {code}\n\n"
+    subject = "Your MECHNAR password recovery code"
+    text_body = (
+        f"Your MECHNAR password recovery code is: {code}\n\n"
         "This one-time code expires in 10 minutes. If you did not request this, "
         "you can ignore this email."
     )
-    message.add_alternative(
+    html_body = (
         "<div style='font-family:Arial,sans-serif;max-width:520px;margin:auto;color:#172033'>"
-        "<h2>Reset your CleanTrack password</h2>"
+        "<h2>Reset your MECHNAR password</h2>"
         "<p>Use this one-time code to reset your password:</p>"
         f"<p style='font-size:30px;font-weight:700;letter-spacing:8px'>{code}</p>"
         "<p>This code expires in 10 minutes. If you did not request this, you can ignore this email.</p>"
-        "</div>",
-        subtype="html",
+        "<p>— MECHNAR</p></div>"
     )
+
+    # HTTPS delivery is available on Render Free when a verified Resend sender is configured.
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+    if api_key and resend_sender:
+        try:
+            import resend
+            resend.api_key = api_key
+            resend.Emails.send({
+                "from": resend_sender,
+                "to": [recipient],
+                "subject": subject,
+                "html": html_body,
+                "text": text_body,
+            })
+            current_app.logger.info("MECHNAR password recovery email accepted by Resend.")
+            return True
+        except Exception:
+            current_app.logger.exception("Resend failed to send a MECHNAR password recovery email.")
+            return False
+
+    # Gmail SMTP uses the SMTP_* variables configured for MECHNAR.
+    # Note: Render Free blocks outbound SMTP ports, so SMTP requires a host/plan that permits it.
+    host = (os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or "smtp.gmail.com").strip()
     try:
-        with smtplib.SMTP(host, port, timeout=8) as smtp:
+        port = int(os.getenv("SMTP_PORT") or os.getenv("MAIL_PORT") or "587")
+    except (TypeError, ValueError):
+        current_app.logger.error("Password recovery SMTP port must be numeric.")
+        return False
+
+    username = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or os.getenv("MAIL_USERNAME") or "").strip()
+    password = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or os.getenv("MAIL_PASSWORD") or "").replace(" ", "").strip()
+    sender = (os.getenv("MAIL_DEFAULT_SENDER") or f"MECHNAR <{username}>").strip()
+    use_tls = os.getenv("SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")).strip().lower() in {"1", "true", "yes", "on"}
+
+    if not username or not password:
+        current_app.logger.error("Set SMTP_EMAIL and SMTP_PASSWORD, or configure RESEND_API_KEY and RESEND_FROM_EMAIL.")
+        return False
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = recipient
+    message["Subject"] = subject
+    message.set_content(text_body)
+    message.add_alternative(html_body, subtype="html")
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
             smtp.ehlo()
             if use_tls:
                 smtp.starttls(context=ssl.create_default_context())
                 smtp.ehlo()
             smtp.login(username, password)
-            smtp.send_message(message, from_addr=smtp_sender, to_addrs=[recipient])
-        current_app.logger.info("Password reset email accepted by SMTP server.")
+            smtp.send_message(message, from_addr=username, to_addrs=[recipient])
+        current_app.logger.info("MECHNAR password recovery email accepted by SMTP.")
         return True
     except Exception:
-        current_app.logger.exception("SMTP failed to send a password reset email.")
+        current_app.logger.exception("SMTP failed to send a MECHNAR password recovery email.")
         return False
 
 
