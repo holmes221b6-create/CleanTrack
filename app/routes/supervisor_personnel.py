@@ -511,6 +511,20 @@ def _save_attachment_message(conversation, sender, recipient, upload, caption=""
         return None, "Attachment could not be saved."
     return row, None
 
+@supervisor_personnel_bp.get("/<int:staff_id>/attachments")
+@roles_required("Supervisor")
+def supervisor_shared_attachments(staff_id):
+    user, team_id, error = _scope()
+    if error: return error
+    conversation, staff = _conversation(user, staff_id, team_id)
+    if conversation is None:
+        return jsonify({"error":"Staff member not found in your team."}), 404
+    rows = PersonnelMessage.query.filter(
+        PersonnelMessage.conversation_id == conversation.id,
+        PersonnelMessage.attachment_data.isnot(None)
+    ).order_by(PersonnelMessage.created_at.desc()).all()
+    return jsonify({"attachments":[_message_dict(row, user.id, staff_id=staff.id) for row in rows]}), 200
+
 @supervisor_personnel_bp.post("/<int:staff_id>/attachments")
 @roles_required("Supervisor")
 def supervisor_send_attachment(staff_id):
