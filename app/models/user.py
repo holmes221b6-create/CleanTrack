@@ -19,6 +19,7 @@ class User(db.Model):
     phone = db.Column(db.String(30), nullable=True)
     avatar_url = db.Column(db.String(500), nullable=True)
     preferences = db.Column(db.JSON, nullable=False, default=dict)
+    skills = db.Column(db.JSON, nullable=False, default=list)
 
     password_hash = db.Column(db.String(255), nullable=False)
 
@@ -69,6 +70,7 @@ class User(db.Model):
             "phone": self.phone,
             "avatar_url": self.avatar_url,
             "preferences": self.preferences or {},
+            "skills": self.skills or [],
             "role": self.role,
             "account_status": self.account_status,
             "email_verified": self.email_verified,
