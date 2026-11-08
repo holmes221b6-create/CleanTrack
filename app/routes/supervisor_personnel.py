@@ -83,7 +83,9 @@ def directory():
         c=convs.get(m.id)
         last=None
         if c:
-            last_query=PersonnelMessage.query.filter_by(conversation_id=c.id)\n            if c.supervisor_cleared_at: last_query=last_query.filter(PersonnelMessage.created_at>c.supervisor_cleared_at)\n            last=last_query.order_by(PersonnelMessage.created_at.desc()).first()
+            last_query=PersonnelMessage.query.filter_by(conversation_id=c.id)
+            if c.supervisor_cleared_at: last_query=last_query.filter(PersonnelMessage.created_at>c.supervisor_cleared_at)
+            last=last_query.order_by(PersonnelMessage.created_at.desc()).first()
         members.append({"id":m.id,"name":m.full_name,"email":m.email,"phone":m.phone,
             "avatar_url":m.avatar_url,"role":m.role,"account_status":m.account_status,
             "joined_at":m.created_at.isoformat() if m.created_at else None,
