@@ -57,10 +57,16 @@ class Config:
     RATELIMIT_HEADERS_ENABLED = True
 
     CORS_ORIGINS = [
-        origin.strip()
-        for origin in os.getenv(
-            "CORS_ORIGINS",
-            "http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5500,http://localhost:5500",
-        ).split(",")
-        if origin.strip()
+        # The frontend is deployed separately from the API on Render. Match
+        # Render-hosted frontend subdomains so a frontend rename/redeploy does
+        # not silently break browser sign-in through a stale origin allowlist.
+        r"^https://[a-z0-9-]+\\.onrender\\.com$",
+        *[
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ORIGINS",
+                "http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5500,http://localhost:5500",
+            ).split(",")
+            if origin.strip()
+        ],
     ]
