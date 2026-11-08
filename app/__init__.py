@@ -67,6 +67,7 @@ def create_app(config_class=Config):
             if "users" in tables:
                 user_columns = {item["name"] for item in inspect(connection).get_columns("users")}
                 termination_columns = {
+                    "skills": "JSON",
                     "termination_requested_at": "TIMESTAMP WITH TIME ZONE",
                     "termination_effective_at": "TIMESTAMP WITH TIME ZONE",
                     "avatar_url": "VARCHAR(500)",
