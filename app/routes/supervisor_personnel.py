@@ -373,7 +373,7 @@ _ATTACHMENT_TYPES = {
     "document": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf"},
     "photo": {".jpg", ".jpeg", ".png", ".gif", ".webp"},
     "video": {".mp4", ".mov", ".webm"},
-    "file": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip"}
+    "file": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip", ".7z", ".json", ".xml", ".md", ".log"}
 }
 _ATTACHMENT_MIMES = {
     ".pdf":"application/pdf", ".doc":"application/msword",
@@ -385,7 +385,7 @@ _ATTACHMENT_MIMES = {
     ".txt":"text/plain", ".csv":"text/csv", ".rtf":"application/rtf",
     ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png",
     ".gif":"image/gif", ".webp":"image/webp", ".mp4":"video/mp4",
-    ".mov":"video/quicktime", ".webm":"video/webm", ".zip":"application/zip"
+    ".mov":"video/quicktime", ".webm":"video/webm", ".zip":"application/zip", ".7z":"application/x-7z-compressed", ".json":"application/json", ".xml":"application/xml", ".md":"text/markdown", ".log":"text/plain"
 }
 
 def _message_dict(message, current_user_id, staff_id=None, supervisor_id=None):
@@ -393,8 +393,8 @@ def _message_dict(message, current_user_id, staff_id=None, supervisor_id=None):
     if message.attachment_filename:
         attachment = {"filename":message.attachment_filename, "content_type":message.attachment_content_type,
             "size":message.attachment_size, "kind":message.attachment_kind,
-            "url": (f"/api/supervisor/personnel/{staff_id}/attachments/{message.id}" if staff_id
-                    else f"/api/supervisor/personnel/staff/{supervisor_id}/attachments/{message.id}")}
+            "url": (f"supervisor/personnel/{staff_id}/attachments/{message.id}" if staff_id
+                    else f"supervisor/personnel/staff/{supervisor_id}/attachments/{message.id}")}
     return {"id":message.id, "sender_id":message.sender_id, "recipient_id":message.recipient_id,
         "body":message.body, "created_at":message.created_at.isoformat(), "mine":message.sender_id==current_user_id,
         "attachment":attachment}
