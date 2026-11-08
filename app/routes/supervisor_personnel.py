@@ -296,8 +296,10 @@ def onboarding_directory():
         .filter(TeamMember.team_id == team_id, User.organization_id == user.organization_id,
                 User.role == "Staff", User.account_status == "active")
         .order_by(User.full_name.asc()).all())
-    records = {row.staff_id: row for row in StaffOnboarding.query.filter_by(
-        organization_id=user.organization_id, team_id=team_id).all()}
+    staff_ids = [member.id for member in staff_rows]
+    records = {row.staff_id: row for row in StaffOnboarding.query.filter(
+        StaffOnboarding.organization_id == user.organization_id,
+        StaffOnboarding.staff_id.in_(staff_ids)).all()} if staff_ids else {}
     result = []
     for member in staff_rows:
         record = records.get(member.id)
@@ -342,8 +344,9 @@ def update_staff_onboarding(staff_id):
     staff = _staff_in_team(staff_id, user, team_id)
     if staff is None: return jsonify({"error":"Staff member not found in your team."}), 404
     record = StaffOnboarding.query.filter_by(organization_id=user.organization_id,
-        team_id=team_id, staff_id=staff.id).first()
+        staff_id=staff.id).first()
     if record is None: return jsonify({"error":"Start onboarding before updating its checklist."}), 409
+    record.team_id = team_id
     data = request.get_json(silent=True) or {}
     submitted = data.get("steps")
     if not isinstance(submitted, list) or len(submitted) != len(_ONBOARDING_STEPS):
