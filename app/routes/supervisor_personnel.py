@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import hashlib
+import os
 from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
 from app.extensions import db
@@ -6,6 +8,9 @@ from app.models.personnel_chat import PersonnelConversation, PersonnelMessage
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
+from app.models.invitation import Invitation, generate_invitation_token
+from app.models.organization import Organization
+from app.models.audit_log import AuditLog
 from app.models.operation import Operation
 from app.services.permissions import get_current_user, roles_required
 from app.routes.operations import _team_ids
@@ -153,3 +158,41 @@ def delete_chat(staff_id):
     conv.supervisor_deleted_at=datetime.now(timezone.utc)
     db.session.commit()
     return jsonify({"message":"Chat removed from your list. The other participant's history and retained messages are unchanged."}),200
+
+
+@supervisor_personnel_bp.post("/invites")
+@roles_required("Supervisor")
+def invite_staff():
+    user, team_id, error = _scope()
+    if error: return error
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email") or "").strip().lower()
+    if not email or len(email) > 254 or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return jsonify({"error":"Enter a valid email address."}), 400
+    if User.query.filter(db.func.lower(User.email) == email).first():
+        return jsonify({"error":"This email already has a MECHNAR account. Use the membership workflow instead."}), 409
+    organization = db.session.get(Organization, user.organization_id)
+    if organization is None or organization.status != "active":
+        return jsonify({"error":"Your organization is not accepting invitations."}), 409
+    existing = Invitation.query.filter_by(organization_id=user.organization_id, email=email, role="Staff", status="pending").order_by(Invitation.created_at.desc()).first()
+    if existing:
+        expiry = existing.expires_at
+        if expiry and (expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc):
+            return jsonify({"error":"A pending invitation already exists for this email."}), 409
+    token = generate_invitation_token()
+    invitation = Invitation(organization_id=user.organization_id, invited_by_id=user.id, email=email, role="Staff",
+        token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(), status="pending",
+        expires_at=datetime.now(timezone.utc)+timedelta(days=14))
+    db.session.add(invitation)
+    db.session.flush()
+    db.session.add(AuditLog(actor_id=user.id, organization_id=user.organization_id,
+        action="organization.staff_invitation_created", resource_type="Invitation", resource_id=str(invitation.id),
+        details={"email":email,"role":"Staff","team_id":team_id}))
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error":"Invitation could not be saved."}), 500
+    base=os.getenv("FRONTEND_URL","https://cleantrack-main.onrender.com").strip().rstrip("/")
+    return jsonify({"message":"Staff invitation created. The applicant must register, then wait for Admin approval.",
+        "invite_url":base+"/?invite="+token,"expires_at":invitation.expires_at.isoformat()}),201
