@@ -188,6 +188,20 @@ def create_app(config_class=Config):
                     "CREATE INDEX IF NOT EXISTS ix_task_evidence_execution_id "
                     "ON task_evidence (execution_id)"
                 ))
+            if "personnel_messages" in tables:
+                message_columns = {item["name"] for item in inspect(connection).get_columns("personnel_messages")}
+                additions = {
+                    "attachment_filename": "VARCHAR(255)",
+                    "attachment_content_type": "VARCHAR(120)",
+                    "attachment_size": "INTEGER",
+                    "attachment_kind": "VARCHAR(20)",
+                }
+                for column, sql_type in additions.items():
+                    if column not in message_columns:
+                        connection.execute(text(f"ALTER TABLE personnel_messages ADD COLUMN {column} {sql_type}"))
+                if "attachment_data" not in message_columns:
+                    blob_type = "BYTEA" if connection.dialect.name == "postgresql" else "BLOB"
+                    connection.execute(text(f"ALTER TABLE personnel_messages ADD COLUMN attachment_data {blob_type}"))
             if "announcements" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
                 had_status = "status" in columns
