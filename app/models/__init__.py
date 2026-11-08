@@ -53,3 +53,5 @@ __all__ = [
 ]
 
 from app.models.operational_records import OperationalIncident, ShiftHandover, QualityInspection
+
+from app.models.personnel_chat import PersonnelConversation, PersonnelMessage
