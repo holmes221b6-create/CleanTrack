@@ -99,14 +99,84 @@ def directory():
 @supervisor_personnel_bp.get("/<int:staff_id>/profile")
 @roles_required("Supervisor")
 def profile(staff_id):
-    user, team_id, error=_scope()
-    if error:return error
-    staff=_staff_in_team(staff_id,user,team_id)
-    if staff is None:return jsonify({"error":"Staff member not found in your team."}),404
-    return jsonify({"profile":{"id":staff.id,"name":staff.full_name,"email":staff.email,"phone":staff.phone,
-        "avatar_url":staff.avatar_url,"role":staff.role,"joined_at":staff.created_at.isoformat() if staff.created_at else None,
-        "account_status":staff.account_status,"availability":"not_recorded",
-        "skills":[],"qualifications":[],"certifications":[]}}),200
+    user, team_id, error = _scope()
+    if error:
+        return error
+    staff = _staff_in_team(staff_id, user, team_id)
+    if staff is None:
+        return jsonify({"error": "Staff member not found in your team."}), 404
+
+    # Every metric is derived from this staff member's real operations in the
+    # supervisor's active team and organisation. No stored or manually edited score.
+    now = datetime.now(timezone.utc)
+    operations = Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        Operation.assigned_to_id == staff.id,
+        Operation.team_id == team_id,
+    ).all()
+    active_statuses = {"pending", "in_progress", "in progress", "submitted", "awaiting_verification"}
+    closed_statuses = {"completed", "approved", "verified", "cancelled", "canceled"}
+    active = completed = overdue = on_time = verified = awaiting_verification = 0
+    for operation in operations:
+        status = str(operation.status or "").strip().lower()
+        due = operation.due_at
+        if due and due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        is_closed = status in closed_statuses
+        if not is_closed:
+            active += 1
+            if due and due < now:
+                overdue += 1
+        if status in {"completed", "approved", "verified"}:
+            completed += 1
+            submitted = operation.submitted_at
+            if submitted and submitted.tzinfo is None:
+                submitted = submitted.replace(tzinfo=timezone.utc)
+            if due is None or (submitted is not None and submitted <= due):
+                on_time += 1
+            if status in {"approved", "verified"}:
+                verified += 1
+            elif operation.requires_verification:
+                awaiting_verification += 1
+
+    from app.models.profile_qualification import ProfileQualification
+    qualifications = ProfileQualification.query.filter_by(user_id=staff.id).order_by(
+        ProfileQualification.created_at.desc()
+    ).all()
+    skills = staff.skills if isinstance(staff.skills, list) else []
+    return jsonify({"profile": {
+        "id": staff.id,
+        "name": staff.full_name,
+        "email": staff.email,
+        "phone": staff.phone,
+        "avatar_url": staff.avatar_url,
+        "role": staff.role,
+        "joined_at": staff.created_at.isoformat() if staff.created_at else None,
+        "account_status": staff.account_status,
+        "skills": skills,
+        "qualifications": [{
+            "id": item.id, "title": item.title, "issuer": item.issuer,
+            "issue_date": item.issue_date, "file_name": item.file_name,
+            "mime_type": item.mime_type
+        } for item in qualifications],
+        "certifications": [],
+        "availability": "not_recorded",
+        "availability_note": "No attendance or shift record is currently available for this person.",
+        "workload": {
+            "active_operations": active,
+            "overdue_operations": overdue,
+            "completed_operations": completed,
+            "awaiting_verification": awaiting_verification
+        },
+        "performance": {
+            "completed_operations": completed,
+            "on_time_completions": on_time,
+            "on_time_rate": round((on_time / completed) * 100, 1) if completed else None,
+            "verified_operations": verified,
+            "verification_rate": round((verified / completed) * 100, 1) if completed else None
+        },
+        "data_updated_at": now.isoformat()
+    }}), 200
 
 @supervisor_personnel_bp.get("/<int:staff_id>/messages")
 @roles_required("Supervisor")
