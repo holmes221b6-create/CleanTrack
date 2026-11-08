@@ -311,12 +311,15 @@ def _process_reminders(organization_id, now):
         if operation is None:
             continue
         status = str(operation.status or "").strip().lower()
-        if status in CLOSED or status == "submitted":
-            if operation.overdue:
-                operation.overdue = False
-            continue
         due_at = as_utc(operation.due_at)
         if due_at is None:
+            continue
+        # Keep a late-finish marker for work submitted/completed after its
+        # deadline, but never keep escalating work that has already been
+        # submitted or closed. This matches the API's overdue calculation.
+        if status in CLOSED or status == "submitted":
+            finished_at = as_utc(operation.submitted_at)
+            operation.overdue = bool(finished_at and finished_at > due_at)
             continue
         if due_at <= now:
             operation.overdue = True
