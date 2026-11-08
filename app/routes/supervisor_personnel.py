@@ -375,10 +375,9 @@ def update_staff_onboarding(staff_id):
 # File attachments are stored in the database, not the ephemeral application filesystem.
 _ATTACHMENT_LIMIT = 20 * 1024 * 1024
 _ATTACHMENT_TYPES = {
-    "document": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf"},
-    "photo": {".jpg", ".jpeg", ".png", ".gif", ".webp"},
-    "video": {".mp4", ".mov", ".webm"},
-    "file": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip", ".7z", ".json", ".xml", ".md", ".log"}
+    "file": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip", ".7z", ".json", ".xml", ".md", ".log"},
+    "media": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".webm"},
+    "voice": {".webm", ".ogg", ".mp3", ".m4a", ".wav"}
 }
 _ATTACHMENT_MIMES = {
     ".pdf":"application/pdf", ".doc":"application/msword",
@@ -390,7 +389,7 @@ _ATTACHMENT_MIMES = {
     ".txt":"text/plain", ".csv":"text/csv", ".rtf":"application/rtf",
     ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png",
     ".gif":"image/gif", ".webp":"image/webp", ".mp4":"video/mp4",
-    ".mov":"video/quicktime", ".webm":"video/webm", ".zip":"application/zip", ".7z":"application/x-7z-compressed", ".json":"application/json", ".xml":"application/xml", ".md":"text/markdown", ".log":"text/plain"
+    ".mov":"video/quicktime", ".webm":"video/webm", ".zip":"application/zip", ".7z":"application/x-7z-compressed", ".json":"application/json", ".xml":"application/xml", ".md":"text/markdown", ".log":"text/plain", ".ogg":"audio/ogg", ".mp3":"audio/mpeg", ".m4a":"audio/mp4", ".wav":"audio/wav"
 }
 
 def _message_dict(message, current_user_id, staff_id=None, supervisor_id=None):
@@ -416,12 +415,21 @@ def _save_attachment_message(conversation, sender, recipient, upload, caption=""
     if not data or len(data) > _ATTACHMENT_LIMIT:
         return None, "Attachments must be between 1 byte and 20 MB."
     mime = _ATTACHMENT_MIMES.get(extension, upload.mimetype or "application/octet-stream")
-    if kind == "photo" and not mime.startswith("image/"): return None, "Select a valid image."
-    if kind == "video" and not mime.startswith("video/"): return None, "Select a valid video."
+    stored_kind = kind
+    if kind == "media":
+        if extension in {".jpg", ".jpeg", ".png", ".gif", ".webp"} and mime.startswith("image/"):
+            stored_kind = "photo"
+        elif extension in {".mp4", ".mov", ".webm"} and mime.startswith("video/"):
+            stored_kind = "video"
+        else:
+            return None, "Select a supported photo or video."
+    elif kind == "voice":
+        if not mime.startswith("audio/"): return None, "Select a valid audio recording."
+        stored_kind = "voice"
     row = PersonnelMessage(conversation_id=conversation.id, organization_id=sender.organization_id,
         sender_id=sender.id, recipient_id=recipient.id, body=str(caption or "").strip()[:1000],
         attachment_filename=filename, attachment_content_type=mime, attachment_size=len(data),
-        attachment_kind=kind, attachment_data=data)
+        attachment_kind=stored_kind, attachment_data=data)
     conversation.updated_at = datetime.now(timezone.utc)
     db.session.add(row)
     try: db.session.commit()
