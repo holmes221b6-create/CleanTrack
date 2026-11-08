@@ -82,7 +82,7 @@ def directory():
         c=convs.get(m.id)
         last=None
         if c:
-            last=PersonnelMessage.query.filter_by(conversation_id=c.id).order_by(PersonnelMessage.created_at.desc()).first()
+            last_query=PersonnelMessage.query.filter_by(conversation_id=c.id)\n            if c.supervisor_cleared_at: last_query=last_query.filter(PersonnelMessage.created_at>c.supervisor_cleared_at)\n            last=last_query.order_by(PersonnelMessage.created_at.desc()).first()
         members.append({"id":m.id,"name":m.full_name,"email":m.email,"phone":m.phone,
             "avatar_url":m.avatar_url,"role":m.role,"account_status":m.account_status,
             "joined_at":m.created_at.isoformat() if m.created_at else None,
@@ -270,5 +270,5 @@ def staff_delete_chat(supervisor_id):
     user=get_current_user()
     conv=PersonnelConversation.query.filter_by(organization_id=user.organization_id,supervisor_id=supervisor_id,staff_id=user.id).first()
     if conv is None:return jsonify({"message":"There is no conversation to remove."}),200
-    conv.staff_deleted_at=datetime.now(timezone.utc);db.session.commit()
+    conv.staff_deleted_at=datetime.now(timezone.utc);conv.staff_cleared_at=conv.staff_deleted_at;db.session.commit()
     return jsonify({"message":"Conversation removed from your chat list. The other participant's history is unchanged."}),200
