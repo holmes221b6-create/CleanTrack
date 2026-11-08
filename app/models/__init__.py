@@ -50,8 +50,10 @@ __all__ = [
     "User",
     "Zone",
     "ZoneFloorPlan",
+    "StaffOnboarding",
 ]
 
 from app.models.operational_records import OperationalIncident, ShiftHandover, QualityInspection
 
 from app.models.personnel_chat import PersonnelConversation, PersonnelMessage
+from app.models.staff_onboarding import StaffOnboarding
