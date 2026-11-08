@@ -416,6 +416,9 @@ def _save_attachment_message(conversation, sender, recipient, upload, caption=""
         return None, "Attachments must be between 1 byte and 20 MB."
     mime = _ATTACHMENT_MIMES.get(extension, upload.mimetype or "application/octet-stream")
     stored_kind = kind
+    if kind == "voice" and (upload.mimetype or "").startswith("audio/"):
+        # WebM is also used for video; preserve the recorder's audio MIME type.
+        mime = upload.mimetype
     if kind == "media":
         if extension in {".jpg", ".jpeg", ".png", ".gif", ".webp"} and mime.startswith("image/"):
             stored_kind = "photo"
