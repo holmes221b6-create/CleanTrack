@@ -35,6 +35,9 @@ __all__ = [
     "MembershipRequest",
     "Notification",
     "Operation",
+    "OperationalIncident",
+    "ShiftHandover",
+    "QualityInspection",
     "OperationExecution",
     "OperationLog",
     "PasswordResetCode",
@@ -48,3 +51,5 @@ __all__ = [
     "Zone",
     "ZoneFloorPlan",
 ]
+
+from app.models.operational_records import OperationalIncident, ShiftHandover, QualityInspection
