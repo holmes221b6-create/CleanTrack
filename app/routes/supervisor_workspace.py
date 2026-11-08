@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify
 
@@ -73,6 +73,9 @@ def supervisor_workspace():
         "completed": 0,
         "overdue": 0,
     }
+    due_soon_count = 0
+    closed_statuses = {"completed", "approved", "verified", "cancelled", "canceled"}
+    due_soon_cutoff = now + timedelta(hours=24)
     workload = {person.id: 0 for person in staff}
     for operation in operations:
         status = str(operation.status or "").strip().lower().replace(" ", "_")
@@ -86,8 +89,16 @@ def supervisor_workspace():
             status_counts["completed"] += 1
 
         overdue = _operation_is_overdue(operation, now)
-        if overdue:
+        # Current overdue KPI excludes work already closed; historical lateness
+        # remains available in operation records and reports.
+        if overdue and status not in closed_statuses:
             status_counts["overdue"] += 1
+        due_at = operation.due_at
+        if due_at and status not in closed_statuses:
+            comparable_due = due_at if due_at.tzinfo else due_at.replace(tzinfo=timezone.utc)
+            comparable_now = now if comparable_due.tzinfo else now.replace(tzinfo=None)
+            if comparable_now < comparable_due <= due_soon_cutoff:
+                due_soon_count += 1
 
         if operation.assigned_to_id in workload and status not in {
             "completed", "approved", "verified", "cancelled", "canceled"
@@ -154,6 +165,7 @@ def supervisor_workspace():
         "total_operations": total,
         **status_counts,
         "completion_rate": round((finished / total) * 100, 1) if total else None,
+        "due_soon": due_soon_count,
         "staff_count": len(staff),
         "active_staff_count": len(staff),
         "workload_total": sum(workload.values()),
