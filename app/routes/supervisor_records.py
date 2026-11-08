@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
+from sqlalchemy import or_
 from app.extensions import db
 from app.models.operational_records import OperationalIncident, ShiftHandover, QualityInspection
 from app.models.team import Team
@@ -19,14 +20,22 @@ def _dt(value,field):
  try:d=datetime.fromisoformat(str(value).replace("Z","+00:00"))
  except ValueError:raise ValueError(field+" must be a valid date and time.")
  return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
-def _refs(user,data):
+def _accessible_locations(user,team):
+ zone_location_ids=db.session.query(Zone.location_id).filter(Zone.organization_id==user.organization_id,or_(Zone.team_id==team.id,Zone.supervisor_id==user.id))
+ return Location.query.filter(Location.organization_id==user.organization_id,or_(Location.team_id==team.id,Location.id.in_(zone_location_ids)))
+def _accessible_zones(user,team,location_ids=None):
+ rules=[Zone.team_id==team.id,Zone.supervisor_id==user.id]
+ if location_ids is not None: rules.append(Zone.location_id.in_(location_ids))
+ return Zone.query.filter(Zone.organization_id==user.organization_id,or_(*rules))
+def _refs(user,team,data):
  op_id=data.get("operation_id") or None; loc_id=data.get("location_id") or None; zone_id=data.get("zone_id") or None
  op=_scoped_operation_query(user).filter(Operation.id==op_id).first() if op_id else None
  if op_id and op is None:raise ValueError("The selected operation is outside your team access.")
- loc=Location.query.filter_by(id=loc_id,organization_id=user.organization_id).first() if loc_id else None
- if loc_id and loc is None:raise ValueError("The selected location is unavailable.")
- zone=Zone.query.filter_by(id=zone_id,organization_id=user.organization_id).first() if zone_id else None
- if zone_id and zone is None:raise ValueError("The selected zone is unavailable.")
+ loc=_accessible_locations(user,team).filter(Location.id==loc_id).first() if loc_id else None
+ if loc_id and loc is None:raise ValueError("The selected location is outside your team access.")
+ location_ids=[loc.id] if loc else None
+ zone=_accessible_zones(user,team,location_ids).filter(Zone.id==zone_id).first() if zone_id else None
+ if zone_id and zone is None:raise ValueError("The selected zone is outside your team access.")
  if zone and loc and zone.location_id!=loc.id:raise ValueError("The selected zone does not belong to that location.")
  return op,loc,zone
 @supervisor_records_bp.get("/records/options")
@@ -50,7 +59,7 @@ def incidents():
  if not title or not desc:return jsonify({"error":"A title and description are required."}),400
  severity=str(d.get("severity") or "medium").lower();category=str(d.get("category") or "other").lower()
  if severity not in {"low","medium","high","critical"} or category not in {"equipment","safety","staffing","resource","facility","other"}:return jsonify({"error":"Choose a valid incident category and severity."}),400
- try:op,loc,zone=_refs(u,d)
+ try:op,loc,zone=_refs(u,team,d)
  except ValueError as e:return jsonify({"error":str(e)}),400
  x=OperationalIncident(organization_id=u.organization_id,team_id=team.id,reported_by_id=u.id,operation_id=op.id if op else None,location_id=loc.id if loc else None,zone_id=zone.id if zone else None,title=title[:180],description=desc,category=category,severity=severity)
  db.session.add(x);db.session.commit();return jsonify({"item":x.to_dict()}),201
