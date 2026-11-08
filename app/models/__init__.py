@@ -20,6 +20,7 @@ from app.models.task_evidence import TaskEvidence
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
+from app.models.profile_qualification import ProfileQualification
 from app.models.zone import Zone
 from app.models.zone_floor_plan import ZoneFloorPlan
 
@@ -48,6 +49,7 @@ __all__ = [
     "Team",
     "TeamMember",
     "User",
+    "ProfileQualification",
     "Zone",
     "ZoneFloorPlan",
     "StaffOnboarding",
