@@ -296,6 +296,23 @@ def current_user():
                 if not isinstance(full_name, str) or not 2 <= len(full_name.strip()) <= 120:
                     return json_error("Full name must contain 2 to 120 characters.", 400)
                 user.full_name = full_name.strip()
+            if "skills" in data:
+                skills = data.get("skills")
+                if not isinstance(skills, list) or len(skills) > 40:
+                    return json_error("Add up to 40 skills.", 400)
+                cleaned_skills = []
+                seen_skills = set()
+                for skill in skills:
+                    if not isinstance(skill, str):
+                        return json_error("Each skill must be text.", 400)
+                    label = skill.strip()
+                    if not 1 <= len(label) <= 60:
+                        return json_error("Each skill must contain 1 to 60 characters.", 400)
+                    key = label.casefold()
+                    if key not in seen_skills:
+                        cleaned_skills.append(label)
+                        seen_skills.add(key)
+                user.skills = cleaned_skills
             if "phone" in data:
                 phone = data.get("phone")
                 if phone is not None and not isinstance(phone, str):
@@ -687,3 +704,100 @@ def reset_password():
     response = jsonify({"message": "Password updated. You can now sign in with your new password."})
     response.headers["Cache-Control"] = "no-store"
     return response, 200
+
+
+
+@auth_bp.get("/me/qualifications")
+def list_my_qualifications():
+    try:
+        verify_jwt_in_request()
+        user_id = int(get_jwt_identity())
+        from app.models.profile_qualification import ProfileQualification
+        records = ProfileQualification.query.filter_by(user_id=user_id).order_by(ProfileQualification.created_at.desc()).all()
+        return jsonify({"qualifications": [{
+            "id": item.id, "title": item.title, "issuer": item.issuer,
+            "issue_date": item.issue_date, "file_name": item.file_name,
+            "mime_type": item.mime_type, "created_at": item.created_at.isoformat()
+        } for item in records]}), 200
+    except Exception:
+        return json_error("Authentication required.", 401)
+
+
+@auth_bp.post("/me/qualifications")
+def add_my_qualification():
+    try:
+        verify_jwt_in_request()
+        user_id = int(get_jwt_identity())
+        data = request.get_json(silent=True) or {}
+        title = str(data.get("title") or "").strip()
+        issuer = str(data.get("issuer") or "").strip()
+        issue_date = str(data.get("issue_date") or "").strip()
+        file_name = str(data.get("file_name") or "qualification").strip()
+        mime_type = str(data.get("mime_type") or "").strip().lower()
+        encoded = str(data.get("file_data") or "")
+        if not 2 <= len(title) <= 180:
+            return json_error("Qualification name must contain 2 to 180 characters.", 400)
+        if len(issuer) > 180 or len(issue_date) > 20 or len(file_name) > 255:
+            return json_error("Qualification details are too long.", 400)
+        allowed = {"application/pdf", "image/jpeg", "image/png"}
+        if mime_type not in allowed:
+            return json_error("Upload a PDF, JPG, or PNG document.", 400)
+        import base64
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except Exception:
+            return json_error("The qualification file could not be read.", 400)
+        if not raw or len(raw) > 5 * 1024 * 1024:
+            return json_error("Qualification files must be smaller than 5 MB.", 400)
+        from app.models.profile_qualification import ProfileQualification
+        record = ProfileQualification(
+            user_id=user_id, title=title, issuer=issuer or None,
+            issue_date=issue_date or None, file_name=file_name,
+            mime_type=mime_type, file_data=raw
+        )
+        db.session.add(record)
+        db.session.commit()
+        return jsonify({"qualification": {
+            "id": record.id, "title": record.title, "issuer": record.issuer,
+            "issue_date": record.issue_date, "file_name": record.file_name,
+            "mime_type": record.mime_type
+        }}), 201
+    except Exception:
+        db.session.rollback()
+        return json_error("Unable to save this qualification.", 500)
+
+
+@auth_bp.get("/me/qualifications/<int:qualification_id>/file")
+def download_my_qualification(qualification_id):
+    try:
+        verify_jwt_in_request()
+        user_id = int(get_jwt_identity())
+        from app.models.profile_qualification import ProfileQualification
+        from flask import Response
+        item = ProfileQualification.query.filter_by(id=qualification_id, user_id=user_id).first()
+        if item is None:
+            return json_error("Qualification not found.", 404)
+        response = Response(item.file_data, mimetype=item.mime_type)
+        safe_name = item.file_name.replace('"', "")
+        response.headers["Content-Disposition"] = 'attachment; filename="' + safe_name + '"'
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except Exception:
+        return json_error("Authentication required.", 401)
+
+
+@auth_bp.delete("/me/qualifications/<int:qualification_id>")
+def delete_my_qualification(qualification_id):
+    try:
+        verify_jwt_in_request()
+        user_id = int(get_jwt_identity())
+        from app.models.profile_qualification import ProfileQualification
+        item = ProfileQualification.query.filter_by(id=qualification_id, user_id=user_id).first()
+        if item is None:
+            return json_error("Qualification not found.", 404)
+        db.session.delete(item)
+        db.session.commit()
+        return jsonify({"success": True}), 200
+    except Exception:
+        db.session.rollback()
+        return json_error("Unable to remove this qualification.", 500)
