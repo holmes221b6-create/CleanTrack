@@ -60,7 +60,7 @@ class Config:
         # The frontend is deployed separately from the API on Render. Match
         # Render-hosted frontend subdomains so a frontend rename/redeploy does
         # not silently break browser sign-in through a stale origin allowlist.
-        r"^https://[a-z0-9-]+\\.onrender\\.com$",
+        r"^https://[a-z0-9-]+\.onrender\.com$",
         *[
             origin.strip()
             for origin in os.getenv(
