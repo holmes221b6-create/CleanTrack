@@ -25,6 +25,7 @@ from app.routes.locations import locations_bp
 from app.routes.zones import zones_bp
 from app.routes.operations import operations_bp
 from app.routes.supervisor_workspace import supervisor_workspace_bp
+from app.routes.supervisor_records import supervisor_records_bp
 from app.routes.organization import organization_bp
 from app.routes.audit_trail import audit_trail_bp
 from app.routes.analytics import analytics_bp
@@ -236,6 +237,7 @@ def create_app(config_class=Config):
     app.register_blueprint(zones_bp)
     app.register_blueprint(operations_bp)
     app.register_blueprint(supervisor_workspace_bp)
+    app.register_blueprint(supervisor_records_bp)
     app.register_blueprint(organization_bp)
     app.register_blueprint(audit_trail_bp)
     app.register_blueprint(analytics_bp)
