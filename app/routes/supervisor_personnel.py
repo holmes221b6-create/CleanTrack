@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import or_
 from app.extensions import db
 from app.models.personnel_chat import PersonnelConversation, PersonnelMessage
+from app.models.staff_onboarding import StaffOnboarding
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -116,8 +117,7 @@ def messages(staff_id):
     rows=PersonnelMessage.query.filter_by(conversation_id=conv.id).filter(
         PersonnelMessage.created_at > (conv.supervisor_cleared_at or datetime.min.replace(tzinfo=timezone.utc))
     ).order_by(PersonnelMessage.created_at.asc()).limit(500).all()
-    return jsonify({"conversation_id":conv.id,"messages":[{"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,
-        "body":m.body,"created_at":m.created_at.isoformat(),"mine":m.sender_id==user.id} for m in rows]}),200
+    return jsonify({"conversation_id":conv.id,"messages":[_message_dict(m, user.id, staff_id=staff.id) for m in rows]}),200
 
 @supervisor_personnel_bp.post("/<int:staff_id>/messages")
 @roles_required("Supervisor")
@@ -228,7 +228,7 @@ def staff_messages(supervisor_id):
     db.session.commit()
     cutoff=conv.staff_cleared_at or datetime.min.replace(tzinfo=timezone.utc)
     rows=PersonnelMessage.query.filter_by(conversation_id=conv.id).filter(PersonnelMessage.created_at>cutoff).order_by(PersonnelMessage.created_at.asc()).limit(500).all()
-    return jsonify({"conversation_id":conv.id,"messages":[{"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,"body":m.body,"created_at":m.created_at.isoformat(),"mine":m.sender_id==user.id} for m in rows]}),200
+    return jsonify({"conversation_id":conv.id,"messages":[_message_dict(m, user.id, supervisor_id=supervisor.id) for m in rows]}),200
 
 @supervisor_personnel_bp.post("/staff/<int:supervisor_id>/messages")
 @roles_required("Staff")
@@ -272,3 +272,227 @@ def staff_delete_chat(supervisor_id):
     if conv is None:return jsonify({"message":"There is no conversation to remove."}),200
     conv.staff_deleted_at=datetime.now(timezone.utc);conv.staff_cleared_at=conv.staff_deleted_at;db.session.commit()
     return jsonify({"message":"Conversation removed from your chat list. The other participant's history is unchanged."}),200
+
+
+# Personnel onboarding is scoped to the Supervisor's one active team.
+_ONBOARDING_STEPS = [
+    {"id":"profile","label":"Confirm personal and contact information"},
+    {"id":"documents","label":"Collect and verify required documents"},
+    {"id":"role","label":"Explain role, responsibilities and reporting line"},
+    {"id":"policies","label":"Review organisation policies and safety procedures"},
+    {"id":"training","label":"Complete role-specific orientation and training"},
+    {"id":"access","label":"Confirm required system and site access"},
+    {"id":"acknowledgement","label":"Record staff acknowledgement and questions"},
+]
+
+@supervisor_personnel_bp.get("/onboarding")
+@roles_required("Supervisor")
+def onboarding_directory():
+    user, team_id, error = _scope()
+    if error: return error
+    staff_rows = (User.query.join(TeamMember, TeamMember.user_id == User.id)
+        .filter(TeamMember.team_id == team_id, User.organization_id == user.organization_id,
+                User.role == "Staff", User.account_status == "active")
+        .order_by(User.full_name.asc()).all())
+    records = {row.staff_id: row for row in StaffOnboarding.query.filter_by(
+        organization_id=user.organization_id, team_id=team_id).all()}
+    result = []
+    for member in staff_rows:
+        record = records.get(member.id)
+        steps = record.steps if record else []
+        completed = sum(1 for step in steps if step.get("done"))
+        result.append({
+            "staff_id": member.id, "name": member.full_name, "email": member.email,
+            "avatar_url": member.avatar_url, "status": record.status if record else "not_started",
+            "started_at": record.started_at.isoformat() if record and record.started_at else None,
+            "completed_at": record.completed_at.isoformat() if record and record.completed_at else None,
+            "completed_steps": completed, "total_steps": len(steps) if record else len(_ONBOARDING_STEPS),
+            "progress": round(completed / max(len(steps), 1) * 100) if record else 0,
+            "steps": steps, "notes": record.notes if record else ""
+        })
+    return jsonify({"onboarding": result, "template": _ONBOARDING_STEPS}), 200
+
+@supervisor_personnel_bp.post("/<int:staff_id>/onboarding")
+@roles_required("Supervisor")
+def start_staff_onboarding(staff_id):
+    user, team_id, error = _scope()
+    if error: return error
+    staff = _staff_in_team(staff_id, user, team_id)
+    if staff is None: return jsonify({"error":"Staff member not found in your team."}), 404
+    record = StaffOnboarding.query.filter_by(organization_id=user.organization_id, staff_id=staff.id).first()
+    if record is None:
+        record = StaffOnboarding(organization_id=user.organization_id, team_id=team_id,
+            staff_id=staff.id, started_by_id=user.id,
+            steps=[dict(step, done=False, completed_at=None) for step in _ONBOARDING_STEPS])
+        db.session.add(record)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error":"Onboarding could not be started."}), 500
+    return jsonify({"message":"Onboarding started.", "staff_id":staff.id}), 201
+
+@supervisor_personnel_bp.patch("/<int:staff_id>/onboarding")
+@roles_required("Supervisor")
+def update_staff_onboarding(staff_id):
+    user, team_id, error = _scope()
+    if error: return error
+    staff = _staff_in_team(staff_id, user, team_id)
+    if staff is None: return jsonify({"error":"Staff member not found in your team."}), 404
+    record = StaffOnboarding.query.filter_by(organization_id=user.organization_id,
+        team_id=team_id, staff_id=staff.id).first()
+    if record is None: return jsonify({"error":"Start onboarding before updating its checklist."}), 409
+    data = request.get_json(silent=True) or {}
+    submitted = data.get("steps")
+    if not isinstance(submitted, list) or len(submitted) != len(_ONBOARDING_STEPS):
+        return jsonify({"error":"Submit the complete onboarding checklist."}), 400
+    allowed = {step["id"]: step["label"] for step in _ONBOARDING_STEPS}
+    now = datetime.now(timezone.utc).isoformat()
+    normalized = []
+    for item in submitted:
+        if not isinstance(item, dict) or item.get("id") not in allowed:
+            return jsonify({"error":"Invalid onboarding checklist item."}), 400
+        done = bool(item.get("done"))
+        normalized.append({"id":item["id"], "label":allowed[item["id"]], "done":done,
+            "completed_at": (item.get("completed_at") or now) if done else None})
+    record.steps = normalized
+    record.notes = str(data.get("notes") or "").strip()[:4000]
+    complete = all(item["done"] for item in normalized)
+    record.status = "completed" if complete else "in_progress"
+    record.completed_at = datetime.now(timezone.utc) if complete else None
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error":"Onboarding progress could not be saved."}), 500
+    return jsonify({"message":"Onboarding progress saved.", "status":record.status}), 200
+
+# File attachments are stored in the database, not the ephemeral application filesystem.
+_ATTACHMENT_LIMIT = 20 * 1024 * 1024
+_ATTACHMENT_TYPES = {
+    "document": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf"},
+    "photo": {".jpg", ".jpeg", ".png", ".gif", ".webp"},
+    "video": {".mp4", ".mov", ".webm"},
+    "file": {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".rtf", ".zip"}
+}
+_ATTACHMENT_MIMES = {
+    ".pdf":"application/pdf", ".doc":"application/msword",
+    ".docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls":"application/vnd.ms-excel",
+    ".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt":"application/vnd.ms-powerpoint",
+    ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".txt":"text/plain", ".csv":"text/csv", ".rtf":"application/rtf",
+    ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png",
+    ".gif":"image/gif", ".webp":"image/webp", ".mp4":"video/mp4",
+    ".mov":"video/quicktime", ".webm":"video/webm", ".zip":"application/zip"
+}
+
+def _message_dict(message, current_user_id, staff_id=None, supervisor_id=None):
+    attachment = None
+    if message.attachment_filename:
+        attachment = {"filename":message.attachment_filename, "content_type":message.attachment_content_type,
+            "size":message.attachment_size, "kind":message.attachment_kind,
+            "url": (f"/api/supervisor/personnel/{staff_id}/attachments/{message.id}" if staff_id
+                    else f"/api/supervisor/personnel/staff/{supervisor_id}/attachments/{message.id}")}
+    return {"id":message.id, "sender_id":message.sender_id, "recipient_id":message.recipient_id,
+        "body":message.body, "created_at":message.created_at.isoformat(), "mine":message.sender_id==current_user_id,
+        "attachment":attachment}
+
+def _save_attachment_message(conversation, sender, recipient, upload, caption=""):
+    from werkzeug.utils import secure_filename
+    import os as _os
+    filename = secure_filename(upload.filename or "")[:255]
+    extension = _os.path.splitext(filename.lower())[1]
+    kind = str(request.form.get("kind") or "").lower()
+    if kind not in _ATTACHMENT_TYPES or extension not in _ATTACHMENT_TYPES[kind]:
+        return None, "This file type is not allowed for the selected attachment category."
+    data = upload.stream.read(_ATTACHMENT_LIMIT + 1)
+    if not data or len(data) > _ATTACHMENT_LIMIT:
+        return None, "Attachments must be between 1 byte and 20 MB."
+    mime = _ATTACHMENT_MIMES.get(extension, upload.mimetype or "application/octet-stream")
+    if kind == "photo" and not mime.startswith("image/"): return None, "Select a valid image."
+    if kind == "video" and not mime.startswith("video/"): return None, "Select a valid video."
+    row = PersonnelMessage(conversation_id=conversation.id, organization_id=sender.organization_id,
+        sender_id=sender.id, recipient_id=recipient.id, body=str(caption or "").strip()[:1000],
+        attachment_filename=filename, attachment_content_type=mime, attachment_size=len(data),
+        attachment_kind=kind, attachment_data=data)
+    conversation.updated_at = datetime.now(timezone.utc)
+    db.session.add(row)
+    try: db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return None, "Attachment could not be saved."
+    return row, None
+
+@supervisor_personnel_bp.post("/<int:staff_id>/attachments")
+@roles_required("Supervisor")
+def supervisor_send_attachment(staff_id):
+    user, team_id, error = _scope()
+    if error: return error
+    conversation, staff = _conversation(user, staff_id, team_id)
+    if conversation is None: return jsonify({"error":"Staff member not found in your team."}), 404
+    upload = request.files.get("file")
+    if upload is None: return jsonify({"error":"Choose a file to send."}), 400
+    row, error = _save_attachment_message(conversation, user, staff, upload, request.form.get("caption"))
+    if error: return jsonify({"error":error}), 400
+    return jsonify({"message":_message_dict(row, user.id, staff_id=staff.id)}), 201
+
+@supervisor_personnel_bp.post("/staff/<int:supervisor_id>/attachments")
+@roles_required("Staff")
+def staff_send_attachment(supervisor_id):
+    user = get_current_user()
+    supervisor = User.query.filter_by(id=supervisor_id, organization_id=user.organization_id,
+        role="Supervisor", account_status="active").first()
+    if supervisor is None: return jsonify({"error":"Supervisor not found."}), 404
+    memberships = TeamMember.query.filter_by(user_id=user.id).all()
+    team_ids = {item.team_id for item in memberships}
+    if not team_ids or not TeamMember.query.filter(TeamMember.user_id==supervisor.id,
+            TeamMember.team_id.in_(team_ids)).first():
+        return jsonify({"error":"This Supervisor is not assigned to your team."}), 403
+    conversation = PersonnelConversation.query.filter_by(organization_id=user.organization_id,
+        supervisor_id=supervisor.id, staff_id=user.id).first()
+    if conversation is None:
+        conversation = PersonnelConversation(organization_id=user.organization_id,
+            supervisor_id=supervisor.id, staff_id=user.id)
+        db.session.add(conversation)
+        db.session.flush()
+    conversation.staff_deleted_at = None
+    upload = request.files.get("file")
+    if upload is None: return jsonify({"error":"Choose a file to send."}), 400
+    row, error = _save_attachment_message(conversation, user, supervisor, upload, request.form.get("caption"))
+    if error: return jsonify({"error":error}), 400
+    return jsonify({"message":_message_dict(row, user.id, supervisor_id=supervisor.id)}), 201
+
+@supervisor_personnel_bp.get("/<int:staff_id>/attachments/<int:message_id>")
+@roles_required("Supervisor")
+def supervisor_download_attachment(staff_id, message_id):
+    from io import BytesIO
+    from flask import send_file
+    user, team_id, error = _scope()
+    if error: return error
+    if _staff_in_team(staff_id, user, team_id) is None: return jsonify({"error":"Staff member not found in your team."}), 404
+    message = PersonnelMessage.query.join(PersonnelConversation,
+        PersonnelConversation.id == PersonnelMessage.conversation_id).filter(
+        PersonnelMessage.id == message_id, PersonnelConversation.organization_id == user.organization_id,
+        PersonnelConversation.supervisor_id == user.id, PersonnelConversation.staff_id == staff_id,
+        PersonnelMessage.attachment_data.isnot(None)).first()
+    if message is None: return jsonify({"error":"Attachment not found."}), 404
+    return send_file(BytesIO(message.attachment_data), mimetype=message.attachment_content_type,
+        as_attachment=True, download_name=message.attachment_filename, max_age=0)
+
+@supervisor_personnel_bp.get("/staff/<int:supervisor_id>/attachments/<int:message_id>")
+@roles_required("Staff")
+def staff_download_attachment(supervisor_id, message_id):
+    from io import BytesIO
+    from flask import send_file
+    user = get_current_user()
+    message = PersonnelMessage.query.join(PersonnelConversation,
+        PersonnelConversation.id == PersonnelMessage.conversation_id).filter(
+        PersonnelMessage.id == message_id, PersonnelConversation.organization_id == user.organization_id,
+        PersonnelConversation.supervisor_id == supervisor_id, PersonnelConversation.staff_id == user.id,
+        PersonnelMessage.attachment_data.isnot(None)).first()
+    if message is None: return jsonify({"error":"Attachment not found."}), 404
+    return send_file(BytesIO(message.attachment_data), mimetype=message.attachment_content_type,
+        as_attachment=True, download_name=message.attachment_filename, max_age=0)
+
