@@ -196,3 +196,79 @@ def invite_staff():
     base=os.getenv("FRONTEND_URL","https://cleantrack-main.onrender.com").strip().rstrip("/")
     return jsonify({"message":"Staff invitation created. The applicant must register, then wait for Admin approval.",
         "invite_url":base+"/?invite="+token,"expires_at":invitation.expires_at.isoformat()}),201
+
+
+@supervisor_personnel_bp.get("/staff/conversations")
+@roles_required("Staff")
+def staff_conversations():
+    user = get_current_user()
+    rows = PersonnelConversation.query.filter_by(organization_id=user.organization_id, staff_id=user.id).all()
+    result=[]
+    for conv in rows:
+        if conv.staff_deleted_at is not None:
+            continue
+        supervisor=User.query.filter_by(id=conv.supervisor_id, organization_id=user.organization_id, role="Supervisor").first()
+        if supervisor is None: continue
+        last=PersonnelMessage.query.filter_by(conversation_id=conv.id).order_by(PersonnelMessage.created_at.desc()).first()
+        result.append({"supervisor_id":supervisor.id,"name":supervisor.full_name,"email":supervisor.email,
+            "avatar_url":supervisor.avatar_url,"last_message":last.body if last else None,
+            "last_message_at":last.created_at.isoformat() if last and last.created_at else None})
+    result.sort(key=lambda x:x.get("last_message_at") or "",reverse=True)
+    return jsonify({"conversations":result}),200
+
+@supervisor_personnel_bp.get("/staff/<int:supervisor_id>/messages")
+@roles_required("Staff")
+def staff_messages(supervisor_id):
+    user=get_current_user()
+    supervisor=User.query.filter_by(id=supervisor_id,organization_id=user.organization_id,role="Supervisor",account_status="active").first()
+    if supervisor is None:return jsonify({"error":"Supervisor not found."}),404
+    conv=PersonnelConversation.query.filter_by(organization_id=user.organization_id,supervisor_id=supervisor.id,staff_id=user.id).first()
+    if conv is None:return jsonify({"conversation_id":None,"messages":[]}),200
+    conv.staff_deleted_at=None
+    db.session.commit()
+    cutoff=conv.staff_cleared_at or datetime.min.replace(tzinfo=timezone.utc)
+    rows=PersonnelMessage.query.filter_by(conversation_id=conv.id).filter(PersonnelMessage.created_at>cutoff).order_by(PersonnelMessage.created_at.asc()).limit(500).all()
+    return jsonify({"conversation_id":conv.id,"messages":[{"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,"body":m.body,"created_at":m.created_at.isoformat(),"mine":m.sender_id==user.id} for m in rows]}),200
+
+@supervisor_personnel_bp.post("/staff/<int:supervisor_id>/messages")
+@roles_required("Staff")
+def staff_send_message(supervisor_id):
+    user=get_current_user()
+    supervisor=User.query.filter_by(id=supervisor_id,organization_id=user.organization_id,role="Supervisor",account_status="active").first()
+    if supervisor is None:return jsonify({"error":"Supervisor not found."}),404
+    memberships=TeamMember.query.filter_by(user_id=user.id).all()
+    team_ids={m.team_id for m in memberships}
+    if not team_ids or not TeamMember.query.filter(TeamMember.user_id==supervisor.id,TeamMember.team_id.in_(team_ids)).first():
+        return jsonify({"error":"This Supervisor is not assigned to your team."}),403
+    conv=PersonnelConversation.query.filter_by(organization_id=user.organization_id,supervisor_id=supervisor.id,staff_id=user.id).first()
+    if conv is None:
+        conv=PersonnelConversation(organization_id=user.organization_id,supervisor_id=supervisor.id,staff_id=user.id)
+        db.session.add(conv);db.session.flush()
+    conv.staff_deleted_at=None
+    body=str((request.get_json(silent=True) or {}).get("body") or "").strip()
+    if not body or len(body)>5000:return jsonify({"error":"Message must contain 1–5,000 characters."}),400
+    row=PersonnelMessage(conversation_id=conv.id,organization_id=user.organization_id,sender_id=user.id,recipient_id=supervisor.id,body=body)
+    conv.updated_at=datetime.now(timezone.utc)
+    db.session.add(row)
+    try:db.session.commit()
+    except Exception:
+        db.session.rollback();return jsonify({"error":"Message could not be saved."}),500
+    return jsonify({"message":{"id":row.id,"sender_id":row.sender_id,"recipient_id":row.recipient_id,"body":row.body,"created_at":row.created_at.isoformat(),"mine":True}}),201
+
+@supervisor_personnel_bp.post("/staff/<int:supervisor_id>/clear")
+@roles_required("Staff")
+def staff_clear_chat(supervisor_id):
+    user=get_current_user()
+    conv=PersonnelConversation.query.filter_by(organization_id=user.organization_id,supervisor_id=supervisor_id,staff_id=user.id).first()
+    if conv is None:return jsonify({"message":"There is no conversation to clear."}),200
+    conv.staff_cleared_at=datetime.now(timezone.utc);db.session.commit()
+    return jsonify({"message":"Chat cleared from your view. Messages remain retained in the system record."}),200
+
+@supervisor_personnel_bp.delete("/staff/<int:supervisor_id>/chat")
+@roles_required("Staff")
+def staff_delete_chat(supervisor_id):
+    user=get_current_user()
+    conv=PersonnelConversation.query.filter_by(organization_id=user.organization_id,supervisor_id=supervisor_id,staff_id=user.id).first()
+    if conv is None:return jsonify({"message":"There is no conversation to remove."}),200
+    conv.staff_deleted_at=datetime.now(timezone.utc);db.session.commit()
+    return jsonify({"message":"Conversation removed from your chat list. The other participant's history is unchanged."}),200
