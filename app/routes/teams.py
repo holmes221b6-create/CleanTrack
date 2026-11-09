@@ -678,7 +678,7 @@ def supervisor_own_team():
         "operations": [{
             "id": row["id"], "title": row["title"],
             "description": row["description"], "status": row["status"],
-            "assigned_to_id": row.get("assigned_to_id"), "priority": row.get("priority"), "task_type": row.get("task_type"),
+            "team_id": row.get("team_id"), "assigned_to_id": row.get("assigned_to_id"), "priority": row.get("priority"), "task_type": row.get("task_type"),
             "due_at": row["due_at"], "created_at": row["created_at"],
             "completed": row["completed"], "overdue_calculated": row["overdue_calculated"],
         } for row in data["operations"]],
