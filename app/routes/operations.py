@@ -418,6 +418,10 @@ def operations_collection():
     assigned_to_id, error = _parse_id(data, "assigned_to_id")
     if error:
         return jsonify({"error": error}), 400
+    if user.role in {"Admin", "Supervisor"} and not assigned_to_id:
+        return jsonify({"error": "Select an active staff member or Supervisor before creating an operation. New operations cannot be assigned to the creator or left unassigned."}), 400
+    if user.role in {"Admin", "Supervisor"} and assigned_to_id == user.id:
+        return jsonify({"error": "You cannot assign a new operation to yourself. Select another active person."}), 400
     due_at, error = _parse_datetime(data.get("due_at"), "due_at")
     if error:
         return jsonify({"error": error}), 400
@@ -432,12 +436,19 @@ def operations_collection():
         or assignee.account_status != "active" or assignee.role not in {"Supervisor", "Staff"}
     ):
         return jsonify({"error": "Assignee must be an active Supervisor or Staff in this organization."}), 400
-    if user.role == "Supervisor" and assignee and assignee.role != "Staff" and assignee.id != user.id:
-        return jsonify({"error": "Supervisors can assign work only to themselves or employees in their team."}), 403
-    if assignee and team_id and assignee.id != user.id:
-        membership = TeamMember.query.filter_by(team_id=team_id, user_id=assignee.id).first()
-        if not membership and user.role == "Supervisor":
-            return jsonify({"error": "The assignee must be a member of the selected team."}), 400
+    if user.role == "Supervisor" and assignee and assignee.role != "Staff":
+        return jsonify({"error": "Supervisors can assign new operations only to Staff members in their teams."}), 403
+    if user.role == "Supervisor" and assignee:
+        supervisor_team_ids = _team_ids(user)
+        membership_query = TeamMember.query.filter(TeamMember.user_id == assignee.id)
+        if team_id:
+            membership_query = membership_query.filter(TeamMember.team_id == team_id)
+        else:
+            membership_query = membership_query.filter(TeamMember.team_id.in_(supervisor_team_ids)) if supervisor_team_ids else membership_query.filter(TeamMember.team_id == -1)
+        if membership_query.first() is None:
+            return jsonify({"error": "Select a Staff member who belongs to one of your active teams."}), 400
+    if user.role == "Admin" and assignee and assignee.id == user.id:
+        return jsonify({"error": "Admins cannot assign a new operation to themselves. Select another active person."}), 400
 
     checklist, error = _parse_list(data, "checklist", max_items=40, max_length=500)
     if error:
