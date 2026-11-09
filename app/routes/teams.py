@@ -910,10 +910,9 @@ def supervisor_team_performance():
             member_ops = [op for op in member_ops if (op.task_type or "").lower() == operation_type.lower()]
         if priority:
             member_ops = [op for op in member_ops if (op.priority or "").lower() == priority]
-        if location_filter:
-            member_ops = [op for op in member_ops if str(op.location_id) == location_filter]
-        if zone_filter:
-            member_ops = [op for op in member_ops if str(op.zone_id) == zone_filter]
+        # Location and zone IDs are team-scoped, so they are intentionally
+        # excluded from cross-team organisation placement. Date, operation type,
+        # and priority remain consistent across every team's comparison cohort.
         stats = stats_for(member.id, member_ops)
         if stats["score"] is not None:
             org_scores.append((member.id, stats["score"]))
