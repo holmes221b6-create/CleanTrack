@@ -20,6 +20,7 @@ from app.models.location import Location
 from app.models.zone import Zone
 from app.models.task_evidence import TaskEvidence
 from app.models.notification import Notification
+from app.models.operational_records import OperationalIncident
 from app.services.operation_scheduler import next_occurrence
 from werkzeug.utils import secure_filename
 from app.services.permissions import get_current_user, roles_required
@@ -1262,3 +1263,157 @@ def organization_audit_history():
         AuditLog.created_at >= audit_cutoff(),
     ).order_by(AuditLog.created_at.desc()).limit(100).all()
     return jsonify({"audit_logs": [log.to_dict() for log in logs], "count": len(logs)}), 200
+
+
+# Supervisor-only blocker handling is exposed through Operations so managers can
+# resolve operational issues without mixing them into the Admin/Supervisor work queue.
+@operations_bp.route("/blockers", methods=["GET", "POST"])
+@roles_required("Supervisor")
+def supervisor_operation_blockers():
+    user = get_current_user()
+    team_ids = _team_ids(user)
+    if not team_ids:
+        return jsonify({"error": "No active team is assigned to this Supervisor."}), 409
+
+    if request.method == "GET":
+        items = OperationalIncident.query.filter(
+            OperationalIncident.organization_id == user.organization_id,
+            OperationalIncident.team_id.in_(team_ids),
+        ).order_by(OperationalIncident.created_at.desc()).limit(300).all()
+        return jsonify({"items": [item.to_dict() for item in items], "count": len(items)}), 200
+
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title") or "").strip()
+    description = str(data.get("description") or "").strip()
+    if not title or len(title) > 180 or not description or len(description) > 10000:
+        return jsonify({"error": "A title (up to 180 characters) and description (up to 10,000 characters) are required."}), 400
+    category = str(data.get("category") or "other").strip().lower()
+    severity = str(data.get("severity") or "medium").strip().lower()
+    if category not in {"equipment", "safety", "staffing", "resource", "facility", "other"}:
+        return jsonify({"error": "Choose a valid blocker category."}), 400
+    if severity not in {"low", "medium", "high", "critical"}:
+        return jsonify({"error": "Choose a valid severity."}), 400
+
+    team_id, error = _parse_id(data, "team_id")
+    if error:
+        return jsonify({"error": error}), 400
+    if team_id is None or team_id not in team_ids:
+        return jsonify({"error": "Choose one of your assigned teams."}), 403
+    operation_id, error = _parse_id(data, "operation_id")
+    if error:
+        return jsonify({"error": error}), 400
+    operation = db.session.get(Operation, operation_id) if operation_id else None
+    if operation_id and (not _visible(operation, user) or not _can_manage(operation, user)):
+        return jsonify({"error": "The selected operation is outside your authorized scope."}), 404
+    if operation and operation.team_id not in (None, team_id):
+        return jsonify({"error": "The selected operation does not belong to this team."}), 400
+
+    location_id, error = _parse_id(data, "location_id")
+    if error:
+        return jsonify({"error": error}), 400
+    zone_id, error = _parse_id(data, "zone_id")
+    if error:
+        return jsonify({"error": error}), 400
+    scope_error = _team_context(team_id, location_id, zone_id, user, allow_area_only=True)
+    if scope_error:
+        return jsonify({"error": scope_error}), 400
+    if operation:
+        location_id = location_id or operation.location_id
+        zone_id = zone_id or operation.zone_id
+
+    item = OperationalIncident(
+        organization_id=user.organization_id,
+        team_id=team_id,
+        reported_by_id=user.id,
+        operation_id=operation.id if operation else None,
+        location_id=location_id,
+        zone_id=zone_id,
+        title=title,
+        description=description,
+        category=category,
+        severity=severity,
+        status="open",
+    )
+    db.session.add(item)
+    try:
+        db.session.flush()
+        if operation:
+            _log(operation, user, "blocker_reported", operation.status,
+                 "A blocker was recorded: " + title,
+                 {"blocker_id": item.id, "severity": severity, "category": category})
+        db.session.add(AuditLog(
+            actor_id=user.id,
+            organization_id=user.organization_id,
+            action="operation.blocker_reported",
+            resource_type="OperationalIncident",
+            resource_id=str(item.id),
+            details={"title": title, "severity": severity, "category": category,
+                     "team_id": team_id, "operation_id": operation.id if operation else None},
+            ip_address=request.remote_addr,
+            user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+        ))
+        if severity in {"high", "critical"}:
+            admins = User.query.filter_by(
+                organization_id=user.organization_id, role="Admin", account_status="active"
+            ).all()
+            for admin in admins:
+                db.session.add(Notification(
+                    recipient_id=admin.id, organization_id=user.organization_id,
+                    title="High-priority operational blocker",
+                    message=title[:1000] + " — " + severity.upper() + " severity. Review the affected team and operation.",
+                    notification_type="operation_blocker",
+                    resource_type="OperationalIncident", resource_id=str(item.id),
+                ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not save a Supervisor operational blocker.")
+        return jsonify({"error": "The blocker could not be saved. Please retry."}), 500
+    return jsonify({"message": "Blocker recorded.", "item": item.to_dict()}), 201
+
+
+@operations_bp.patch("/blockers/<int:blocker_id>")
+@roles_required("Supervisor")
+def update_supervisor_operation_blocker(blocker_id):
+    user = get_current_user()
+    team_ids = _team_ids(user)
+    item = OperationalIncident.query.filter(
+        OperationalIncident.id == blocker_id,
+        OperationalIncident.organization_id == user.organization_id,
+        OperationalIncident.team_id.in_(team_ids or {-1}),
+    ).first()
+    if item is None:
+        return jsonify({"error": "Blocker not found in your authorized teams."}), 404
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status") or item.status).strip().lower()
+    if status not in {"open", "in_progress", "resolved", "closed"}:
+        return jsonify({"error": "Choose a valid blocker status."}), 400
+    resolution = str(data.get("resolution") or "").strip()
+    if status in {"resolved", "closed"} and not resolution and not item.resolution:
+        return jsonify({"error": "Add a resolution note before closing this blocker."}), 400
+    previous_status = item.status
+    item.status = status
+    item.resolution = resolution[:4000] or item.resolution
+    item.resolved_at = datetime.now(timezone.utc) if status in {"resolved", "closed"} else None
+    try:
+        db.session.add(AuditLog(
+            actor_id=user.id,
+            organization_id=user.organization_id,
+            action="operation.blocker_" + status,
+            resource_type="OperationalIncident",
+            resource_id=str(item.id),
+            details={"title": item.title, "previous_status": previous_status,
+                     "new_status": status, "resolution": item.resolution},
+            ip_address=request.remote_addr,
+            user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+        ))
+        if item.operation:
+            _log(item.operation, user, "blocker_" + status, item.operation.status,
+                 "Blocker '" + item.title + "' marked " + status + ".",
+                 {"blocker_id": item.id, "resolution": item.resolution})
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Could not update a Supervisor operational blocker.")
+        return jsonify({"error": "The blocker update could not be saved. Please retry."}), 500
+    return jsonify({"message": "Blocker updated.", "item": item.to_dict()}), 200
