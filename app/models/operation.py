@@ -88,6 +88,7 @@ class Operation(db.Model):
             "zone_id": self.zone_id,
             "created_by_id": self.created_by_id,
             "created_by_name": self.creator.full_name if self.creator else None,
+            "created_by_role": self.creator.role if self.creator else None,
             "assigned_to_id": self.assigned_to_id,
             "assigned_to_name": self.assignee.full_name if self.assignee else None,
             "assigned_to_role": self.assignee.role if self.assignee else None,
