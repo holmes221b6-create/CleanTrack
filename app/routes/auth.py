@@ -614,8 +614,11 @@ def forgot_password():
 
     # Return the same response whether or not the address exists to prevent account discovery.
     generic = {"message": "If an account exists for that email, a reset code will be sent shortly."}
+    # Password recovery is independent of application role and membership state.
+    # Pending Staff/Supervisor accounts must be able to recover credentials before
+    # approval; terminated accounts remain non-loginable even after a reset.
     user = User.query.filter(func.lower(User.email) == email).first()
-    if user is None or user.account_status not in {"active", "termination_pending"}:
+    if user is None or user.account_status == "terminated":
         return jsonify(generic), 200
 
     now = datetime.now(timezone.utc)
