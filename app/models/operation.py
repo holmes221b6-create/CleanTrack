@@ -18,6 +18,7 @@ class Operation(db.Model):
     instructions = db.Column(db.Text, nullable=True)
     checklist = db.Column(db.JSON, nullable=True)
     required_evidence = db.Column(db.JSON, nullable=True)
+    required_qualifications = db.Column(db.JSON, nullable=True)
     estimated_minutes = db.Column(db.Integer, nullable=True)
     requires_verification = db.Column(db.Boolean, nullable=False, default=True)
 
@@ -77,6 +78,7 @@ class Operation(db.Model):
             "instructions": self.instructions,
             "checklist": self.checklist if isinstance(self.checklist, list) else [],
             "required_evidence": self.required_evidence if isinstance(self.required_evidence, list) else [],
+            "required_qualifications": self.required_qualifications if isinstance(self.required_qualifications, list) else [],
             "estimated_minutes": self.estimated_minutes,
             "requires_verification": bool(self.requires_verification),
             "status": self.status,
