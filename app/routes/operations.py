@@ -21,6 +21,7 @@ from app.models.zone import Zone
 from app.models.task_evidence import TaskEvidence
 from app.models.notification import Notification
 from app.models.operational_records import OperationalIncident
+from app.models.profile_qualification import ProfileQualification
 from app.services.operation_scheduler import next_occurrence
 from werkzeug.utils import secure_filename
 from app.services.permissions import get_current_user, roles_required
@@ -425,6 +426,9 @@ def operations_collection():
     required_evidence, error = _parse_list(data, "required_evidence", max_items=10, max_length=80)
     if error:
         return jsonify({"error": error}), 400
+    required_qualifications, error = _parse_list(data, "required_qualifications", max_items=20, max_length=180)
+    if error:
+        return jsonify({"error": error}), 400
     estimated = data.get("estimated_minutes")
     if estimated in ("", None):
         estimated = None
@@ -523,6 +527,7 @@ def operations_collection():
         instructions=instructions.strip() or None,
         checklist=checklist or [],
         required_evidence=required_evidence or [],
+        required_qualifications=required_qualifications or [],
         estimated_minutes=estimated,
         requires_verification=requires_verification,
         status="Assigned" if assigned_to_id else "Pending",
@@ -790,9 +795,9 @@ def update_operation(operation_id):
             operation.escalated_at = None
             operation.overdue = False
             changes["deadline"] = {"before": before, "after": due_at.isoformat() if due_at else None}
-    for field in ("checklist", "required_evidence"):
+    for field in ("checklist", "required_evidence", "required_qualifications"):
         if field in data:
-            parsed, error = _parse_list(data, field, max_items=40 if field == "checklist" else 10, max_length=500 if field == "checklist" else 80)
+            parsed, error = _parse_list(data, field, max_items=40 if field == "checklist" else (20 if field == "required_qualifications" else 10), max_length=500 if field == "checklist" else (180 if field == "required_qualifications" else 80))
             if error:
                 return jsonify({"error": error}), 400
             old = getattr(operation, field) or []
@@ -1089,6 +1094,12 @@ def submit_operation(operation_id):
     photo_stages = {row.stage for row in evidence_rows if row.evidence_type == "photo"}
     required = operation.required_evidence if isinstance(operation.required_evidence, list) else []
     missing_evidence = []
+    required_qualifications = operation.required_qualifications if isinstance(operation.required_qualifications, list) else []
+    if required_qualifications:
+        held = {str(item.title or "").strip().casefold() for item in ProfileQualification.query.filter_by(user_id=user.id).all()}
+        missing_qualifications = [name for name in required_qualifications if str(name).strip().casefold() not in held]
+        if missing_qualifications:
+            return jsonify({"error": "Required qualifications are not recorded on your profile: " + ", ".join(missing_qualifications[:8]) + ". Contact your Supervisor."}), 400
     if "photo" in required and "photo" not in evidence_types:
         missing_evidence.append("at least one photo")
     if "before_photo" in required and "before" not in photo_stages:
