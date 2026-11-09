@@ -637,6 +637,12 @@ def assign_zones(team_id):
 @teams_bp.get("/supervisor/mine")
 @roles_required("Supervisor")
 def supervisor_own_team():
+    """Return only the signed-in supervisor's own team workspace data.
+
+    Keep this endpoint independent from the larger admin team serializer:
+    the supervisor workspace should not fail because an unrelated admin
+    directory, audit-retention, or optional relationship serializer fails.
+    """
     user = get_current_user()
     memberships = (
         TeamMember.query.join(Team, TeamMember.team_id == Team.id)
@@ -650,58 +656,177 @@ def supervisor_own_team():
     team_ids = {row.team_id for row in memberships}
     if len(team_ids) != 1:
         return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+
     team = Team.query.filter_by(
         id=next(iter(team_ids)), organization_id=user.organization_id, status="active"
     ).first()
     if team is None:
         return jsonify({"error": "Your assigned team is unavailable."}), 404
-    data = _team_data(team, user)
-    summary = data["team"]
+
+    locations = Location.query.filter_by(
+        organization_id=user.organization_id, team_id=team.id
+    ).order_by(Location.name.asc()).all()
+    location_ids = [row.id for row in locations]
+
+    zone_rules = [Zone.team_id == team.id]
+    if location_ids:
+        zone_rules.append(Zone.location_id.in_(location_ids))
+    zones = Zone.query.filter(
+        Zone.organization_id == user.organization_id, or_(*zone_rules)
+    ).order_by(Zone.name.asc()).all()
+    zone_ids = [row.id for row in zones]
+
+    operation_rules = [Operation.team_id == team.id]
+    if location_ids:
+        operation_rules.append(Operation.location_id.in_(location_ids))
+    if zone_ids:
+        operation_rules.append(Operation.zone_id.in_(zone_ids))
+    operations = Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        or_(*operation_rules),
+    ).order_by(Operation.created_at.desc(), Operation.id.desc()).all()
+
+    member_rows = (
+        db.session.query(TeamMember, User)
+        .join(User, TeamMember.user_id == User.id)
+        .filter(
+            TeamMember.team_id == team.id,
+            User.organization_id == user.organization_id,
+        )
+        .order_by(func.lower(User.full_name))
+        .all()
+    )
+    members = [{
+        "id": member.id,
+        "name": member.full_name,
+        "role": member.role,
+        "account_status": member.account_status,
+        "assigned_at": membership.assigned_at.isoformat() if membership.assigned_at else None,
+    } for membership, member in member_rows]
+
+    now = datetime.now(timezone.utc)
+    normalized = []
+    for op in operations:
+        status = str(op.status or "").strip().lower()
+        completed = status in DONE_STATUSES
+        due = _dt_utc(op.due_at)
+        overdue = bool(op.overdue) or (
+            due is not None and due < now and not completed and status not in CANCELLED_STATUSES
+        )
+        normalized.append((op, status, completed, overdue))
+
+    total = len(normalized)
+    completed_count = sum(1 for _, _, done, _ in normalized if done)
+    active_count = sum(1 for _, status, done, _ in normalized if not done and status in ACTIVE_STATUSES)
+    pending_count = sum(1 for _, status, done, _ in normalized if not done and status in PENDING_STATUSES)
+    overdue_count = sum(1 for _, _, done, overdue in normalized if not done and overdue)
+    supervisor_count = sum(1 for row in members if str(row["role"]).lower() == "supervisor")
+    staff_count = sum(1 for row in members if str(row["role"]).lower() == "staff")
+
+    serialized_operations = [{
+        "id": op.id, "title": op.title, "description": op.description,
+        "status": op.status, "team_id": op.team_id,
+        "location_id": op.location_id, "zone_id": op.zone_id,
+        "assigned_to_id": op.assigned_to_id, "priority": op.priority,
+        "task_type": op.task_type,
+        "due_at": op.due_at.isoformat() if op.due_at else None,
+        "created_at": op.created_at.isoformat() if op.created_at else None,
+        "completed": done, "overdue_calculated": overdue,
+    } for op, _status, done, overdue in normalized]
+
+    # A missing/expired audit table must not take down the team overview.
+    activity = []
+    try:
+        audit_rows = AuditLog.query.filter(
+            AuditLog.organization_id == user.organization_id,
+            AuditLog.resource_type == "Team",
+            AuditLog.resource_id == str(team.id),
+            AuditLog.created_at >= audit_cutoff(),
+        ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(100).all()
+        activity.extend({
+            "id": row.id,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "actor_name": row.actor.full_name if row.actor else "System",
+            "action": row.action or "Team activity",
+            "resource_type": row.resource_type,
+            "resource_id": row.resource_id,
+            "event_source": "team",
+            "details": row.details or {},
+        } for row in audit_rows)
+
+        operation_ids = [op.id for op in operations]
+        if operation_ids:
+            history = OperationLog.query.filter(
+                OperationLog.operation_id.in_(operation_ids)
+            ).order_by(OperationLog.created_at.desc(), OperationLog.id.desc()).limit(200).all()
+            activity.extend({
+                "id": row.id,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "actor_name": row.actor.full_name if row.actor else "System",
+                "action": "operation." + str(row.action),
+                "resource_type": "Operation",
+                "resource_id": str(row.operation_id),
+                "event_source": "operation",
+                "details": {
+                    "task_title": row.operation.title if row.operation else "Operation",
+                    "operation_id": row.operation_id,
+                    "previous_status": row.previous_status,
+                    "new_status": row.new_status,
+                    "message": row.message,
+                },
+            } for row in history)
+        activity.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    except Exception:
+        db.session.rollback()
+        activity = []
+
+    # Build the eight-week overview trend from this team's own operations.
+    week_start = (now - timedelta(weeks=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start -= timedelta(days=week_start.weekday())
+    trend = []
+    for index in range(8):
+        start_at = week_start + timedelta(weeks=index)
+        end_at = start_at + timedelta(weeks=1)
+        created = [op for op in operations if op.created_at and start_at <= _dt_utc(op.created_at) < end_at]
+        completed_rows = [
+            op for op, _status, done, _overdue in normalized
+            if done and _dt_utc(op.reviewed_at or op.updated_at or op.created_at)
+            and start_at <= _dt_utc(op.reviewed_at or op.updated_at or op.created_at) < end_at
+        ]
+        due_rows = [op for op in completed_rows if op.due_at]
+        on_time = sum(
+            1 for op in due_rows
+            if _dt_utc(op.reviewed_at or op.updated_at or op.created_at) <= _dt_utc(op.due_at)
+        )
+        trend.append({
+            "week_start": start_at.date().isoformat(),
+            "tasks_created": len(created),
+            "tasks_completed": len(completed_rows),
+            "compliance_rate": round(on_time / len(due_rows) * 100, 1) if due_rows else None,
+            "due_dated_completions": len(due_rows),
+        })
+
     return jsonify({
         "team": {
-            "id": summary["id"], "name": summary["name"],
-            "description": summary.get("description"), "status": summary.get("status"),
-            "member_count": summary.get("member_count", 0),
-            "supervisor_count": summary.get("supervisor_count", 0),
-            "staff_count": summary.get("employee_count", 0),
-            "location_count": summary.get("location_count", 0),
-            "zone_count": summary.get("zone_count", 0),
-            "capacity": summary.get("capacity"),
-            "capacity_status": summary.get("capacity_status"),
-            "total_operation_count": summary.get("task_count", 0),
-            "completed_operation_count": summary.get("completed_task_count", 0),
-            "active_operation_count": summary.get("active_task_count", 0),
-            "pending_operation_count": summary.get("pending_task_count", 0),
-            "overdue_operation_count": summary.get("overdue_task_count", 0),
-            "completion_rate": summary.get("completion_rate"),
+            "id": team.id, "name": team.name, "description": team.description,
+            "status": team.status, "capacity": team.capacity,
+            "capacity_status": "over_capacity" if team.capacity is not None and len(members) > team.capacity
+                else "within_capacity" if team.capacity is not None else None,
+            "member_count": len(members), "supervisor_count": supervisor_count,
+            "staff_count": staff_count, "location_count": len(locations),
+            "zone_count": len(zones), "total_operation_count": total,
+            "completed_operation_count": completed_count,
+            "active_operation_count": active_count,
+            "pending_operation_count": pending_count,
+            "overdue_operation_count": overdue_count,
+            "completion_rate": round(completed_count / total * 100, 1) if total else None,
         },
-        "operations": [{
-            "id": row["id"], "title": row["title"],
-            "description": row["description"], "status": row["status"],
-            "team_id": row.get("team_id"), "assigned_to_id": row.get("assigned_to_id"), "priority": row.get("priority"), "task_type": row.get("task_type"),
-            "due_at": row["due_at"], "created_at": row["created_at"],
-            "completed": row["completed"], "overdue_calculated": row["overdue_calculated"],
-        } for row in data["operations"]],
-        "members": [{
-            "id": row["id"], "name": row["name"], "role": row["role"],
-            "account_status": row["account_status"], "assigned_at": row["assigned_at"],
-        } for row in data["members"]],
-        "locations": [{"id": x["id"], "name": x["name"], "status": x.get("status")} for x in data["locations"]],
-        "zones": [{"id": x["id"], "name": x["name"], "location_id": x.get("location_id"), "status": x.get("status")} for x in data["zones"]],
-        "performance": data["performance"],
-        "activity": [{
-            "id": row.get("id"),
-            "created_at": row.get("created_at"),
-            "actor_name": row.get("actor_name") or "System",
-            "action": row.get("action") or "Team activity",
-            "resource_type": row.get("resource_type"),
-            "resource_id": row.get("resource_id"),
-            "event_source": row.get("event_source"),
-            "details": row.get("details") or {},
-            "message": (row.get("details") or {}).get("message")
-                or (row.get("details") or {}).get("task_title")
-                or (row.get("details") or {}).get("name"),
-        } for row in data["activity"]],
+        "operations": serialized_operations,
+        "members": members,
+        "locations": [{"id": row.id, "name": row.name, "status": row.status} for row in locations],
+        "zones": [{"id": row.id, "name": row.name, "location_id": row.location_id, "status": row.status} for row in zones],
+        "performance": trend,
+        "activity": activity,
     }), 200
 
 
