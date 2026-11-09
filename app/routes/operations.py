@@ -364,6 +364,13 @@ def operations_collection():
         for item in items:
             item.overdue = _operation_is_overdue(item, now)
             row = item.to_dict()
+            # Explicit ownership flags prevent the Supervisor UI from
+            # confusing "created/assigned by me" with "assigned to me".
+            row["assigned_by_me"] = (
+                user.role == "Supervisor" and item.created_by_id == user.id
+                and item.assigned_to_id != user.id
+            )
+            row["assigned_to_me"] = item.assigned_to_id == user.id
             row["admin_assigned"] = item.id in admin_assigned_ids
             attempt = latest_execution.get(item.id)
             if attempt:
@@ -515,9 +522,14 @@ def operations_collection():
         except (ZoneInfoNotFoundError, ValueError):
             return jsonify({"error": "The recurring schedule could not be calculated. Check its time zone and recurrence rule."}), 400
 
+    # Keep the supervisor who created the operation distinct from the
+    # person responsible for supervising an Admin-created staff assignment.
+    # A Supervisor assigning work to Staff is the creator/assigner, not the
+    # assignee; the team scope already grants that Supervisor management access.
     assigned_supervisor_id = (
         assignee.id if assignee and assignee.role == "Supervisor"
-        else (user.id if user.role == "Supervisor" else None)
+        else (None if user.role == "Supervisor" and assignee and assignee.role == "Staff"
+              else (user.id if user.role == "Supervisor" else None))
     )
     if assigned_supervisor_id is None and assignee and assignee.role == "Staff" and team_id:
         team_supervisors = User.query.join(
