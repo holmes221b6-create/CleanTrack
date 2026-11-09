@@ -632,6 +632,102 @@ def assign_zones(team_id):
     return jsonify({"message": "Team zones updated.", **_team_data(team, admin, include_directory=True)}), 200
 
 
+
+# Supervisor Teams page: own-team overview plus a strictly limited organisation search.
+@teams_bp.get("/supervisor/mine")
+@roles_required("Supervisor")
+def supervisor_own_team():
+    user = get_current_user()
+    memberships = (
+        TeamMember.query.join(Team, TeamMember.team_id == Team.id)
+        .filter(
+            TeamMember.user_id == user.id,
+            Team.organization_id == user.organization_id,
+            Team.status == "active",
+        )
+        .all()
+    )
+    team_ids = {row.team_id for row in memberships}
+    if len(team_ids) != 1:
+        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+    team = Team.query.filter_by(
+        id=next(iter(team_ids)), organization_id=user.organization_id, status="active"
+    ).first()
+    if team is None:
+        return jsonify({"error": "Your assigned team is unavailable."}), 404
+    data = _team_data(team, user)
+    summary = data["team"]
+    return jsonify({
+        "team": {
+            "id": summary["id"], "name": summary["name"],
+            "description": summary.get("description"), "status": summary.get("status"),
+            "member_count": summary.get("member_count", 0),
+            "supervisor_count": summary.get("supervisor_count", 0),
+            "staff_count": summary.get("employee_count", 0),
+            "location_count": summary.get("location_count", 0),
+            "zone_count": summary.get("zone_count", 0),
+            "active_operation_count": summary.get("active_task_count", 0),
+            "pending_operation_count": summary.get("pending_task_count", 0),
+            "overdue_operation_count": summary.get("overdue_task_count", 0),
+            "completion_rate": summary.get("completion_rate"),
+        },
+        "locations": [{"id": x["id"], "name": x["name"], "status": x.get("status")} for x in data["locations"]],
+        "zones": [{"id": x["id"], "name": x["name"], "location_id": x.get("location_id"), "status": x.get("status")} for x in data["zones"]],
+        "performance": data["performance"],
+    }), 200
+
+
+@teams_bp.get("/supervisor/search")
+@roles_required("Supervisor")
+def supervisor_search_teams():
+    user = get_current_user()
+    query = (request.args.get("q") or "").strip()
+    if len(query) < 2:
+        return jsonify({"teams": []}), 200
+    if len(query) > 80:
+        return jsonify({"error": "Search query is too long."}), 400
+    own_ids = {
+        row.team_id for row in TeamMember.query.join(Team, TeamMember.team_id == Team.id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id)
+        .all()
+    }
+    matches = Team.query.filter(
+        Team.organization_id == user.organization_id,
+        Team.status == "active",
+        Team.id.notin_(own_ids) if own_ids else Team.id > 0,
+        func.lower(Team.name).like("%" + query.lower().replace("%", r"\%").replace("_", r"\_") + "%"),
+    ).order_by(Team.name.asc()).limit(8).all()
+    return jsonify({"teams": [{
+        "id": team.id, "name": team.name, "description": team.description
+    } for team in matches]}), 200
+
+
+@teams_bp.get("/supervisor/<int:team_id>")
+@roles_required("Supervisor")
+def supervisor_view_other_team(team_id):
+    user = get_current_user()
+    own_ids = {
+        row.team_id for row in TeamMember.query.join(Team, TeamMember.team_id == Team.id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id)
+        .all()
+    }
+    if team_id in own_ids:
+        return jsonify({"error": "Use your own-team overview for this team."}), 400
+    team = Team.query.filter_by(
+        id=team_id, organization_id=user.organization_id, status="active"
+    ).first()
+    if team is None:
+        return jsonify({"error": "Team not found in your organization."}), 404
+    data = _team_data(team, user)
+    summary = data["team"]
+    # Deliberately return no member identities/counts, operations, locations,
+    # zones, contact details, or administrative controls for another team.
+    return jsonify({"team": {
+        "id": summary["id"], "name": summary["name"],
+        "description": summary.get("description"), "status": summary.get("status"),
+        "team_performance_score": summary.get("completion_rate"),
+    }}), 200
+
 def _export_rows(payload):
     team = payload["team"]
     rows = [["Section", "Field", "Value"]]
