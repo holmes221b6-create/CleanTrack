@@ -342,6 +342,17 @@ def operations_collection():
         now = datetime.now(timezone.utc)
         items = query.order_by(Operation.created_at.desc()).all()
         operation_ids = [item.id for item in items]
+        admin_assigned_ids = set()
+        if operation_ids:
+            admin_assignment_rows = db.session.query(OperationLog.operation_id).join(
+                User, User.id == OperationLog.actor_id
+            ).filter(
+                OperationLog.operation_id.in_(operation_ids),
+                OperationLog.action.in_(("assigned", "reassigned")),
+                User.role == "Admin",
+                User.organization_id == user.organization_id,
+            ).distinct().all()
+            admin_assigned_ids = {row[0] for row in admin_assignment_rows}
         latest_execution = {}
         if operation_ids:
             executions = OperationExecution.query.filter(
@@ -353,6 +364,7 @@ def operations_collection():
         for item in items:
             item.overdue = _operation_is_overdue(item, now)
             row = item.to_dict()
+            row["admin_assigned"] = item.id in admin_assigned_ids
             attempt = latest_execution.get(item.id)
             if attempt:
                 row["started_at"] = attempt.started_at.isoformat() if attempt.started_at else None
