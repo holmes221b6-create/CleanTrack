@@ -861,6 +861,32 @@ def update_operation(operation_id):
             if old_value != new_value:
                 changes[key] = {"before": old_value, "after": new_value}
                 setattr(operation, attr, new_value)
+    if "assigned_to_id" in data:
+        assigned_to_id, error = _parse_id(data, "assigned_to_id")
+        if error:
+            return jsonify({"error": error}), 400
+        assignee = db.session.get(User, assigned_to_id) if assigned_to_id else None
+        if assigned_to_id and (
+            assignee is None or assignee.organization_id != user.organization_id
+            or assignee.account_status != "active"
+            or assignee.role not in {"Supervisor", "Staff"}
+        ):
+            return jsonify({"error": "Choose an active staff member or supervisor in this organization."}), 400
+        if user.role == "Supervisor" and assignee and assignee.role != "Staff" and assignee.id != user.id:
+            return jsonify({"error": "Supervisors can assign work only to themselves or Staff in their authorized team."}), 403
+        if assignee and assignee.id != user.id:
+            team_id = operation.team_id
+            if team_id is None:
+                return jsonify({"error": "Select a team before assigning this operation to a staff member."}), 400
+            membership = TeamMember.query.filter_by(team_id=team_id, user_id=assignee.id).first()
+            if not membership:
+                return jsonify({"error": "The selected assignee must belong to the operation's team."}), 400
+        old_assignee_id = operation.assigned_to_id
+        if old_assignee_id != assigned_to_id:
+            changes["assigned_to_id"] = {"before": old_assignee_id, "after": assigned_to_id}
+            operation.assigned_to_id = assigned_to_id
+            if assigned_to_id and operation.status.lower() in {"pending", "created"}:
+                operation.status = "Assigned"
     if "schedule_type" in data:
         schedule_type = data["schedule_type"]
         if schedule_type not in VALID_SCHEDULE_TYPES:
