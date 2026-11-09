@@ -1295,10 +1295,10 @@ def organization_audit_history():
 def supervisor_operation_blockers():
     user = get_current_user()
     team_ids = _team_ids(user)
-    if not team_ids:
-        return jsonify({"error": "No active team is assigned to this Supervisor."}), 409
-
     if request.method == "GET":
+        if not team_ids:
+            return jsonify({"items": [], "count": 0, "can_create": False, "message": "No active team is assigned to this Supervisor. Ask an organization Admin to add you to a team."}), 200
+
         items = OperationalIncident.query.filter(
             OperationalIncident.organization_id == user.organization_id,
             OperationalIncident.team_id.in_(team_ids),
