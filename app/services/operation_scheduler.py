@@ -142,6 +142,7 @@ def _new_occurrence(series, slot, key):
         instructions=series.instructions,
         checklist=list(series.checklist or []),
         required_evidence=list(series.required_evidence or []),
+        required_qualifications=list(series.required_qualifications or []),
         estimated_minutes=series.estimated_minutes,
         requires_verification=series.requires_verification,
         status="Assigned" if series.assigned_to_id else "Pending",
