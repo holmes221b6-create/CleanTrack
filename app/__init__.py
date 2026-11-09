@@ -178,6 +178,10 @@ def create_app(config_class=Config):
                     "CREATE INDEX IF NOT EXISTS ix_operations_assigned_supervisor_id "
                     "ON operations (assigned_supervisor_id)"
                 ))
+            if "operations" in tables:
+                operation_columns = {item["name"] for item in inspect(connection).get_columns("operations")}
+                if "required_qualifications" not in operation_columns:
+                    connection.execute(text("ALTER TABLE operations ADD COLUMN required_qualifications JSON"))
             if "task_evidence" in tables:
                 evidence_columns = {item["name"] for item in inspect(connection).get_columns("task_evidence")}
                 if "file_data" not in evidence_columns:
