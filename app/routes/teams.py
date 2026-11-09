@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import csv
 import io
 import re
@@ -190,7 +190,7 @@ def _team_data(team, admin, include_directory=False):
         AuditLog.resource_type == "Team",
         AuditLog.resource_id == str(team.id),
         AuditLog.created_at >= audit_cutoff(),
-    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(100).all()
+    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).all()
     activity = [{
         **row.to_dict(), "actor_name": row.actor.full_name if row.actor else "System",
         "event_source": "team",
@@ -200,7 +200,7 @@ def _team_data(team, admin, include_directory=False):
         operation_history = (
             OperationLog.query.filter(OperationLog.operation_id.in_(operation_ids))
             .order_by(OperationLog.created_at.desc(), OperationLog.id.desc())
-            .limit(100).all()
+            .all()
         )
         for row in operation_history:
             activity.append({
@@ -220,7 +220,7 @@ def _team_data(team, admin, include_directory=False):
                 },
             })
     activity.sort(key=lambda item: item.get("created_at") or "", reverse=True)
-    activity = activity[:100]
+    activity = activity
 
     payload = {
         "team": team_summary, "members": members,
@@ -689,13 +689,261 @@ def supervisor_own_team():
         "zones": [{"id": x["id"], "name": x["name"], "location_id": x.get("location_id"), "status": x.get("status")} for x in data["zones"]],
         "performance": data["performance"],
         "activity": [{
+            "id": row.get("id"),
             "created_at": row.get("created_at"),
             "actor_name": row.get("actor_name") or "System",
             "action": row.get("action") or "Team activity",
+            "resource_type": row.get("resource_type"),
+            "resource_id": row.get("resource_id"),
+            "event_source": row.get("event_source"),
+            "details": row.get("details") or {},
             "message": (row.get("details") or {}).get("message")
                 or (row.get("details") or {}).get("task_title")
                 or (row.get("details") or {}).get("name"),
-        } for row in data["activity"][:12]],
+        } for row in data["activity"]],
+    }), 200
+
+
+@teams_bp.patch("/supervisor/mine")
+@roles_required("Supervisor")
+def supervisor_update_own_team():
+    user = get_current_user()
+    memberships = TeamMember.query.join(Team, TeamMember.team_id == Team.id).filter(
+        TeamMember.user_id == user.id, Team.organization_id == user.organization_id,
+        Team.status == "active",
+    ).all()
+    team_ids = {row.team_id for row in memberships}
+    if len(team_ids) != 1:
+        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+    team = Team.query.filter_by(id=next(iter(team_ids)), organization_id=user.organization_id, status="active").first()
+    if team is None:
+        return jsonify({"error": "Your assigned team is unavailable."}), 404
+    data = request.get_json(silent=True) or {}
+    changes = {}
+    if "description" in data:
+        value = data.get("description")
+        if not isinstance(value, str) or len(value.strip()) > 2000:
+            return jsonify({"error": "Team description must be 2,000 characters or fewer."}), 400
+        value = value.strip() or None
+        if team.description != value:
+            changes["description"] = {"before": team.description, "after": value}
+            team.description = value
+    if "capacity" in data:
+        value = data.get("capacity")
+        if value in ("", None):
+            value = None
+        elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return jsonify({"error": "Capacity must be a positive whole number or blank."}), 400
+        if team.capacity != value:
+            changes["capacity"] = {"before": team.capacity, "after": value}
+            team.capacity = value
+    if not changes:
+        return jsonify({"message": "No team details changed.", "team": team.to_dict()}), 200
+    _audit(user, team, "team.details_updated", changes)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Team details could not be saved."}), 500
+    return jsonify({"message": "Team details updated.", "team": team.to_dict()}), 200
+
+
+@teams_bp.get("/supervisor/performance")
+@roles_required("Supervisor")
+def supervisor_team_performance():
+    user = get_current_user()
+    memberships = TeamMember.query.join(Team, TeamMember.team_id == Team.id).filter(
+        TeamMember.user_id == user.id, Team.organization_id == user.organization_id,
+        Team.status == "active",
+    ).all()
+    team_ids = {row.team_id for row in memberships}
+    if len(team_ids) != 1:
+        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+    team = Team.query.filter_by(id=next(iter(team_ids)), organization_id=user.organization_id, status="active").first()
+    if team is None:
+        return jsonify({"error": "Your assigned team is unavailable."}), 404
+
+    today = datetime.now(timezone.utc).date()
+    try:
+        end_day = date.fromisoformat((request.args.get("end_date") or today.isoformat()).strip())
+        start_day = date.fromisoformat((request.args.get("start_date") or (today - timedelta(days=29)).isoformat()).strip())
+    except ValueError:
+        return jsonify({"error": "Dates must use YYYY-MM-DD format."}), 400
+    if start_day > end_day or (end_day - start_day).days > 3660:
+        return jsonify({"error": "Choose a valid date range of up to 10 years."}), 400
+    start_at = datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
+    end_at = datetime.combine(end_day + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+
+    locations = Location.query.filter_by(organization_id=user.organization_id, team_id=team.id).all()
+    location_ids = [x.id for x in locations]
+    zone_rules = [Zone.team_id == team.id]
+    if location_ids:
+        zone_rules.append(Zone.location_id.in_(location_ids))
+    zones = Zone.query.filter(Zone.organization_id == user.organization_id, or_(*zone_rules)).all()
+    zone_ids = [x.id for x in zones]
+    operation_rules = [Operation.team_id == team.id]
+    if location_ids:
+        operation_rules.append(Operation.location_id.in_(location_ids))
+    if zone_ids:
+        operation_rules.append(Operation.zone_id.in_(zone_ids))
+    operations = Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        Operation.created_at >= start_at, Operation.created_at < end_at,
+        or_(*operation_rules),
+    ).order_by(Operation.created_at.asc(), Operation.id.asc()).all()
+
+    operation_type = (request.args.get("operation_type") or "").strip()
+    priority = (request.args.get("priority") or "").strip().lower()
+    location_filter = (request.args.get("location_id") or "").strip()
+    zone_filter = (request.args.get("zone_id") or "").strip()
+    if operation_type:
+        operations = [op for op in operations if (op.task_type or "").lower() == operation_type.lower()]
+    if priority:
+        operations = [op for op in operations if (op.priority or "").lower() == priority]
+    if location_filter:
+        try:
+            wanted = int(location_filter)
+        except ValueError:
+            return jsonify({"error": "location_id must be an integer."}), 400
+        if wanted not in location_ids:
+            return jsonify({"error": "Location filter is outside your team."}), 403
+        operations = [op for op in operations if op.location_id == wanted]
+    if zone_filter:
+        try:
+            wanted = int(zone_filter)
+        except ValueError:
+            return jsonify({"error": "zone_id must be an integer."}), 400
+        if wanted not in zone_ids:
+            return jsonify({"error": "Zone filter is outside your team."}), 403
+        operations = [op for op in operations if op.zone_id == wanted]
+
+    staff_rows = db.session.query(User).join(TeamMember, TeamMember.user_id == User.id).filter(
+        TeamMember.team_id == team.id, User.organization_id == user.organization_id,
+        User.role == "Staff", User.account_status == "active",
+    ).order_by(func.lower(User.full_name)).all()
+    all_org_staff = User.query.filter_by(organization_id=user.organization_id, role="Staff", account_status="active").all()
+    memberships_all = TeamMember.query.join(Team, Team.id == TeamMember.team_id).filter(
+        Team.organization_id == user.organization_id, Team.status == "active",
+    ).all()
+    org_team_by_user = {}
+    for membership in memberships_all:
+        org_team_by_user.setdefault(membership.user_id, set()).add(membership.team_id)
+
+    def stats_for(member_id, rows):
+        assigned = [op for op in rows if op.assigned_to_id == member_id]
+        if not assigned:
+            return {"assigned": 0, "completed": 0, "completion_rate": None, "on_time_rate": None,
+                    "overdue_rate": None, "score": None, "weighted_effort": 0, "trend": []}
+        total_weight = completed_weight = due_weight = on_time_weight = overdue_weight = 0.0
+        completed_count = overdue_count = 0
+        weekly = {}
+        now = datetime.now(timezone.utc)
+        for op in assigned:
+            priority_weight = {"low": 0.8, "normal": 1.0, "high": 1.2, "urgent": 1.5}.get((op.priority or "normal").lower(), 1.0)
+            weight = max(1, int(op.estimated_minutes or 60)) * priority_weight
+            total_weight += weight
+            done = str(op.status or "").lower() in DONE_STATUSES
+            due = _dt_utc(op.due_at)
+            completed_at = _dt_utc(op.reviewed_at or op.submitted_at or op.updated_at or op.created_at) if done else None
+            overdue = not done and str(op.status or "").lower() not in CANCELLED_STATUSES and (
+                bool(op.overdue) or (due is not None and due < now)
+            )
+            if done:
+                completed_count += 1
+                completed_weight += weight
+                if due is not None:
+                    due_weight += weight
+                    if completed_at and completed_at <= due:
+                        on_time_weight += weight
+            if overdue:
+                overdue_count += 1
+                overdue_weight += weight
+            if op.created_at:
+                iso = _dt_utc(op.created_at).isocalendar()
+                label = str(iso.year) + "-W" + str(iso.week).zfill(2)
+                bucket = weekly.setdefault(label, {"assigned": 0, "completed": 0})
+                bucket["assigned"] += 1
+                bucket["completed"] += int(done)
+        completion = completed_weight / total_weight * 100 if total_weight else None
+        punctuality = on_time_weight / due_weight * 100 if due_weight else None
+        overdue_rate = overdue_weight / total_weight * 100 if total_weight else None
+        score = None
+        if len(assigned) >= 3:
+            parts = [(completion, 0.5), (punctuality, 0.3), (100 - overdue_rate, 0.2)]
+            valid = [(value, weight) for value, weight in parts if value is not None]
+            score = round(sum(value * weight for value, weight in valid) / sum(weight for _, weight in valid), 1) if valid else None
+        return {
+            "assigned": len(assigned), "completed": completed_count,
+            "completion_rate": round(completion, 1) if completion is not None else None,
+            "on_time_rate": round(punctuality, 1) if punctuality is not None else None,
+            "overdue_rate": round(overdue_rate, 1) if overdue_rate is not None else None,
+            "score": score, "weighted_effort": round(total_weight, 1),
+            "trend": [{"period": key, **value} for key, value in sorted(weekly.items())],
+        }
+
+    team_stats = [(member, stats_for(member.id, operations)) for member in staff_rows]
+    org_scores = []
+    for member in all_org_staff:
+        member_team_ids = org_team_by_user.get(member.id, set())
+        if not member_team_ids:
+            continue
+        member_locations = Location.query.filter(
+            Location.organization_id == user.organization_id, Location.team_id.in_(list(member_team_ids))
+        ).all()
+        member_location_ids = [x.id for x in member_locations]
+        member_zones = Zone.query.filter(
+            Zone.organization_id == user.organization_id,
+            or_(Zone.team_id.in_(list(member_team_ids)), Zone.location_id.in_(member_location_ids) if member_location_ids else Zone.id == -1),
+        ).all()
+        member_zone_ids = [x.id for x in member_zones]
+        member_rules = [Operation.team_id.in_(list(member_team_ids))]
+        if member_location_ids:
+            member_rules.append(Operation.location_id.in_(member_location_ids))
+        if member_zone_ids:
+            member_rules.append(Operation.zone_id.in_(member_zone_ids))
+        member_ops = Operation.query.filter(
+            Operation.organization_id == user.organization_id, Operation.assigned_to_id == member.id,
+            Operation.created_at >= start_at, Operation.created_at < end_at, or_(*member_rules),
+        ).all()
+        if operation_type:
+            member_ops = [op for op in member_ops if (op.task_type or "").lower() == operation_type.lower()]
+        if priority:
+            member_ops = [op for op in member_ops if (op.priority or "").lower() == priority]
+        if location_filter:
+            member_ops = [op for op in member_ops if str(op.location_id) == location_filter]
+        if zone_filter:
+            member_ops = [op for op in member_ops if str(op.zone_id) == zone_filter]
+        stats = stats_for(member.id, member_ops)
+        if stats["score"] is not None:
+            org_scores.append((member.id, stats["score"]))
+    org_scores.sort(key=lambda item: (-item[1], item[0]))
+    org_rank = {member_id: index + 1 for index, (member_id, _score) in enumerate(org_scores)}
+    ranked = sorted(
+        [(member, stats) for member, stats in team_stats if stats["score"] is not None],
+        key=lambda pair: (-pair[1]["score"], pair[0].full_name.casefold(), pair[0].id),
+    )
+    team_rank = {member.id: index + 1 for index, (member, _stats) in enumerate(ranked)}
+    result_members = []
+    for member, stats in team_stats:
+        result_members.append({
+            "id": member.id, "name": member.full_name, "score": stats["score"],
+            "team_rank": team_rank.get(member.id), "team_ranked_count": len(ranked),
+            "organization_rank": org_rank.get(member.id), "organization_ranked_count": len(org_scores),
+            "assigned": stats["assigned"], "completed": stats["completed"],
+            "completion_rate": stats["completion_rate"], "on_time_rate": stats["on_time_rate"],
+            "overdue_rate": stats["overdue_rate"], "weighted_effort": stats["weighted_effort"],
+            "trend": stats["trend"], "insufficient_data": stats["score"] is None,
+        })
+    current_member = next((row for row in result_members if row["id"] == user.id), None)
+    return jsonify({
+        "period": {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
+        "team": {"id": team.id, "name": team.name}, "current_member": current_member,
+        "members": result_members,
+        "operation_types": sorted({op.task_type for op in operations if op.task_type}),
+        "priorities": ["Low", "Normal", "High", "Urgent"],
+        "locations": [{"id": x.id, "name": x.name} for x in locations],
+        "zones": [{"id": x.id, "name": x.name} for x in zones],
+        "methodology": "Difficulty-weighted score: completion 50%, punctuality 30%, overdue avoidance 20%. Each operation is weighted by estimated minutes and priority. A score/rank requires at least three assigned operations. Organisation rank is position-only; other teams' staff identities and scores are not disclosed.",
     }), 200
 
 
