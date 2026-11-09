@@ -512,11 +512,20 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
     import urllib.request
     from email.message import EmailMessage
 
+    def configured_value(*names, default=""):
+        for name in names:
+            value = os.getenv(name)
+            if value is None or not str(value).strip():
+                value = current_app.config.get(name)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return default
+
     attempted_provider = False
 
     # Preferred zero-subscription HTTPS relay (Google Apps Script -> Gmail).
-    mail_webapp_url = os.getenv("MECHNAR_MAIL_WEBAPP_URL", "").strip()
-    mail_secret = os.getenv("MECHNAR_SECRET", "").strip()
+    mail_webapp_url = configured_value("MECHNAR_MAIL_WEBAPP_URL")
+    mail_secret = configured_value("MECHNAR_SECRET")
     if mail_webapp_url and mail_secret:
         attempted_provider = True
         try:
@@ -545,8 +554,8 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
         )
 
     # Resend uses HTTPS and is compatible with Render's free web-service network policy.
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
+    api_key = configured_value("RESEND_API_KEY")
+    resend_sender = configured_value("RESEND_FROM_EMAIL")
     if api_key and resend_sender:
         attempted_provider = True
         try:
@@ -571,24 +580,18 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
         )
 
     # SMTP remains a supported fallback, although some hosting plans block outbound SMTP.
-    host = (os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or "smtp.gmail.com").strip()
+    host = configured_value("SMTP_HOST", "MAIL_SERVER", default="smtp.gmail.com")
     try:
-        port = int(os.getenv("SMTP_PORT") or os.getenv("MAIL_PORT") or "587")
+        port = int(configured_value("SMTP_PORT", "MAIL_PORT", default="587"))
     except (TypeError, ValueError):
         current_app.logger.error("Transactional email SMTP port must be numeric.")
         port = None
-    username = (
-        os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or
-        os.getenv("MAIL_USERNAME") or ""
-    ).strip()
-    password = (
-        os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or
-        os.getenv("MAIL_PASSWORD") or ""
-    ).replace(" ", "").strip()
-    sender = (os.getenv("MAIL_DEFAULT_SENDER") or f"MECHNAR <{username}>").strip()
-    use_tls = os.getenv(
-        "SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    username = configured_value("SMTP_EMAIL", "GMAIL_SENDER", "MAIL_USERNAME")
+    password = configured_value("SMTP_PASSWORD", "GMAIL_APP_PASSWORD", "MAIL_PASSWORD").replace(" ", "")
+    sender = configured_value("MAIL_DEFAULT_SENDER", default=f"MECHNAR <{username}>")
+    use_tls = configured_value("SMTP_USE_TLS", "MAIL_USE_TLS", default="true").lower() in {
+        "1", "true", "yes", "on"
+    }
 
     if username and password and port is not None:
         attempted_provider = True
