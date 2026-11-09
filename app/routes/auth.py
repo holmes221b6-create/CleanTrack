@@ -500,7 +500,7 @@ def login():
         current_app.logger.exception("Login failed unexpectedly.")
         return json_error("Login failed due to a server error.", 500)
 
-def _send_mechnar_email(recipient, subject, text_body, html_body=None):
+def _send_mechnar_email(recipient, subject, text_body, html_body=None, reset_code=None):
     """Send a MECHNAR transactional email using the first working configured provider.
 
     Provider failures are isolated: a stale/partial Apps Script configuration must
@@ -536,6 +536,7 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
                 "text": text_body,
                 "html": html_body or "",
                 "secret": mail_secret,
+                **({"code": str(reset_code)} if reset_code is not None else {}),
             }).encode("utf-8")
             req = urllib.request.Request(
                 mail_webapp_url, data=payload,
@@ -639,7 +640,7 @@ def _send_password_reset_email(recipient, code):
         "<p>This code expires in 10 minutes. If you did not request this, ignore this email.</p>"
         "<p>— MECHNAR Security</p></div>"
     )
-    return _send_mechnar_email(recipient, subject, text_body, html_body)
+    return _send_mechnar_email(recipient, subject, text_body, html_body, reset_code=code)
 
 
 @auth_bp.post("/forgot-password")
