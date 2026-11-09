@@ -540,7 +540,7 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
                 mail_webapp_url, data=payload,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
-            with urllib.request.urlopen(req, timeout=25) as response:
+            with urllib.request.urlopen(req, timeout=8) as response:
                 result = json.loads(response.read().decode("utf-8"))
             if result.get("success") is True:
                 current_app.logger.info("MECHNAR transactional email accepted by Google Apps Script.")
@@ -603,7 +603,7 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
         if html_body:
             message.add_alternative(html_body, subtype="html")
         try:
-            with smtplib.SMTP(host, port, timeout=15) as smtp:
+            with smtplib.SMTP(host, port, timeout=8) as smtp:
                 smtp.ehlo()
                 if use_tls:
                     smtp.starttls(context=ssl.create_default_context())
