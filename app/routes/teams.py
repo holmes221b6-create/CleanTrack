@@ -671,9 +671,21 @@ def supervisor_own_team():
             "overdue_operation_count": summary.get("overdue_task_count", 0),
             "completion_rate": summary.get("completion_rate"),
         },
+        "members": [{
+            "id": row["id"], "name": row["name"], "role": row["role"],
+            "account_status": row["account_status"], "assigned_at": row["assigned_at"],
+        } for row in data["members"]],
         "locations": [{"id": x["id"], "name": x["name"], "status": x.get("status")} for x in data["locations"]],
         "zones": [{"id": x["id"], "name": x["name"], "location_id": x.get("location_id"), "status": x.get("status")} for x in data["zones"]],
         "performance": data["performance"],
+        "activity": [{
+            "created_at": row.get("created_at"),
+            "actor_name": row.get("actor_name") or "System",
+            "action": row.get("action") or "Team activity",
+            "message": (row.get("details") or {}).get("message")
+                or (row.get("details") or {}).get("task_title")
+                or (row.get("details") or {}).get("name"),
+        } for row in data["activity"][:12]],
     }), 200
 
 
