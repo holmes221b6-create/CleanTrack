@@ -500,21 +500,25 @@ def login():
         return json_error("Login failed due to a server error.", 500)
 
 def _send_mechnar_email(recipient, subject, text_body, html_body=None):
-    """Send a MECHNAR transactional email through the configured provider."""
+    """Send a MECHNAR transactional email using the first working configured provider.
+
+    Provider failures are isolated: a stale/partial Apps Script configuration must
+    not prevent a configured Resend provider from sending the message.
+    """
     import json
     import os
     import smtplib
     import ssl
-    import urllib.error
     import urllib.request
     from email.message import EmailMessage
 
+    attempted_provider = False
+
+    # Preferred zero-subscription HTTPS relay (Google Apps Script -> Gmail).
     mail_webapp_url = os.getenv("MECHNAR_MAIL_WEBAPP_URL", "").strip()
     mail_secret = os.getenv("MECHNAR_SECRET", "").strip()
-    if mail_webapp_url or mail_secret:
-        if not mail_webapp_url or not mail_secret:
-            current_app.logger.error("Both MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET must be configured.")
-            return False
+    if mail_webapp_url and mail_secret:
+        attempted_provider = True
         try:
             payload = json.dumps({
                 "email": recipient,
@@ -533,59 +537,89 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None):
                 current_app.logger.info("MECHNAR transactional email accepted by Google Apps Script.")
                 return True
             current_app.logger.error("Google Apps Script rejected a MECHNAR transactional email.")
-            return False
         except Exception:
-            current_app.logger.exception("Google Apps Script failed to send a MECHNAR transactional email.")
-            return False
+            current_app.logger.exception("Google Apps Script email delivery failed; trying the next configured provider.")
+    elif mail_webapp_url or mail_secret:
+        current_app.logger.warning(
+            "Google Apps Script email relay is only partially configured; trying other providers."
+        )
 
+    # Resend uses HTTPS and is compatible with Render's free web-service network policy.
     api_key = os.getenv("RESEND_API_KEY", "").strip()
     resend_sender = os.getenv("RESEND_FROM_EMAIL", "").strip()
     if api_key and resend_sender:
+        attempted_provider = True
         try:
             import resend
             resend.api_key = api_key
-            resend.Emails.send({
-                "from": resend_sender, "to": [recipient], "subject": subject,
-                "html": html_body or "", "text": text_body,
+            result = resend.Emails.send({
+                "from": resend_sender,
+                "to": [recipient],
+                "subject": subject,
+                "html": html_body or "",
+                "text": text_body,
             })
-            return True
+            if result:
+                current_app.logger.info("MECHNAR transactional email accepted by Resend.")
+                return True
+            current_app.logger.error("Resend returned no message result for a MECHNAR email.")
         except Exception:
-            current_app.logger.exception("Resend failed to send a MECHNAR transactional email.")
-            return False
+            current_app.logger.exception("Resend email delivery failed; trying the next configured provider.")
+    elif api_key or resend_sender:
+        current_app.logger.warning(
+            "Resend email is only partially configured; both RESEND_API_KEY and RESEND_FROM_EMAIL are required."
+        )
 
+    # SMTP remains a supported fallback, although some hosting plans block outbound SMTP.
     host = (os.getenv("SMTP_HOST") or os.getenv("MAIL_SERVER") or "smtp.gmail.com").strip()
     try:
         port = int(os.getenv("SMTP_PORT") or os.getenv("MAIL_PORT") or "587")
     except (TypeError, ValueError):
         current_app.logger.error("Transactional email SMTP port must be numeric.")
-        return False
-    username = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or os.getenv("MAIL_USERNAME") or "").strip()
-    password = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or os.getenv("MAIL_PASSWORD") or "").replace(" ", "").strip()
+        port = None
+    username = (
+        os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or
+        os.getenv("MAIL_USERNAME") or ""
+    ).strip()
+    password = (
+        os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or
+        os.getenv("MAIL_PASSWORD") or ""
+    ).replace(" ", "").strip()
     sender = (os.getenv("MAIL_DEFAULT_SENDER") or f"MECHNAR <{username}>").strip()
-    use_tls = os.getenv("SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")).strip().lower() in {"1", "true", "yes", "on"}
-    if not username or not password:
-        current_app.logger.error("Configure MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET, or a supported email provider.")
-        return False
-    message = EmailMessage()
-    message["From"] = sender
-    message["To"] = recipient
-    message["Subject"] = subject
-    message.set_content(text_body)
-    if html_body:
-        message.add_alternative(html_body, subtype="html")
-    try:
-        with smtplib.SMTP(host, port, timeout=15) as smtp:
-            smtp.ehlo()
-            if use_tls:
-                smtp.starttls(context=ssl.create_default_context())
-                smtp.ehlo()
-            smtp.login(username, password)
-            smtp.send_message(message, from_addr=username, to_addrs=[recipient])
-        return True
-    except Exception:
-        current_app.logger.exception("SMTP failed to send a MECHNAR transactional email.")
-        return False
+    use_tls = os.getenv(
+        "SMTP_USE_TLS", os.getenv("MAIL_USE_TLS", "true")
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
+    if username and password and port is not None:
+        attempted_provider = True
+        message = EmailMessage()
+        message["From"] = sender
+        message["To"] = recipient
+        message["Subject"] = subject
+        message.set_content(text_body)
+        if html_body:
+            message.add_alternative(html_body, subtype="html")
+        try:
+            with smtplib.SMTP(host, port, timeout=15) as smtp:
+                smtp.ehlo()
+                if use_tls:
+                    smtp.starttls(context=ssl.create_default_context())
+                    smtp.ehlo()
+                smtp.login(username, password)
+                smtp.send_message(message, from_addr=username, to_addrs=[recipient])
+            return True
+        except Exception:
+            current_app.logger.exception("SMTP email delivery failed.")
+    elif username or password:
+        current_app.logger.warning(
+            "SMTP email is only partially configured; both sender email and password are required."
+        )
+
+    if not attempted_provider:
+        current_app.logger.error(
+            "No transactional email provider is configured. Configure the Google Apps Script relay, Resend, or SMTP."
+        )
+    return False
 
 def _send_password_reset_email(recipient, code):
     subject = "Your MECHNAR password recovery code"
