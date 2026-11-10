@@ -343,6 +343,7 @@ def operations_collection():
         items = query.order_by(Operation.created_at.desc()).all()
         operation_ids = [item.id for item in items]
         admin_assigned_ids = set()
+        supervisor_assigned_ids = set()
         if operation_ids:
             admin_assignment_rows = db.session.query(OperationLog.operation_id).join(
                 User, User.id == OperationLog.actor_id
@@ -353,6 +354,13 @@ def operations_collection():
                 User.organization_id == user.organization_id,
             ).distinct().all()
             admin_assigned_ids = {row[0] for row in admin_assignment_rows}
+            if user.role == "Supervisor":
+                supervisor_assignment_rows = db.session.query(OperationLog.operation_id).filter(
+                    OperationLog.operation_id.in_(operation_ids),
+                    OperationLog.actor_id == user.id,
+                    OperationLog.action.in_(("assigned", "reassigned")),
+                ).distinct().all()
+                supervisor_assigned_ids = {row[0] for row in supervisor_assignment_rows}
         latest_execution = {}
         if operation_ids:
             executions = OperationExecution.query.filter(
@@ -367,7 +375,7 @@ def operations_collection():
             # Explicit ownership flags prevent the Supervisor UI from
             # confusing "created/assigned by me" with "assigned to me".
             row["assigned_by_me"] = (
-                user.role == "Supervisor" and item.created_by_id == user.id
+                user.role == "Supervisor" and item.id in supervisor_assigned_ids
                 and item.assigned_to_id != user.id
             )
             row["assigned_to_me"] = item.assigned_to_id == user.id
