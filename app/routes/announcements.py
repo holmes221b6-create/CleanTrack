@@ -42,6 +42,7 @@ ALLOWED_EXTENSIONS = {
     ".ogg": {"audio/ogg", "application/ogg"},
     ".webm": {"audio/webm", "video/webm"},
     ".m4a": {"audio/mp4", "audio/x-m4a", "video/mp4"},
+    ".json": {"application/json"},
 }
 
 
@@ -796,7 +797,12 @@ def upload_attachments(announcement_id):
         if total > MAX_TOTAL_ATTACH_BYTES:
             return jsonify({"error": "Attachments must total 20 MB or less per upload."}), 413
         audio_extensions = {".mp3", ".wav", ".ogg", ".webm", ".m4a"}
-        category = "voice" if content_type.startswith("audio/") or ext in audio_extensions else "image" if content_type.startswith("image/") else "file"
+        category = (
+            "voice_profile" if name == "team-voice-profile.json" and content_type == "application/json"
+            else "voice" if content_type.startswith("audio/") or ext in audio_extensions
+            else "image" if content_type.startswith("image/")
+            else "file"
+        )
         if category == "voice" and user.role == "Admin" and item.audience_scope != "supervisors":
             return jsonify({"error": "Admin voice notes are available for announcements targeted to all supervisors. Use text or a document for other audiences."}), 400
         accepted.append((name, content_type, category, data))
