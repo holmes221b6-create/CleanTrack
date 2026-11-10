@@ -41,6 +41,8 @@ ALLOWED_EXTENSIONS = {
     ".wav": {"audio/wav", "audio/x-wav"},
     ".ogg": {"audio/ogg", "application/ogg"},
     ".webm": {"audio/webm", "video/webm"},
+    ".mp4": {"video/mp4", "application/mp4"},
+    ".mov": {"video/quicktime"},
     ".m4a": {"audio/mp4", "audio/x-m4a", "video/mp4"},
     ".json": {"application/json"},
 }
@@ -92,8 +94,16 @@ def _can_view(user, item, include_drafts=False):
             and item.audience_scope == "team"
             and item.team_id in _team_ids(user)
         )
-    if item.expires_at:
-        expires = item.expires_at if item.expires_at.tzinfo else item.expires_at.replace(tzinfo=timezone.utc)
+    expires_at = item.expires_at
+    # Supervisor team announcements expire after seven days, including legacy rows.
+    if expires_at is None and item.audience_scope == "team" and item.creator and item.creator.role == "Supervisor":
+        published_at = item.published_at or item.created_at
+        if published_at is not None:
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            expires_at = published_at + timedelta(days=7)
+    if expires_at:
+        expires = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
         if expires <= now:
             return False
     if item.audience_scope == "organization":
