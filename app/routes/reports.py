@@ -454,6 +454,7 @@ def _supervisor_report_rows(user, payload):
         for op in operations:
             if op.assigned_to_id in by_staff: by_staff[op.assigned_to_id].append(op)
         for member in staff:
+            if employee_id and member.id != employee_id: continue
             items = by_staff[member.id]
             total = len(items)
             completed = [op for op in items if str(op.status or "").lower() in {"completed","approved","verified","done","complete"}]
