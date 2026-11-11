@@ -248,9 +248,64 @@ def _render_file(report, file_format, report_name):
             parts.append(f'<path d="M0 {y+row_height}H{total_width}" stroke="#ded9e5"/>')
         parts.append("</svg>")
         return "".join(parts).encode("utf-8")
-    from app.routes.analytics import _make_pdf
-    return _make_pdf(headers, rows,
-                     {"start_date": report["start_date"], "end_date": report["end_date"]})
+    if file_format == "pdf":
+        # Build a genuine PDF for this report's own columns and rows. Do not
+        # reuse the analytics ranking renderer: its row schema is different.
+        from textwrap import wrap
+        title = str(report_name or "Organisation Report")
+        lines = [
+            title,
+            "Reporting period: " + str(report["start_date"]) + " to " + str(report["end_date"]),
+            "Team: " + str(report.get("team_name") or ""),
+            "Records: " + str(len(rows)),
+            "",
+        ]
+        safe_headers = [str(value) for value in headers]
+        lines.append(" | ".join(safe_headers))
+        lines.append("-" * min(110, max(40, len(" | ".join(safe_headers)))))
+        for row in rows:
+            cells = [_clean(value).replace("\\n", " ").replace("|", "/") for value in row]
+            lines.extend(wrap(" | ".join(cells), width=105, replace_whitespace=False,
+                              drop_whitespace=True) or [""])
+            lines.append("")
+        pages = [lines[index:index + 48] for index in range(0, len(lines), 48)] or [[]]
+        objects = {
+            1: "<< /Type /Catalog /Pages 2 0 R >>",
+            3: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        }
+        page_ids = []
+        for page_index, page_lines in enumerate(pages):
+            content_id = 4 + page_index * 2
+            page_id = content_id + 1
+            page_ids.append(page_id)
+            commands = ["BT", "/F1 8 Tf", "40 800 Td", "10 TL"]
+            for line in page_lines:
+                ascii_line = line.encode("ascii", "replace").decode("ascii")
+                escaped = ascii_line.replace("\\\\", "\\\\\\\\").replace("(", "\\\\(").replace(")", "\\\\)")
+                commands.extend([f"({escaped}) Tj", "T*"])
+            commands.append("ET")
+            stream = "\\n".join(commands).encode("ascii")
+            objects[content_id] = f"<< /Length {len(stream)} >>\\nstream\\n{stream.decode('ascii')}\\nendstream"
+            objects[page_id] = (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 842] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+            )
+        objects[2] = "<< /Type /Pages /Kids [" + " ".join(f"{page_id} 0 R" for page_id in page_ids) + f"] /Count {len(page_ids)} >>"
+        output = bytearray(b"%PDF-1.4\\n%\\xe2\\xe3\\xcf\\xd3\\n")
+        offsets = [0] * (max(objects) + 1)
+        for object_id in range(1, max(objects) + 1):
+            offsets[object_id] = len(output)
+            output.extend(f"{object_id} 0 obj\\n".encode("ascii"))
+            output.extend(objects[object_id].encode("latin-1"))
+            output.extend(b"\\nendobj\\n")
+        xref_offset = len(output)
+        output.extend(f"xref\\n0 {len(offsets)}\\n".encode("ascii"))
+        output.extend(b"0000000000 65535 f \\n")
+        for object_id in range(1, len(offsets)):
+            output.extend(f"{offsets[object_id]:010d} 00000 n \\n".encode("ascii"))
+        output.extend(f"trailer\\n<< /Size {len(offsets)} /Root 1 0 R >>\\nstartxref\\n{xref_offset}\\n%%EOF".encode("ascii"))
+        return bytes(output)
+    raise ValueError("Unsupported report format.")
 
 
 def _audit(admin, action, artifact, details=None):
