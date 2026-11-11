@@ -212,7 +212,7 @@ def _render_file(report, file_format, report_name):
         writer = csv.writer(stream)
         writer.writerow(headers)
         writer.writerows(rows)
-        return ("\\ufeff" + stream.getvalue()).encode("utf-8")
+        return ("\ufeff" + stream.getvalue()).encode("utf-8")
     if file_format == "xlsx":
         from app.routes.analytics import _make_xlsx
         return _make_xlsx(headers, rows, sheet_name="Operations Report")
