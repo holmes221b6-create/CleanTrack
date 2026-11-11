@@ -370,7 +370,10 @@ def _supervisor_report_context(user):
         .order_by(User.full_name.asc()).all())
     staff_ids = [row.id for row in staff]
     from sqlalchemy import and_, or_
-    scope = [Operation.team_id == team_id]
+    authorised_member_ids = staff_ids | {user.id}
+    scope = [and_(Operation.team_id == team_id, or_(
+        Operation.assigned_to_id.is_(None),
+        Operation.assigned_to_id.in_(authorised_member_ids or {-1})))]
     if staff_ids:
         scope.append(and_(Operation.team_id.is_(None), Operation.assigned_to_id.in_(staff_ids)))
     scope.append(and_(Operation.team_id.is_(None), Operation.assigned_supervisor_id == user.id))
