@@ -20,12 +20,14 @@ from app.models.report_artifact import ReportArtifact
 from app.services.permissions import get_current_user, roles_required
 
 reports_bp = Blueprint("reports", __name__, url_prefix="/api/reports")
-FORMATS = {"csv", "xlsx", "pdf"}
+FORMATS = {"csv", "xlsx", "pdf", "svg", "html"}
 TYPES = {"operations", "logs", "staff", "teams", "locations", "zones", "performance", "approvals"}
 MIME = {
     "csv": "text/csv; charset=utf-8",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "pdf": "application/pdf",
+    "svg": "image/svg+xml; charset=utf-8",
+    "html": "text/html; charset=utf-8",
 }
 ORG_QUOTA_BYTES = 100 * 1024 * 1024
 RETENTION_DAYS = 30
@@ -210,10 +212,42 @@ def _render_file(report, file_format, report_name):
         writer = csv.writer(stream)
         writer.writerow(headers)
         writer.writerows(rows)
-        return ("\ufeff" + stream.getvalue()).encode("utf-8")
+        return ("\\ufeff" + stream.getvalue()).encode("utf-8")
     if file_format == "xlsx":
         from app.routes.analytics import _make_xlsx
-        return _make_xlsx(headers, rows, sheet_name="CleanTrack Report")
+        return _make_xlsx(headers, rows, sheet_name="Operations Report")
+    if file_format == "html":
+        from html import escape
+        title = escape(report_name)
+        head = "".join("<th>" + escape(str(h)) + "</th>" for h in headers)
+        body = "".join("<tr>" + "".join("<td>" + escape(str(v)) + "</td>" for v in row) + "</tr>" for row in rows)
+        document = ("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>" + title + "</title><style>body{font:14px/1.5 Arial,sans-serif;color:#24212b;margin:32px}h1{font-size:22px;margin:0 0 6px}.meta{color:#686273;margin:0 0 22px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ded9e5;padding:9px 11px;text-align:left;vertical-align:top}th{background:#f1edf7;color:#3b304c}tr:nth-child(even){background:#faf9fc}@media print{body{margin:12mm}tr{break-inside:avoid}thead{display:table-header-group}}</style></head><body><h1>" + title + "</h1><p class='meta'>Reporting period: " + escape(str(report["start_date"])) + " – " + escape(str(report["end_date"])) + " · " + str(len(rows)) + " records</p><table><thead><tr>" + head + "</tr></thead><tbody>" + body + "</tbody></table></body></html>")
+        return document.encode("utf-8")
+    if file_format == "svg":
+        from html import escape
+        widths = [max(150, min(320, max([len(str(h))] + [len(str(row[i])) for row in rows]) * 7 + 28)) for i, h in enumerate(headers)]
+        total_width = sum(widths)
+        row_height, header_height, title_height = 30, 38, 76
+        total_height = title_height + header_height + max(1, len(rows)) * row_height
+        parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="{total_height}" viewBox="0 0 {total_width} {total_height}">', '<rect width="100%" height="100%" fill="#ffffff"/>',
+                 f'<text x="20" y="30" font-family="Arial,sans-serif" font-size="20" font-weight="700" fill="#292431">{escape(report_name)}</text>',
+                 f'<text x="20" y="54" font-family="Arial,sans-serif" font-size="12" fill="#686273">{escape(str(report["start_date"]))} – {escape(str(report["end_date"]))} · {len(rows)} records</text>']
+        x = 0
+        for i, header in enumerate(headers):
+            parts.extend([f'<rect x="{x}" y="{title_height}" width="{widths[i]}" height="{header_height}" fill="#514166"/>',
+                          f'<text x="{x+12}" y="{title_height+24}" font-family="Arial,sans-serif" font-size="12" font-weight="700" fill="#ffffff">{escape(str(header))}</text>'])
+            x += widths[i]
+        for ri, row in enumerate(rows):
+            y = title_height + header_height + ri * row_height
+            fill = "#ffffff" if ri % 2 == 0 else "#f5f2f8"
+            parts.append(f'<rect x="0" y="{y}" width="{total_width}" height="{row_height}" fill="{fill}"/>')
+            x = 0
+            for ci, value in enumerate(row):
+                parts.append(f'<text x="{x+12}" y="{y+20}" font-family="Arial,sans-serif" font-size="11" fill="#292431">{escape(str(value))}</text>')
+                x += widths[ci]
+            parts.append(f'<path d="M0 {y+row_height}H{total_width}" stroke="#ded9e5"/>')
+        parts.append("</svg>")
+        return "".join(parts).encode("utf-8")
     from app.routes.analytics import _make_pdf
     return _make_pdf(headers, rows,
                      {"start_date": report["start_date"], "end_date": report["end_date"]})
@@ -626,7 +660,7 @@ def supervisor_download_report(report_id):
     if artifact is None:return jsonify({"error":"Report not found, expired, or you do not have access."}),404
     _audit(user,"report.downloaded",artifact,{"format":artifact.file_format});db.session.commit()
     safe_name=re.sub(r"[^A-Za-z0-9._-]+","-",unicodedata.normalize("NFKD",artifact.name)).strip("-._")[:100] or "mechnar-report"
-    suffix={"xlsx":".xlsx","csv":".csv","pdf":".pdf"}[artifact.file_format]
+    suffix={"xlsx":".xlsx","csv":".csv","pdf":".pdf","svg":".svg","html":".html"}[artifact.file_format]
     response=make_response(artifact.file_bytes)
     response.headers["Content-Type"]=artifact.mime_type
     response.headers["Content-Disposition"]='attachment; filename="'+safe_name+suffix+'"'
