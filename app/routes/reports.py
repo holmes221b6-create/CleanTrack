@@ -345,3 +345,282 @@ def share_report(report_id):
     return jsonify({"status": "pending", "method": method,
         "message": "CleanTrack has not configured a secure delivery provider. No report was sent. Download the report and attach it in your approved email or WhatsApp workflow.",
         "download_url": "/api/reports/" + str(artifact.id) + "/download"}), 202
+
+
+# Supervisor Reports — strictly scoped to the Supervisor's single active team.
+def _supervisor_report_context(user):
+    from app.models.operation import Operation
+    from app.models.team import Team
+    from app.models.team_member import TeamMember
+    from app.models.user import User
+    memberships = (db.session.query(TeamMember.team_id)
+        .join(Team, Team.id == TeamMember.team_id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id,
+                Team.status == "active").all())
+    team_ids = {row[0] for row in memberships}
+    if len(team_ids) != 1:
+        raise PermissionError("Your Supervisor account must belong to exactly one active team to generate reports.")
+    team_id = next(iter(team_ids))
+    team = Team.query.filter_by(id=team_id, organization_id=user.organization_id, status="active").first()
+    if team is None:
+        raise PermissionError("Your assigned team is unavailable.")
+    staff = (User.query.join(TeamMember, TeamMember.user_id == User.id)
+        .filter(TeamMember.team_id == team_id, User.organization_id == user.organization_id,
+                User.role == "Staff", User.account_status == "active")
+        .order_by(User.full_name.asc()).all())
+    staff_ids = [row.id for row in staff]
+    from sqlalchemy import and_, or_
+    scope = [Operation.team_id == team_id]
+    if staff_ids:
+        scope.append(and_(Operation.team_id.is_(None), Operation.assigned_to_id.in_(staff_ids)))
+    scope.append(and_(Operation.team_id.is_(None), Operation.assigned_supervisor_id == user.id))
+    operations_query = Operation.query.filter(
+        Operation.organization_id == user.organization_id, or_(*scope))
+    return team, staff, operations_query
+
+
+def _supervisor_report_rows(user, payload):
+    from sqlalchemy import func
+    from app.models.operation import Operation
+    from app.models.operation_execution import OperationExecution
+    from app.models.location import Location
+    from app.models.zone import Zone
+    from app.models.profile_qualification import ProfileQualification
+
+    kind = str(payload.get("report_type") or "operations").strip().lower()
+    allowed = {"operations", "reviews", "personnel", "performance", "locations", "zones"}
+    if kind not in allowed:
+        raise ValueError("Choose a supported Supervisor report.")
+    start, end = _date_range(payload)
+    team, staff, scoped_ops = _supervisor_report_context(user)
+    staff_ids = {row.id for row in staff}
+    employee_id = _int_filter(payload, "employee_id")
+    location_id = _int_filter(payload, "location_id")
+    zone_id = _int_filter(payload, "zone_id")
+    operation_type = str(payload.get("operation_type") or "").strip().lower()
+    status = str(payload.get("status") or "").strip().lower()
+
+    if employee_id and employee_id not in staff_ids:
+        raise ValueError("The selected Staff member is not part of your team.")
+    if location_id and not Location.query.filter_by(id=location_id, organization_id=user.organization_id, team_id=team.id).first():
+        raise ValueError("The selected location is outside your team.")
+    if zone_id:
+        zone = Zone.query.filter_by(id=zone_id, organization_id=user.organization_id).first()
+        if zone is None or (zone.team_id != team.id and not (zone.location and zone.location.team_id == team.id)):
+            raise ValueError("The selected zone is outside your team.")
+
+    filters = {"report_type": kind, "start_date": start.isoformat(), "end_date": end.isoformat(),
+        "team_id": team.id, "employee_id": employee_id, "location_id": location_id,
+        "zone_id": zone_id, "status": status or None, "operation_type": operation_type or None}
+    start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
+    end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+    query = scoped_ops.filter(Operation.created_at >= start_dt, Operation.created_at < end_dt)
+    if employee_id: query = query.filter(Operation.assigned_to_id == employee_id)
+    if location_id: query = query.filter(Operation.location_id == location_id)
+    if zone_id: query = query.filter(Operation.zone_id == zone_id)
+    if operation_type: query = query.filter(func.lower(Operation.task_type) == operation_type)
+    if status == "overdue":
+        query = query.filter(or_(Operation.overdue.is_(True),
+            and_(Operation.due_at < datetime.now(timezone.utc),
+                 func.lower(Operation.status).notin_(["completed","approved","verified","cancelled","canceled"]))))
+    elif status:
+        query = query.filter(func.lower(Operation.status) == status)
+
+    operations = query.order_by(Operation.created_at.desc(), Operation.id.desc()).limit(MAX_ROWS + 1).all()
+    headers, rows = [], []
+    if kind == "operations":
+        headers = ["Operation ID", "Operation", "Type", "Assigned to", "Status", "Priority",
+            "Location", "Zone", "Created", "Due", "Submitted", "Completed"]
+        rows = [[op.id, op.title, op.task_type, op.assignee.full_name if op.assignee else "",
+            op.status, op.priority, op.location.name if op.location else "", op.zone.name if op.zone else "",
+            op.created_at, op.due_at, op.submitted_at, op.reviewed_at if str(op.status or "").lower() in {"completed","approved","verified"} else None]
+            for op in operations]
+    elif kind == "reviews":
+        headers = ["Operation ID", "Operation", "Staff member", "Review outcome", "Submitted",
+            "Reviewed", "Review reason / feedback", "Attempts", "Resubmissions"]
+        for op in operations:
+            executions = sorted(list(op.executions or []), key=lambda item: item.attempt_number)
+            outcome = str(op.status or "").strip()
+            if not (op.submitted_at or op.reviewed_at or outcome.lower() in {"submitted","approved","rejected","completed","verified"} or executions):
+                continue
+            feedback = op.review_feedback or next((x.review_feedback for x in reversed(executions) if x.review_feedback), "")
+            rows.append([op.id, op.title, op.assignee.full_name if op.assignee else "", outcome,
+                op.submitted_at, op.reviewed_at, feedback, max([x.attempt_number for x in executions] or [1]),
+                max(0, max([x.attempt_number for x in executions] or [1]) - 1)])
+    elif kind == "performance":
+        headers = ["Staff member", "Assigned operations", "Completed", "Pending / active",
+            "Overdue", "Completion rate", "On-time completion rate", "Approval rate"]
+        by_staff = {member.id: [] for member in staff}
+        for op in operations:
+            if op.assigned_to_id in by_staff: by_staff[op.assigned_to_id].append(op)
+        for member in staff:
+            items = by_staff[member.id]
+            total = len(items)
+            completed = [op for op in items if str(op.status or "").lower() in {"completed","approved","verified","done","complete"}]
+            submitted = [op for op in items if op.submitted_at or str(op.status or "").lower() in {"submitted","approved","rejected","completed","verified"}]
+            approved = [op for op in submitted if str(op.status or "").lower() in {"approved","completed","verified","done","complete"}]
+            now = datetime.now(timezone.utc)
+            overdue = [op for op in items if op.due_at and
+                (op.due_at if op.due_at.tzinfo else op.due_at.replace(tzinfo=timezone.utc)) < now and
+                str(op.status or "").lower() not in {"completed","approved","verified","cancelled","canceled"}]
+            on_time = [op for op in completed if op.due_at is None or
+                (op.submitted_at and (op.submitted_at if op.submitted_at.tzinfo else op.submitted_at.replace(tzinfo=timezone.utc)) <=
+                 (op.due_at if op.due_at.tzinfo else op.due_at.replace(tzinfo=timezone.utc)))]
+            active = total - len(completed) - sum(1 for op in items if str(op.status or "").lower() in {"cancelled","canceled"})
+            rows.append([member.full_name, total, len(completed), max(0,active), len(overdue),
+                round(len(completed)*100/total,1) if total else "—",
+                round(len(on_time)*100/len(completed),1) if completed else "—",
+                round(len(approved)*100/len(submitted),1) if submitted else "—"])
+    elif kind == "personnel":
+        headers = ["Staff ID", "Name", "Email", "Joined", "Skills", "Qualifications",
+            "Assigned operations", "Active workload", "Overdue operations"]
+        all_team_ops = scoped_ops.all()
+        for member in staff:
+            if employee_id and member.id != employee_id: continue
+            qualifications = ProfileQualification.query.filter_by(user_id=member.id).order_by(ProfileQualification.created_at.desc()).all()
+            assigned = [op for op in all_team_ops if op.assigned_to_id == member.id]
+            active = [op for op in assigned if str(op.status or "").lower() not in {"completed","approved","verified","cancelled","canceled"}]
+            now = datetime.now(timezone.utc)
+            overdue = [op for op in active if op.due_at and
+                (op.due_at if op.due_at.tzinfo else op.due_at.replace(tzinfo=timezone.utc)) < now]
+            skills = member.skills if isinstance(member.skills,list) else []
+            skill_names = [str(x.get("name") or x.get("skill") or "") if isinstance(x,dict) else str(x) for x in skills]
+            qual_names = [x.title for x in qualifications if x.title]
+            rows.append([member.id, member.full_name, member.email, member.created_at,
+                ", ".join(x for x in skill_names if x), ", ".join(qual_names),
+                len(assigned), len(active), len(overdue)])
+    elif kind == "locations":
+        location_query = Location.query.filter_by(organization_id=user.organization_id, team_id=team.id)
+        if location_id: location_query = location_query.filter(Location.id == location_id)
+        if status: location_query = location_query.filter(func.lower(Location.status) == status)
+        locations = location_query.order_by(Location.name.asc()).all()
+        headers = ["Location", "Address", "Status", "Zones", "Operations in period"]
+        for loc in locations:
+            loc_zones = Zone.query.filter_by(organization_id=user.organization_id, location_id=loc.id).all()
+            loc_ops = [op for op in operations if op.location_id == loc.id]
+            rows.append([loc.name, loc.address, loc.status, len(loc_zones), len(loc_ops)])
+    elif kind == "zones":
+        zone_query = Zone.query.filter_by(organization_id=user.organization_id)
+        zone_query = zone_query.filter(or_(Zone.team_id == team.id,
+            Zone.location_id.in_([x.id for x in Location.query.filter_by(organization_id=user.organization_id,team_id=team.id).all()] or [-1])))
+        if zone_id: zone_query = zone_query.filter(Zone.id == zone_id)
+        if location_id: zone_query = zone_query.filter(Zone.location_id == location_id)
+        if status: zone_query = zone_query.filter(func.lower(Zone.status) == status)
+        zones = zone_query.order_by(Zone.name.asc()).all()
+        headers = ["Zone", "Location", "Status", "Assigned staff", "Operations in period"]
+        for zone in zones:
+            assigned_ids = [op.assigned_to_id for op in operations if op.zone_id == zone.id and op.assigned_to_id]
+            rows.append([zone.name, zone.location.name if zone.location else "", zone.status,
+                len(set(assigned_ids)), sum(1 for op in operations if op.zone_id == zone.id)])
+
+    if len(rows) > MAX_ROWS:
+        raise ValueError("This report contains more than 10,000 rows. Narrow the date range or filters.")
+    return {"report_type": kind, "headers": headers, "rows": rows, "filters": filters,
+        "row_count": len(rows), "start_date": start.isoformat(), "end_date": end.isoformat(), "team_name": team.name}
+
+
+def _supervisor_artifact_or_none(user, report_id):
+    artifact = ReportArtifact.query.filter_by(id=report_id, organization_id=user.organization_id, created_by_id=user.id).first()
+    if artifact is None or artifact.expires_at <= datetime.now(timezone.utc):
+        return None
+    return artifact
+
+
+@reports_bp.get("/supervisor/options")
+@roles_required("Supervisor")
+def supervisor_report_options():
+    user = get_current_user()
+    try:
+        team, staff, scoped_ops = _supervisor_report_context(user)
+    except PermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
+    from app.models.location import Location
+    from app.models.zone import Zone
+    locations = Location.query.filter_by(organization_id=user.organization_id, team_id=team.id).order_by(Location.name.asc()).all()
+    location_ids = [x.id for x in locations]
+    zones = Zone.query.filter(Zone.organization_id == user.organization_id, or_(
+        Zone.team_id == team.id, Zone.location_id.in_(location_ids or [-1]))).order_by(Zone.name.asc()).all()
+    types = [row[0] for row in db.session.query(Operation.task_type).filter(
+        Operation.organization_id == user.organization_id,
+        Operation.id.in_([op.id for op in scoped_ops.with_entities(Operation.id).all()] or [-1])
+    ).distinct().order_by(Operation.task_type).all() if row[0]]
+    return jsonify({"team":{"id":team.id,"name":team.name},
+        "staff":[{"id":x.id,"name":x.full_name,"email":x.email,"avatar_url":x.avatar_url} for x in staff],
+        "locations":[{"id":x.id,"name":x.name} for x in locations],
+        "zones":[{"id":x.id,"name":x.name,"location_id":x.location_id} for x in zones],
+        "operation_types":[{"id":x,"name":x} for x in types],
+        "formats":sorted(FORMATS),"retention_days":RETENTION_DAYS}),200
+
+
+@reports_bp.post("/supervisor/preview")
+@roles_required("Supervisor")
+def supervisor_preview_report():
+    user = get_current_user()
+    try:
+        report = _supervisor_report_rows(user, request.get_json(silent=True) or {})
+    except PermissionError as exc: return jsonify({"error":str(exc)}),403
+    except ValueError as exc: return jsonify({"error":str(exc)}),400
+    return jsonify({k:v for k,v in report.items() if k!="rows"} | {
+        "headers":report["headers"],"rows":[[_clean(v) for v in row] for row in report["rows"][:100]],
+        "preview_truncated":report["row_count"]>100}),200
+
+
+@reports_bp.post("/supervisor/generate")
+@roles_required("Supervisor")
+def supervisor_generate_report():
+    user=get_current_user()
+    payload=request.get_json(silent=True) or {}
+    name=str(payload.get("name") or "").strip()
+    if not name or len(name)>180:return jsonify({"error":"Enter a report name up to 180 characters."}),400
+    file_format=str(payload.get("format") or "pdf").lower()
+    if file_format=="excel":file_format="xlsx"
+    if file_format not in FORMATS:return jsonify({"error":"Choose PDF, CSV or XLSX."}),400
+    try:
+        report=_supervisor_report_rows(user,payload)
+        file_bytes=_render_file(report,file_format,name)
+    except PermissionError as exc:return jsonify({"error":str(exc)}),403
+    except ValueError as exc:return jsonify({"error":str(exc)}),400
+    now=datetime.now(timezone.utc)
+    db.session.query(ReportArtifact).filter(ReportArtifact.expires_at<=now).delete(synchronize_session=False)
+    used=db.session.query(db.func.coalesce(db.func.sum(ReportArtifact.file_size),0)).filter(
+        ReportArtifact.organization_id==user.organization_id,ReportArtifact.expires_at>now).scalar() or 0
+    if used+len(file_bytes)>ORG_QUOTA_BYTES:
+        return jsonify({"error":"The organisation's report storage allowance is full. Download or remove older reports before generating another."}),413
+    artifact=ReportArtifact(organization_id=user.organization_id,created_by_id=user.id,name=name,
+        report_type=report["report_type"],file_format=file_format,mime_type=MIME[file_format],
+        file_size=len(file_bytes),filters=report["filters"],file_bytes=file_bytes,
+        created_at=now,expires_at=now+timedelta(days=RETENTION_DAYS))
+    db.session.add(artifact);db.session.flush()
+    _audit(user,"report.generated",artifact,{"name":name,"format":file_format,"rows":report["row_count"],
+        "filters":report["filters"],"team_id":report["filters"]["team_id"]})
+    db.session.commit()
+    return jsonify({"report":artifact.to_dict(),"row_count":report["row_count"],
+        "download_url":"/api/reports/supervisor/"+str(artifact.id)+"/download",
+        "retention_days":RETENTION_DAYS}),201
+
+
+@reports_bp.get("/supervisor/history")
+@roles_required("Supervisor")
+def supervisor_report_history():
+    user=get_current_user();now=datetime.now(timezone.utc)
+    db.session.query(ReportArtifact).filter(ReportArtifact.expires_at<=now).delete(synchronize_session=False)
+    db.session.commit()
+    rows=ReportArtifact.query.filter_by(organization_id=user.organization_id,created_by_id=user.id).order_by(
+        ReportArtifact.created_at.desc()).limit(100).all()
+    return jsonify({"reports":[r.to_dict() for r in rows],"retention_days":RETENTION_DAYS}),200
+
+
+@reports_bp.get("/supervisor/<int:report_id>/download")
+@roles_required("Supervisor")
+def supervisor_download_report(report_id):
+    user=get_current_user();artifact=_supervisor_artifact_or_none(user,report_id)
+    if artifact is None:return jsonify({"error":"Report not found, expired, or you do not have access."}),404
+    _audit(user,"report.downloaded",artifact,{"format":artifact.file_format});db.session.commit()
+    safe_name=re.sub(r"[^A-Za-z0-9._-]+","-",unicodedata.normalize("NFKD",artifact.name)).strip("-._")[:100] or "mechnar-report"
+    suffix={"xlsx":".xlsx","csv":".csv","pdf":".pdf"}[artifact.file_format]
+    response=make_response(artifact.file_bytes)
+    response.headers["Content-Type"]=artifact.mime_type
+    response.headers["Content-Disposition"]='attachment; filename="'+safe_name+suffix+'"'
+    response.headers["Cache-Control"]="private, no-store"
+    response.headers["X-Content-Type-Options"]="nosniff"
+    return response
