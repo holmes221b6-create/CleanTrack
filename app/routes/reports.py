@@ -380,7 +380,7 @@ def _supervisor_report_context(user):
 
 
 def _supervisor_report_rows(user, payload):
-    from sqlalchemy import func
+    from sqlalchemy import func, and_, or_
     from app.models.operation import Operation
     from app.models.operation_execution import OperationExecution
     from app.models.location import Location
@@ -624,3 +624,55 @@ def supervisor_download_report(report_id):
     response.headers["Cache-Control"]="private, no-store"
     response.headers["X-Content-Type-Options"]="nosniff"
     return response
+
+
+@reports_bp.post("/supervisor/<int:report_id>/share")
+@roles_required("Supervisor")
+def supervisor_share_report(report_id):
+    from app.models.personnel_chat import PersonnelConversation, PersonnelMessage
+    from app.models.team_member import TeamMember
+    from app.models.user import User
+    user=get_current_user()
+    artifact=_supervisor_artifact_or_none(user,report_id)
+    if artifact is None:
+        return jsonify({"error":"Report not found, expired, or you do not have access."}),404
+    payload=request.get_json(silent=True) or {}
+    try:
+        staff_id=int(payload.get("staff_id"))
+    except (TypeError,ValueError):
+        return jsonify({"error":"Select a valid Staff member."}),400
+    try:
+        team, staff_rows, _ = _supervisor_report_context(user)
+    except PermissionError as exc:
+        return jsonify({"error":str(exc)}),403
+    recipient=next((row for row in staff_rows if row.id==staff_id),None)
+    if recipient is None:
+        return jsonify({"error":"This Staff member is not part of your active team."}),403
+    conversation=PersonnelConversation.query.filter_by(
+        organization_id=user.organization_id,supervisor_id=user.id,staff_id=recipient.id).first()
+    if conversation is None:
+        conversation=PersonnelConversation(organization_id=user.organization_id,
+            supervisor_id=user.id,staff_id=recipient.id)
+        db.session.add(conversation)
+        db.session.flush()
+    conversation.supervisor_deleted_at=None
+    extension={"pdf":".pdf","csv":".csv","xlsx":".xlsx"}.get(artifact.file_format,".bin")
+    filename=re.sub(r"[^A-Za-z0-9._-]+","-",unicodedata.normalize("NFKD",artifact.name)).strip("-._")[:90] or "mechnar-report"
+    filename += extension
+    caption=str(payload.get("message") or "").strip()[:1000]
+    body=caption or ("Shared report: "+artifact.name)
+    mime=artifact.mime_type
+    message=PersonnelMessage(conversation_id=conversation.id,organization_id=user.organization_id,
+        sender_id=user.id,recipient_id=recipient.id,body=body,
+        attachment_filename=filename,attachment_content_type=mime,
+        attachment_size=artifact.file_size,attachment_kind="file",attachment_data=artifact.file_bytes)
+    conversation.updated_at=datetime.now(timezone.utc)
+    db.session.add(message)
+    _audit(user,"report.shared",artifact,{"staff_id":recipient.id,"team_id":team.id,"message_id":None})
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error":"The report could not be shared. No message was sent."}),500
+    return jsonify({"status":"sent","staff_id":recipient.id,"conversation_id":conversation.id,
+        "message_id":message.id,"filename":filename}),201
