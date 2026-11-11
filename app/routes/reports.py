@@ -414,7 +414,12 @@ def _supervisor_report_rows(user, payload):
         "zone_id": zone_id, "status": status or None, "operation_type": operation_type or None}
     start_dt = datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc)
     end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
-    query = scoped_ops.filter(Operation.created_at >= start_dt, Operation.created_at < end_dt)
+    if kind == "reviews":
+        query = scoped_ops.filter(or_(
+            and_(Operation.submitted_at >= start_dt, Operation.submitted_at < end_dt),
+            and_(Operation.reviewed_at >= start_dt, Operation.reviewed_at < end_dt)))
+    else:
+        query = scoped_ops.filter(Operation.created_at >= start_dt, Operation.created_at < end_dt)
     if employee_id: query = query.filter(Operation.assigned_to_id == employee_id)
     if location_id: query = query.filter(Operation.location_id == location_id)
     if zone_id: query = query.filter(Operation.zone_id == zone_id)
