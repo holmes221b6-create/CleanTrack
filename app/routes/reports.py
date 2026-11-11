@@ -645,6 +645,8 @@ def supervisor_share_report(report_id):
     artifact=_supervisor_artifact_or_none(user,report_id)
     if artifact is None:
         return jsonify({"error":"Report not found, expired, or you do not have access."}),404
+    if artifact.file_size > 20 * 1024 * 1024:
+        return jsonify({"error":"This report exceeds the 20 MB Personnel chat attachment limit. Download it and share it through your approved file-sharing workflow."}),413
     payload=request.get_json(silent=True) or {}
     try:
         staff_id=int(payload.get("staff_id"))
