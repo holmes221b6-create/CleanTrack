@@ -696,13 +696,29 @@ def get_operation(operation_id):
     operation.overdue = _operation_is_overdue(operation)
     history = OperationLog.query.filter_by(operation_id=operation.id).order_by(OperationLog.created_at.asc()).all()
     result = operation.to_dict()
-    result["history"] = [entry.to_dict() for entry in history]
+    result["location_name"] = operation.location.name if operation.location else None
+    result["zone_name"] = operation.zone.name if operation.zone else None
+    result["team_name"] = operation.team.name if operation.team else None
+    result["history"] = [
+        {**entry.to_dict(),
+         "actor_name": entry.actor.full_name if entry.actor else None,
+         "actor_role": entry.actor.role if entry.actor else None}
+        for entry in history
+    ]
     evidence = TaskEvidence.query.filter_by(operation_id=operation.id).order_by(TaskEvidence.created_at.asc()).all()
     result["evidence"] = [entry.to_dict() for entry in evidence]
     executions = OperationExecution.query.filter_by(operation_id=operation.id).order_by(
         OperationExecution.attempt_number.asc()
     ).all()
     result["executions"] = [entry.to_dict() for entry in executions]
+    latest_execution = executions[-1] if executions else None
+    if latest_execution:
+        result["started_at"] = latest_execution.started_at.isoformat() if latest_execution.started_at else None
+        result["execution_submitted_at"] = latest_execution.submitted_at.isoformat() if latest_execution.submitted_at else None
+        result["time_taken_minutes"] = (
+            max(0, round((latest_execution.submitted_at - latest_execution.started_at).total_seconds() / 60))
+            if latest_execution.started_at and latest_execution.submitted_at else None
+        )
     return jsonify({"operation": result}), 200
 
 
@@ -1266,6 +1282,9 @@ def supervisor_review_queue():
         if item.assigned_to_id == user.id:
             continue
         row = item.to_dict()
+        row["location_name"] = item.location.name if item.location else None
+        row["zone_name"] = item.zone.name if item.zone else None
+        row["team_name"] = item.team.name if item.team else None
         execution = latest_execution.get(item.id)
         row["execution"] = execution.to_dict() if execution else None
         row["started_at"] = execution.started_at.isoformat() if execution and execution.started_at else None
