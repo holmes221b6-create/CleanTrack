@@ -1260,7 +1260,7 @@ def supervisor_review_queue():
     items = Operation.query.filter(
         Operation.organization_id == user.organization_id,
         Operation.team_id.in_(team_ids),
-        func.lower(Operation.status) == "submitted",
+        func.lower(Operation.status).in_(("submitted", "completed", "rejected")),
         Operation.requires_verification.is_(True),
     ).order_by(Operation.submitted_at.asc(), Operation.created_at.asc()).limit(500).all()
     operation_ids = [item.id for item in items]
@@ -1268,7 +1268,7 @@ def supervisor_review_queue():
     if operation_ids:
         executions = OperationExecution.query.filter(
             OperationExecution.operation_id.in_(operation_ids),
-            OperationExecution.status == "Submitted",
+            func.lower(OperationExecution.status).in_(("submitted", "completed", "rejected")),
         ).order_by(OperationExecution.attempt_number.desc(), OperationExecution.created_at.desc()).all()
         for execution in executions:
             latest_execution.setdefault(execution.operation_id, execution)
