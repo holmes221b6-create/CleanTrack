@@ -1,4 +1,8 @@
 from datetime import datetime, timezone
+from email.message import EmailMessage
+import os
+import smtplib
+import ssl
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO
 from uuid import uuid4
@@ -147,6 +151,43 @@ def _log(operation, actor, action, previous_status, message=None, details=None):
         ip_address=request.remote_addr if has_request_context() else None,
         user_agent=(request.headers.get("User-Agent", "")[:300] or None) if has_request_context() else None,
     ))
+
+
+def _send_review_email(recipient, operation, decision, feedback):
+    """Send a review outcome email when SMTP is configured; never undo a saved review."""
+    sender = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or "").strip()
+    password = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or "").replace(" ", "").strip()
+    if not sender or not password or not recipient:
+        return "not_configured"
+    approved = decision == "approve"
+    subject = ("Work approved: " if approved else "Corrections required: ") + (operation.title or "Submitted operation")
+    greeting = "Your submitted work has been approved." if approved else "Your submitted work needs correction."
+    body = (
+        f"Hello {recipient.full_name or 'there'},\n\n{greeting}\n\n"
+        f"Operation: {operation.title}\n"
+        f"Decision: {'Approved' if approved else 'Rejected'}\n"
+        f"Supervisor message: {feedback or ('The work has been approved.' if approved else 'Please review the required corrections in MECHNAR.')}\n\n"
+        "You can open MECHNAR to view the review and, if required, correct and resubmit the work.\n\n"
+        "— MECHNAR"
+    )
+    message = EmailMessage()
+    message["From"] = os.getenv("MAIL_DEFAULT_SENDER", sender).strip()
+    message["To"] = recipient.email
+    message["Subject"] = subject[:180]
+    message.set_content(body)
+    try:
+        host = (os.getenv("SMTP_HOST") or "smtp.gmail.com").strip()
+        port = int(os.getenv("SMTP_PORT") or "587")
+        with smtplib.SMTP(host, port, timeout=20) as server:
+            server.ehlo()
+            server.starttls(context=ssl.create_default_context())
+            server.ehlo()
+            server.login(sender, password)
+            server.send_message(message)
+        return "sent"
+    except Exception as exc:
+        current_app.logger.warning("Review email delivery failed (%s).", type(exc).__name__)
+        return "failed"
 
 
 def _operation_is_overdue(operation, now=None):
@@ -1209,6 +1250,128 @@ def submit_operation(operation_id):
     }), 200
 
 
+@operations_bp.post("/bulk-review")
+@roles_required("Supervisor")
+def bulk_review_operations():
+    user = get_current_user()
+    data = request.get_json(silent=True) or {}
+    operation_ids = data.get("operation_ids")
+    feedback = data.get("feedback", "")
+    if not isinstance(operation_ids, list) or not operation_ids or len(operation_ids) > 50:
+        return jsonify({"error": "Select between 1 and 50 submissions for bulk approval."}), 400
+    if any(isinstance(value, bool) for value in operation_ids):
+        return jsonify({"error": "Every selected operation ID must be an integer."}), 400
+    try:
+        ids = [int(value) for value in operation_ids]
+    except (TypeError, ValueError):
+        return jsonify({"error": "Every selected operation ID must be an integer."}), 400
+    if any(value <= 0 for value in ids) or len(set(ids)) != len(ids):
+        return jsonify({"error": "Selected operation IDs must be unique positive integers."}), 400
+    if not isinstance(feedback, str) or len(feedback) > 2000:
+        return jsonify({"error": "The approval message must be text of at most 2,000 characters."}), 400
+    feedback = feedback.strip()
+    team_ids = _team_ids(user)
+    if not team_ids:
+        return jsonify({"error": "You do not have an active team to review."}), 403
+
+    operations = Operation.query.filter(
+        Operation.id.in_(ids),
+        Operation.organization_id == user.organization_id,
+    ).all()
+    by_id = {item.id: item for item in operations}
+    if len(by_id) != len(ids):
+        return jsonify({"error": "One or more selected submissions are unavailable in your team."}), 404
+
+    executions_by_operation = {}
+    evidence_by_execution = {}
+    for operation_id in ids:
+        operation = by_id[operation_id]
+        if not _visible(operation, user) or not _can_manage(operation, user) or operation.team_id not in team_ids:
+            return jsonify({"error": "Bulk review is restricted to submissions assigned to your own team."}), 403
+        if operation.assigned_to_id == user.id:
+            return jsonify({"error": "You cannot approve your own submitted work."}), 403
+        if operation.status.lower() != "submitted" or not operation.requires_verification:
+            return jsonify({"error": "Bulk approval only accepts submissions currently awaiting required verification."}), 409
+        execution = OperationExecution.query.filter_by(
+            operation_id=operation.id, status="Submitted"
+        ).order_by(OperationExecution.attempt_number.desc()).first()
+        if execution is None:
+            return jsonify({"error": "A selected submission has no execution record. Review it individually after checking its history."}), 409
+        expected = operation.checklist if isinstance(operation.checklist, list) else []
+        results = execution.checklist_results if isinstance(execution.checklist_results, list) else []
+        completed_items = {row.get("item") for row in results if isinstance(row, dict) and row.get("completed") is True}
+        if any(item not in completed_items for item in expected):
+            return jsonify({"error": "Bulk approval stopped: at least one submission has an incomplete required checklist. Review it individually."}), 409
+        evidence = TaskEvidence.query.filter(
+            TaskEvidence.operation_id == operation.id,
+            (TaskEvidence.execution_id == execution.id) | (TaskEvidence.execution_id.is_(None)),
+        ).all()
+        types = {row.evidence_type for row in evidence}
+        stages = {row.stage for row in evidence if row.evidence_type == "photo"}
+        required = operation.required_evidence if isinstance(operation.required_evidence, list) else []
+        missing = (
+            ("photo" in required and "photo" not in types)
+            or ("before_photo" in required and "before" not in stages)
+            or ("after_photo" in required and "after" not in stages)
+            or ("document" in required and "document" not in types)
+            or ("note" in required and not (execution.completion_notes or "").strip())
+        )
+        if missing:
+            return jsonify({"error": "Bulk approval stopped: required evidence is missing from at least one selected submission. Review it individually."}), 409
+        executions_by_operation[operation.id] = execution
+
+    now = datetime.now(timezone.utc)
+    try:
+        for operation_id in ids:
+            operation = by_id[operation_id]
+            execution = executions_by_operation[operation_id]
+            previous = operation.status
+            operation.status = "Completed"
+            operation.review_feedback = feedback or None
+            operation.reviewed_at = now
+            execution.status = "Completed"
+            execution.verified_by_id = user.id
+            execution.verified_at = now
+            execution.review_feedback = feedback or None
+            _log(operation, user, "verified", previous, feedback or "Approved through controlled bulk review.", {
+                "reviewed_by_id": user.id,
+                "reviewed_at": now.isoformat(),
+                "decision": "approve",
+                "execution_id": execution.id,
+                "execution_attempt": execution.attempt_number,
+                "bulk_review": True,
+            })
+            if operation.assigned_to_id:
+                db.session.add(Notification(
+                    recipient_id=operation.assigned_to_id,
+                    organization_id=operation.organization_id,
+                    title="Work approved",
+                    message=feedback or "Your submitted work has been approved.",
+                    notification_type="operation_review",
+                    resource_type="operation",
+                    resource_id=str(operation.id),
+                ))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Bulk operation review failed.")
+        return jsonify({"error": "The bulk review could not be saved. No selected submission was approved."}), 500
+
+    email_results = []
+    for operation_id in ids:
+        operation = by_id[operation_id]
+        recipient = db.session.get(User, operation.assigned_to_id) if operation.assigned_to_id else None
+        email_results.append(_send_review_email(recipient, operation, "approve", feedback))
+    sent = email_results.count("sent")
+    return jsonify({
+        "message": f"{len(ids)} submissions approved.",
+        "approved_ids": ids,
+        "email_delivery": "sent" if sent == len(ids) else ("not_configured" if all(x == "not_configured" for x in email_results) else "partial_or_failed"),
+        "email_sent_count": sent,
+        "email_total": len(ids),
+    }), 200
+
+
 @operations_bp.post("/<int:operation_id>/review")
 @roles_required("Admin", "Supervisor")
 def review_operation(operation_id):
@@ -1285,12 +1448,14 @@ def review_operation(operation_id):
     except Exception:
         db.session.rollback()
         return jsonify({"error": "Could not save operation review."}), 500
+    recipient = db.session.get(User, operation.assigned_to_id) if operation.assigned_to_id else None
+    email_delivery = _send_review_email(recipient, operation, decision, feedback)
     return jsonify({
         "message": "Operation verified and completed." if decision == "approve" else "Operation rejected. The assignee can correct the work and resubmit it.",
         "operation": operation.to_dict(),
         "execution": execution.to_dict(),
         "employee_notification": "created" if operation.assigned_to_id else "not_available",
-        "email_delivery": "not_configured",
+        "email_delivery": email_delivery,
     }), 200
 
 
