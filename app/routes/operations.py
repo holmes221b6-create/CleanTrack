@@ -1307,8 +1307,8 @@ def bulk_review_operations():
         return jsonify({"error": "Every selected operation ID must be an integer."}), 400
     if any(value <= 0 for value in ids) or len(set(ids)) != len(ids):
         return jsonify({"error": "Selected operation IDs must be unique positive integers."}), 400
-    if not isinstance(feedback, str) or len(feedback) > 2000:
-        return jsonify({"error": "The approval message must be text of at most 2,000 characters."}), 400
+    if not isinstance(feedback, str) or len(feedback) > 1000:
+        return jsonify({"error": "The approval message must be text of at most 1,000 characters."}), 400
     feedback = feedback.strip()
     team_ids = _team_ids(user)
     if not team_ids:
@@ -1432,8 +1432,8 @@ def review_operation(operation_id):
     feedback = data.get("feedback", "")
     if not isinstance(decision, str) or decision.strip().lower() not in {"approve", "reject"}:
         return jsonify({"error": "Decision must be approve or reject."}), 400
-    if not isinstance(feedback, str):
-        return jsonify({"error": "Feedback must be text."}), 400
+    if not isinstance(feedback, str) or len(feedback) > 1000:
+        return jsonify({"error": "Feedback must be text of at most 1,000 characters."}), 400
     decision = decision.strip().lower()
     feedback = feedback.strip()
     if decision == "reject" and not feedback:
