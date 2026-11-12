@@ -154,40 +154,28 @@ def _log(operation, actor, action, previous_status, message=None, details=None):
 
 
 def _send_review_email(recipient, operation, decision, feedback):
-    """Send a review outcome email when SMTP is configured; never undo a saved review."""
-    sender = (os.getenv("SMTP_EMAIL") or os.getenv("GMAIL_SENDER") or "").strip()
-    password = (os.getenv("SMTP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD") or "").replace(" ", "").strip()
-    if not sender or not password or not recipient:
-        return "not_configured"
+    """Send review outcomes through the application's configured transactional email providers."""
+    if recipient is None or not recipient.email:
+        return "not_available"
+    from app.routes.auth import _send_mechnar_email
+
     approved = decision == "approve"
     subject = ("Work approved: " if approved else "Corrections required: ") + (operation.title or "Submitted operation")
-    greeting = "Your submitted work has been approved." if approved else "Your submitted work needs correction."
-    body = (
-        f"Hello {recipient.full_name or 'there'},\n\n{greeting}\n\n"
+    outcome = "approved" if approved else "rejected and returned for correction"
+    message = feedback or (
+        "Your work has been approved. Thank you."
+        if approved else
+        "Please open MECHNAR to review the required corrections and resubmit your work."
+    )
+    text_body = (
+        f"Hello {recipient.full_name or 'there'},\n\n"
+        f"Your submitted work has been {outcome}.\n\n"
         f"Operation: {operation.title}\n"
-        f"Decision: {'Approved' if approved else 'Rejected'}\n"
-        f"Supervisor message: {feedback or ('The work has been approved.' if approved else 'Please review the required corrections in MECHNAR.')}\n\n"
-        "You can open MECHNAR to view the review and, if required, correct and resubmit the work.\n\n"
+        f"Supervisor message: {message}\n\n"
+        "You can sign in to MECHNAR to view the decision and the operation history.\n\n"
         "— MECHNAR"
     )
-    message = EmailMessage()
-    message["From"] = os.getenv("MAIL_DEFAULT_SENDER", sender).strip()
-    message["To"] = recipient.email
-    message["Subject"] = subject[:180]
-    message.set_content(body)
-    try:
-        host = (os.getenv("SMTP_HOST") or "smtp.gmail.com").strip()
-        port = int(os.getenv("SMTP_PORT") or "587")
-        with smtplib.SMTP(host, port, timeout=20) as server:
-            server.ehlo()
-            server.starttls(context=ssl.create_default_context())
-            server.ehlo()
-            server.login(sender, password)
-            server.send_message(message)
-        return "sent"
-    except Exception as exc:
-        current_app.logger.warning("Review email delivery failed (%s).", type(exc).__name__)
-        return "failed"
+    return "sent" if _send_mechnar_email(recipient.email, subject, text_body) else "failed"
 
 
 def _operation_is_overdue(operation, now=None):
