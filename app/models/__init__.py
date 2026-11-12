@@ -8,6 +8,7 @@ from app.models.invitation import Invitation
 from app.models.location import Location
 from app.models.location_floor_plan import LocationFloorPlan
 from app.models.membership_request import MembershipRequest
+from app.models.maintenance_request import MaintenanceRequest
 from app.models.notification import Notification
 from app.models.operation import Operation
 from app.models.operation_execution import OperationExecution
@@ -34,6 +35,7 @@ __all__ = [
     "Location",
     "LocationFloorPlan",
     "MembershipRequest",
+    "MaintenanceRequest",
     "Notification",
     "Operation",
     "OperationalIncident",
