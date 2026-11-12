@@ -1,8 +1,4 @@
 from datetime import datetime, timezone
-from email.message import EmailMessage
-import os
-import smtplib
-import ssl
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO
 from uuid import uuid4
