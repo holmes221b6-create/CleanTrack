@@ -1250,6 +1250,46 @@ def submit_operation(operation_id):
     }), 200
 
 
+@operations_bp.get("/review-queue")
+@roles_required("Supervisor")
+def supervisor_review_queue():
+    user = get_current_user()
+    team_ids = _team_ids(user)
+    if not team_ids:
+        return jsonify({"operations": [], "count": 0, "message": "No active team is assigned to this Supervisor."}), 200
+    items = Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        Operation.team_id.in_(team_ids),
+        func.lower(Operation.status) == "submitted",
+        Operation.requires_verification.is_(True),
+    ).order_by(Operation.submitted_at.asc(), Operation.created_at.asc()).limit(500).all()
+    operation_ids = [item.id for item in items]
+    latest_execution = {}
+    if operation_ids:
+        executions = OperationExecution.query.filter(
+            OperationExecution.operation_id.in_(operation_ids),
+            OperationExecution.status == "Submitted",
+        ).order_by(OperationExecution.attempt_number.desc(), OperationExecution.created_at.desc()).all()
+        for execution in executions:
+            latest_execution.setdefault(execution.operation_id, execution)
+    result = []
+    for item in items:
+        # A Supervisor may not review work they personally performed.
+        if item.assigned_to_id == user.id:
+            continue
+        row = item.to_dict()
+        execution = latest_execution.get(item.id)
+        row["execution"] = execution.to_dict() if execution else None
+        row["started_at"] = execution.started_at.isoformat() if execution and execution.started_at else None
+        row["execution_submitted_at"] = execution.submitted_at.isoformat() if execution and execution.submitted_at else row.get("submitted_at")
+        row["time_taken_minutes"] = (
+            max(0, round((execution.submitted_at - execution.started_at).total_seconds() / 60))
+            if execution and execution.started_at and execution.submitted_at else None
+        )
+        result.append(row)
+    return jsonify({"operations": result, "count": len(result)}), 200
+
+
 @operations_bp.post("/bulk-review")
 @roles_required("Supervisor")
 def bulk_review_operations():
