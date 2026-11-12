@@ -524,14 +524,24 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None, reset_cod
 
     attempted_provider = False
 
-    # Preferred zero-subscription HTTPS relay (Google Apps Script -> Gmail).
+    # Google Apps Script is the selected MECHNAR transactional mail provider.
+    # Do not silently fall back after a relay error: the request may have reached
+    # Gmail even if the HTTP response was lost, and a fallback could send duplicates.
     mail_webapp_url = configured_value("MECHNAR_MAIL_WEBAPP_URL")
     mail_secret = configured_value("MECHNAR_SECRET")
-    if mail_webapp_url and mail_secret:
-        attempted_provider = True
+    if mail_webapp_url or mail_secret:
+        if not mail_webapp_url or not mail_secret:
+            current_app.logger.error(
+                "Google Apps Script relay requires both MECHNAR_MAIL_WEBAPP_URL and MECHNAR_SECRET."
+            )
+            return False
         try:
             payload = json.dumps({
                 "email": recipient,
+                "to": recipient,
+                "from": configured_value(
+                    "MECHNAR_MAIL_FROM_EMAIL", default="mail.mechnar.business@gmail.com"
+                ),
                 "subject": subject,
                 "text": text_body,
                 "html": html_body or "",
@@ -542,18 +552,15 @@ def _send_mechnar_email(recipient, subject, text_body, html_body=None, reset_cod
                 mail_webapp_url, data=payload,
                 headers={"Content-Type": "application/json"}, method="POST",
             )
-            with urllib.request.urlopen(req, timeout=8) as response:
+            with urllib.request.urlopen(req, timeout=25) as response:
                 result = json.loads(response.read().decode("utf-8"))
             if result.get("success") is True:
-                current_app.logger.info("MECHNAR transactional email accepted by Google Apps Script.")
+                current_app.logger.info("MECHNAR email accepted by Google Apps Script.")
                 return True
-            current_app.logger.error("Google Apps Script rejected a MECHNAR transactional email.")
+            current_app.logger.error("Google Apps Script returned an unsuccessful email response.")
         except Exception:
-            current_app.logger.exception("Google Apps Script email delivery failed; trying the next configured provider.")
-    elif mail_webapp_url or mail_secret:
-        current_app.logger.warning(
-            "Google Apps Script email relay is only partially configured; trying other providers."
-        )
+            current_app.logger.exception("Google Apps Script email delivery failed.")
+        return False
 
     # Resend uses HTTPS and is compatible with Render's free web-service network policy.
     api_key = configured_value("RESEND_API_KEY")
