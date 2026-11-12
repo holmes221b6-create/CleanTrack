@@ -1419,6 +1419,10 @@ def review_operation(operation_id):
     operation = db.session.get(Operation, operation_id)
     if not _visible(operation, user) or not _can_manage(operation, user):
         return jsonify({"error": "Operation not found or not permitted for review."}), 404
+    if user.role == "Supervisor" and operation.team_id not in _team_ids(user):
+        return jsonify({"error": "Supervisors can review submissions belonging only to their own team."}), 403
+    if not operation.requires_verification:
+        return jsonify({"error": "This operation was not configured to require Supervisor verification."}), 409
     if user.id == operation.assigned_to_id:
         return jsonify({"error": "An assignee cannot verify their own work."}), 403
     if operation.status.lower() != "submitted":
