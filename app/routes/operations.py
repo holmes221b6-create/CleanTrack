@@ -9,6 +9,7 @@ from sqlalchemy import func, or_
 
 from app.extensions import db
 from app.models.operation import Operation
+from app.models.maintenance_request import MaintenanceRequest
 from app.models.operation_execution import OperationExecution
 from app.models.operation_log import OperationLog
 from app.models.audit_log import AuditLog
@@ -1347,6 +1348,123 @@ def organization_audit_history():
 
 # Supervisor-only blocker handling is exposed through Operations so managers can
 # resolve operational issues without mixing them into the Admin/Supervisor work queue.
+
+
+@operations_bp.route("/maintenance-requests", methods=["GET", "POST"])
+@roles_required("Admin", "Supervisor")
+def maintenance_requests_collection():
+    user = get_current_user()
+    if request.method == "GET":
+        query = MaintenanceRequest.query.filter_by(organization_id=user.organization_id)
+        if user.role == "Supervisor":
+            team_ids = _team_ids(user)
+            if not team_ids:
+                return jsonify({"items": []})
+            query = query.filter(MaintenanceRequest.team_id.in_(team_ids))
+        items = query.order_by(MaintenanceRequest.created_at.desc()).limit(300).all()
+        return jsonify({"items": [item.to_dict() for item in items]})
+
+    if user.role != "Supervisor":
+        return jsonify({"error": "Maintenance requests must be raised by a Supervisor."}), 403
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title") or "").strip()
+    description = str(data.get("description") or "").strip()
+    issue_type = str(data.get("issue_type") or "General repair").strip()
+    priority = str(data.get("priority") or "Normal").strip().title()
+    asset_reference = str(data.get("asset_reference") or "").strip()
+    if not title or len(title) > 180:
+        return jsonify({"error": "Enter an issue title (maximum 180 characters)."}), 400
+    if not description or len(description) > 5000:
+        return jsonify({"error": "Describe the problem (maximum 5,000 characters)."}), 400
+    if issue_type not in {"Electrical", "Plumbing", "HVAC", "Furniture", "Building / facility", "Equipment", "IT / network", "General repair", "Other"}:
+        return jsonify({"error": "Choose a valid issue type."}), 400
+    if priority not in {"Low", "Normal", "High", "Urgent"}:
+        return jsonify({"error": "Choose a valid priority."}), 400
+    team_id, error = _parse_id(data, "team_id")
+    if error or not team_id:
+        return jsonify({"error": error or "Select the responsible team."}), 400
+    location_id, error = _parse_id(data, "location_id")
+    if error:
+        return jsonify({"error": error}), 400
+    zone_id, error = _parse_id(data, "zone_id")
+    if error:
+        return jsonify({"error": error}), 400
+    scope_error = _team_context(team_id, location_id, zone_id, user)
+    if scope_error:
+        return jsonify({"error": scope_error}), 403
+    item = MaintenanceRequest(
+        organization_id=user.organization_id,
+        team_id=team_id,
+        location_id=location_id,
+        zone_id=zone_id,
+        requested_by_id=user.id,
+        title=title,
+        issue_type=issue_type,
+        description=description,
+        priority=priority,
+        asset_reference=asset_reference[:160] or None,
+        safety_impact=bool(data.get("safety_impact")),
+        status="Awaiting Admin review",
+    )
+    db.session.add(item)
+    db.session.flush()
+    db.session.add(AuditLog(
+        actor_id=user.id,
+        organization_id=user.organization_id,
+        action="maintenance.requested",
+        resource_type="MaintenanceRequest",
+        resource_id=str(item.id),
+        details={"title": item.title, "priority": item.priority, "team_id": item.team_id},
+        ip_address=request.remote_addr,
+        user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+    ))
+    db.session.commit()
+    return jsonify({"message": "Maintenance request sent to the organization Admin.", "request": item.to_dict()}), 201
+
+
+@operations_bp.patch("/maintenance-requests/<int:request_id>")
+@roles_required("Admin")
+def review_maintenance_request(request_id):
+    user = get_current_user()
+    item = MaintenanceRequest.query.filter_by(
+        id=request_id, organization_id=user.organization_id
+    ).first()
+    if item is None:
+        return jsonify({"error": "Maintenance request not found."}), 404
+    data = request.get_json(silent=True) or {}
+    decision = str(data.get("decision") or "").strip().lower()
+    note = str(data.get("admin_note") or "").strip()
+    allowed = {
+        "approve": "Approved — arranging repair",
+        "reject": "Rejected",
+        "in_progress": "Repair in progress",
+        "complete": "Completed",
+    }
+    if decision not in allowed:
+        return jsonify({"error": "Choose a valid Admin decision."}), 400
+    if decision == "reject" and not note:
+        return jsonify({"error": "Add a reason before rejecting this request."}), 400
+    if item.status == "Rejected" or item.status == "Completed":
+        return jsonify({"error": "This maintenance request is already closed."}), 409
+    previous = item.status
+    item.status = allowed[decision]
+    item.admin_note = note[:3000] or item.admin_note
+    item.reviewed_by_id = user.id
+    item.reviewed_at = datetime.now(timezone.utc)
+    db.session.add(AuditLog(
+        actor_id=user.id,
+        organization_id=user.organization_id,
+        action="maintenance." + decision,
+        resource_type="MaintenanceRequest",
+        resource_id=str(item.id),
+        details={"title": item.title, "previous_status": previous, "new_status": item.status, "admin_note": item.admin_note},
+        ip_address=request.remote_addr,
+        user_agent=(request.headers.get("User-Agent", "")[:300] or None),
+    ))
+    db.session.commit()
+    return jsonify({"message": "Maintenance request updated.", "request": item.to_dict()})
+
+
 @operations_bp.route("/blockers", methods=["GET", "POST"])
 @roles_required("Supervisor")
 def supervisor_operation_blockers():
