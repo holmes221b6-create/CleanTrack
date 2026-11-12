@@ -1408,6 +1408,19 @@ def maintenance_requests_collection():
     )
     db.session.add(item)
     db.session.flush()
+    admins = User.query.filter_by(
+        organization_id=user.organization_id, role="Admin", account_status="active"
+    ).all()
+    for admin in admins:
+        db.session.add(Notification(
+            recipient_id=admin.id,
+            organization_id=user.organization_id,
+            title="New maintenance request",
+            message=f"{user.full_name} reported: {item.title} ({item.priority} priority).",
+            notification_type="maintenance_request",
+            resource_type="MaintenanceRequest",
+            resource_id=str(item.id),
+        ))
     db.session.add(AuditLog(
         actor_id=user.id,
         organization_id=user.organization_id,
