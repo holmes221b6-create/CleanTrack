@@ -138,10 +138,16 @@ def create_app(config_class=Config):
                     "contact_email": "VARCHAR(254)",
                     "policy_text": "TEXT",
                     "whatsapp_supervisors_group_url": "VARCHAR(500)",
+                    "role_labels": "JSON",
                 }
                 for column, sql_type in additive_columns.items():
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"))
+                connection.execute(text("""
+                    UPDATE organizations
+                    SET role_labels = CAST('{"Admin":"Admin","Supervisor":"Supervisor","Staff":"Staff"}' AS JSON)
+                    WHERE role_labels IS NULL
+                """))
             if "operations" in tables:
                 operation_columns = {item["name"] for item in inspect(connection).get_columns("operations")}
                 operation_additions = {
