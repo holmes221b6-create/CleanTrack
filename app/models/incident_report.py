@@ -21,6 +21,7 @@ class IncidentReport(db.Model):
     title = db.Column(db.String(180), nullable=False)
     description = db.Column(db.Text, nullable=False)
     report_type = db.Column(db.String(20), nullable=False, default="issue")
+    origin = db.Column(db.String(20), nullable=False, default="staff", index=True)
     category = db.Column(db.String(40), nullable=False, default="other")
     severity = db.Column(db.String(20), nullable=False, default="medium")
     status = db.Column(db.String(30), nullable=False, default="reported", index=True)
@@ -53,6 +54,7 @@ class IncidentReport(db.Model):
             "title": self.title,
             "description": self.description,
             "report_type": self.report_type,
+            "origin": self.origin,
             "category": self.category,
             "severity": self.severity,
             "status": self.status,
