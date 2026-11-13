@@ -28,7 +28,17 @@ def _accessible_zones(user,team,location_ids=None):
  if location_ids is not None: rules.append(Zone.location_id.in_(location_ids))
  return Zone.query.filter(Zone.organization_id==user.organization_id,or_(*rules))
 def _refs(user,team,data):
- op_id=data.get("operation_id") or None; loc_id=data.get("location_id") or None; zone_id=data.get("zone_id") or None
+ def _optional_id(value, label):
+  if value in (None, ""): return None
+  try:
+   parsed=int(value)
+   if parsed <= 0: raise ValueError
+   return parsed
+  except (TypeError, ValueError):
+   raise ValueError("Select a valid "+label+".")
+ op_id=_optional_id(data.get("operation_id"),"operation")
+ loc_id=_optional_id(data.get("location_id"),"location")
+ zone_id=_optional_id(data.get("zone_id"),"zone")
  op=_scoped_operation_query(user).filter(Operation.id==op_id).first() if op_id else None
  if op_id and op is None:raise ValueError("The selected operation is outside your team access.")
  loc=_accessible_locations(user,team).filter(Location.id==loc_id).first() if loc_id else None
@@ -44,8 +54,8 @@ def records_options():
  u=get_current_user();team,err=_team(u)
  if err:return err
  ops=_scoped_operation_query(u).order_by(Operation.created_at.desc()).limit(200).all()
- locs=Location.query.filter_by(organization_id=u.organization_id).order_by(Location.name.asc()).all()
- zones=Zone.query.filter_by(organization_id=u.organization_id).order_by(Zone.name.asc()).all()
+ locs=_accessible_locations(u,team).order_by(Location.name.asc()).all()
+ zones=_accessible_zones(u,team).order_by(Zone.name.asc()).all()
  return jsonify({"operations":[{"id":x.id,"title":x.title} for x in ops],"locations":[{"id":x.id,"name":x.name} for x in locs],"zones":[{"id":x.id,"name":x.name,"location_id":x.location_id} for x in zones]}),200
 @supervisor_records_bp.route("/incidents",methods=["GET","POST"])
 @roles_required("Supervisor")
