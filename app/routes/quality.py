@@ -329,7 +329,6 @@ def inspections_list():
         team,err=_team_scope(user)
         if err:return err
         _import_legacy_inspections(user,team)
-        _import_legacy_inspections(user,team)
         _materialize_team(team.id,user.organization_id)
         rows=_record_query(user,team).order_by(InspectionRecord.scheduled_at.desc()).limit(1000).all()
     elif user.role=="Staff":
