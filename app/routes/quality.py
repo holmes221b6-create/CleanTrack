@@ -92,13 +92,13 @@ def _materialize(schedule, now=None):
             checklist=[dict(x, checked=False) for x in (schedule.checklist_snapshot or [])],
             scheduled_at=due, status="scheduled")
         db.session.add(row)
-        if schedule.assigned_to_id != schedule.created_by_id and schedule.assignee:
-            _notify(schedule.assignee, "Recurring inspection assigned", f"{schedule.title} is due for inspection.", row)
         try:
             db.session.flush()
         except Exception:
             db.session.rollback()
             break
+        if schedule.assigned_to_id != schedule.created_by_id and schedule.assignee:
+            _notify(schedule.assignee, "Recurring inspection assigned", f"{schedule.title} is due for inspection.", row)
         made += 1
         due = _next_due(schedule, due)
         if schedule.recurrence == "once": break
@@ -338,6 +338,7 @@ def schedule_create():
         template_id=template_id,created_by_id=user.id,assigned_to_id=assignee.id,operation_id=oid,
         location_id=lid,zone_id=zid,title=title[:180],checklist=checklist,scheduled_at=due,status="scheduled")
     db.session.add(record)
+    db.session.flush()
     if assignee.id!=user.id:_notify(assignee,"Inspection assigned",f"{title} has been assigned to you.",record)
     db.session.commit()
     return jsonify({"schedule_id":schedule.id,"inspection":record.to_dict()}),201
