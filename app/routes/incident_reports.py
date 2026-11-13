@@ -443,3 +443,21 @@ def download_incident_evidence(attachment_id):
         return jsonify({"error": "You do not have access to this evidence."}), 404
     return send_file(BytesIO(attachment.data), mimetype=attachment.content_type,
         as_attachment=True, download_name=attachment.filename, max_age=0)
+
+
+@incident_reports_bp.post("/staff/incident-reports/<int:report_id>/respond")
+@roles_required("Staff")
+def staff_respond_to_incident_report(report_id):
+    user = get_current_user()
+    report = _query(user).filter_by(id=report_id, reported_by_id=user.id).first_or_404()
+    if report.status != "awaiting_staff_response":
+        return jsonify({"error": "This report is not currently waiting for a Staff response."}), 409
+    note = str((request.get_json(silent=True) or {}).get("response_note") or "").strip()
+    if not note:
+        return jsonify({"error": "Enter a response for your Supervisor."}), 400
+    _event(report, user, "staff_response", "Staff responded to the Supervisor: " + note[:3500])
+    report.status = "in_progress"
+    _notify(report.supervisor_id, user.organization_id, "Staff responded to an incident report",
+        user.full_name + " responded to your request on " + report.title + ".", report.id, "incident_staff_response")
+    db.session.commit()
+    return jsonify({"item": report.to_dict()}), 200
