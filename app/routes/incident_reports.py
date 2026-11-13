@@ -136,7 +136,7 @@ def supervisor_acknowledge_resolution(report_id):
     report = _query(user).filter_by(id=report_id, supervisor_id=user.id).first_or_404()
     if not report.staff_resolved_at:
         return jsonify({"error": "The Staff member has not submitted a resolution yet."}), 409
-    if report.forwarded_at and not report.admin_acknowledged_at:
+    if report.forwarded_at and not report.admin_resolution_acknowledged_at:
         return jsonify({"error": "Admin must acknowledge the forwarded resolution update first."}), 409
     if not report.supervisor_acknowledged_at:
         report.supervisor_acknowledged_at = _now()
@@ -199,14 +199,18 @@ def admin_acknowledge_report(report_id):
     report = _query(user).filter_by(id=report_id).first_or_404()
     if not report.forwarded_at:
         return jsonify({"error": "Only reports forwarded to Admin can be acknowledged here."}), 409
-    if not report.admin_acknowledged_at:
-        report.admin_acknowledged_at, report.admin_acknowledged_by_id = _now(), user.id
-        _event(report, user, "admin_acknowledged", "Admin acknowledged the forwarded report/update.")
-        if report.staff_resolved_at:
+    if report.staff_resolved_at:
+        if not report.admin_resolution_acknowledged_at:
+            report.admin_resolution_acknowledged_at = _now()
+            report.admin_resolution_acknowledged_by_id = user.id
+            _event(report, user, "admin_resolution_acknowledged", "Admin acknowledged the Staff resolution update.")
             report.supervisor_acknowledged_at = _now()
             report.status = "resolved"
             _event(report, user, "supervisor_copy_closed", "Admin acknowledged the Staff resolution; Supervisor active copy is now closed.")
-        else:
-            report.status = "forwarded_acknowledged"
+            db.session.commit()
+    elif not report.admin_acknowledged_at:
+        report.admin_acknowledged_at, report.admin_acknowledged_by_id = _now(), user.id
+        report.status = "forwarded_acknowledged"
+        _event(report, user, "admin_acknowledged", "Admin acknowledged the forwarded report.")
         db.session.commit()
     return jsonify({"item": report.to_dict()}), 200
