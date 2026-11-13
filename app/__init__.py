@@ -208,6 +208,15 @@ def create_app(config_class=Config):
                 if "attachment_data" not in message_columns:
                     blob_type = "BYTEA" if connection.dialect.name == "postgresql" else "BLOB"
                     connection.execute(text(f"ALTER TABLE personnel_messages ADD COLUMN attachment_data {blob_type}"))
+            if "incident_reports" in tables:
+                incident_columns = {item["name"] for item in inspect(connection).get_columns("incident_reports")}
+                incident_additions = {
+                    "admin_resolution_acknowledged_at": "TIMESTAMP WITH TIME ZONE",
+                    "admin_resolution_acknowledged_by_id": "INTEGER REFERENCES users(id)",
+                }
+                for column, sql_type in incident_additions.items():
+                    if column not in incident_columns:
+                        connection.execute(text(f"ALTER TABLE incident_reports ADD COLUMN {column} {sql_type}"))
             if "announcements" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("announcements")}
                 had_status = "status" in columns
