@@ -72,6 +72,8 @@ class User(db.Model):
             "preferences": self.preferences or {},
             "skills": self.skills or [],
             "role": self.role,
+            "role_label": ((self.organization.role_labels or {}).get(self.role, self.role) if self.organization is not None else self.role),
+            "organization_role_labels": (self.organization.role_labels or {"Admin": "Admin", "Supervisor": "Supervisor", "Staff": "Staff"}) if self.organization is not None else {"Admin": "Admin", "Supervisor": "Supervisor", "Staff": "Staff"},
             "account_status": self.account_status,
             "email_verified": self.email_verified,
             "organization_id": self.organization_id,
