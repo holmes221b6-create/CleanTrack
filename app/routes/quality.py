@@ -477,11 +477,37 @@ def quality_analytics():
     pending=[r for r in rows if r.status in {"scheduled","in_progress","submitted","returned"}]
     overdue=[r for r in pending if r.scheduled_at and r.scheduled_at<now]
     item_failures={}
+    location_groups={}
     for r in completed:
+        key=(r.location_id,r.zone_id)
+        group=location_groups.setdefault(key,{"location":r.location.name if r.location else "Unspecified location",
+            "zone":r.zone.name if r.zone else "Unspecified zone","completed":0,"passed":0,"failed":0})
+        group["completed"]+=1
+        if r.outcome=="pass":group["passed"]+=1
+        if r.outcome=="fail":group["failed"]+=1
         for item in (r.checklist or []):
-            if not item.get("checked"):item_failures[item.get("label","Unspecified item")]=item_failures.get(item.get("label","Unspecified item"),0)+1
+            if not item.get("checked"):
+                label=item.get("label","Unspecified item")
+                item_failures[label]=item_failures.get(label,0)+1
     recurring=[{"checklist_item":k,"failures":v} for k,v in item_failures.items() if v>=2]
+    by_location=[{**g,"pass_rate":round(g["passed"]/g["completed"]*100,1) if g["completed"] else None}
+        for g in location_groups.values()]
+    trend=[]
+    month_start=now.replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+    for offset in range(5,-1,-1):
+        year=month_start.year;month=month_start.month-offset
+        while month<=0:year-=1;month+=12
+        while month>12:year+=1;month-=12
+        start_month=month_start.replace(year=year,month=month)
+        end_month=start_month.replace(year=year+1,month=1) if month==12 else start_month.replace(month=month+1)
+        subset=[r for r in completed if r.scheduled_at and start_month<=r.scheduled_at<end_month]
+        trend.append({"month":start_month.strftime("%b %Y"),"completed":len(subset),
+            "passed":sum(1 for r in subset if r.outcome=="pass"),"failed":sum(1 for r in subset if r.outcome=="fail")})
+    returned=sum(1 for r in rows if r.status in {"returned","admin_returned"})
+    submitted=sum(1 for r in rows if r.submitted_at is not None)
     return jsonify({"total":len(rows),"completed":len(completed),"pending":len(pending),"overdue":len(overdue),
         "pass_rate":round(len(passed)/len(completed)*100,1) if completed else None,"passed":len(passed),"failed":len(failed),
+        "returned":returned,"reinspection_rate":round(returned/submitted*100,1) if submitted else None,
         "average_score":round(sum(r.score for r in completed if r.score is not None)/max(1,sum(1 for r in completed if r.score is not None)),1) if any(r.score is not None for r in completed) else None,
-        "repeated_failures":recurring,"recent":[r.to_dict() for r in rows[:20]]}),200
+        "repeated_failures":recurring,"by_location":by_location,"monthly_trend":trend,
+        "recent":[r.to_dict() for r in rows[:20]]}),2000
