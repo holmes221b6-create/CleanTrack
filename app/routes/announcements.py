@@ -111,8 +111,11 @@ def _can_view(user, item, include_drafts=False):
     if item.audience_scope == "supervisors":
         return user.role == "Supervisor"
     if item.audience_scope == "team":
-        # Supervisors publish team messages to staff. Another supervisor
-        # should not see a peer's targeted employee notice by team membership alone.
+        # Supervisors publish team messages to Staff. Staff-originated urgent alerts
+        # are private to their creator, the assigned Supervisor audience and Admins.
+        if item.creator and item.creator.role == "Staff" and item.announcement_type == "alert":
+            if user.id != item.created_by_id and user.role != "Supervisor":
+                return False
         if user.role == "Supervisor" and item.created_by_id != user.id and item.creator and item.creator.role == "Supervisor":
             return False
         return item.team_id in _team_ids(user)
