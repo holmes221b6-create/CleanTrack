@@ -152,17 +152,24 @@ def _log(operation, actor, action, previous_status, message=None, details=None):
 def _send_review_email(recipient, operation, decision, feedback):
     """Send review outcomes through the application's configured transactional email providers."""
     if recipient is None or not recipient.email:
-        return "not_available"
+        return "not_configured"
     from app.routes.auth import _send_mechnar_email
 
     approved = decision == "approve"
-    subject = ("Work approved: " if approved else "Corrections required: ") + (operation.title or "Submitted operation")
-    outcome = "approved" if approved else "rejected and returned for correction"
-    message = feedback or (
-        "Your work has been approved. Thank you."
-        if approved else
-        "Please open MECHNAR to review the required corrections and resubmit your work."
-    )
+    resubmission = decision == "request_resubmission"
+    if approved:
+        subject = "Work approved: " + (operation.title or "Submitted operation")
+        outcome = "approved"
+        default_message = "Your work has been reviewed and approved. Thank you."
+    elif resubmission:
+        subject = "Resubmission requested: " + (operation.title or "Submitted operation")
+        outcome = "returned for correction and resubmission"
+        default_message = "Please correct the issue described below and submit the operation again."
+    else:
+        subject = "Work rejected: " + (operation.title or "Submitted operation")
+        outcome = "rejected"
+        default_message = "Your submitted work was rejected. Please review the reason below."
+    message = feedback or default_message
     text_body = (
         f"Hello {recipient.full_name or 'there'},\n\n"
         f"Your submitted work has been {outcome}.\n\n"
@@ -1433,14 +1440,14 @@ def review_operation(operation_id):
     data = request.get_json(silent=True) or {}
     decision = data.get("decision", "")
     feedback = data.get("feedback", "")
-    if not isinstance(decision, str) or decision.strip().lower() not in {"approve", "reject"}:
-        return jsonify({"error": "Decision must be approve or reject."}), 400
+    if not isinstance(decision, str) or decision.strip().lower() not in {"approve", "reject", "request_resubmission"}:
+        return jsonify({"error": "Decision must be approve, reject, or request_resubmission."}), 400
     if not isinstance(feedback, str) or len(feedback) > 1000:
         return jsonify({"error": "Feedback must be text of at most 1,000 characters."}), 400
     decision = decision.strip().lower()
     feedback = feedback.strip()
-    if decision == "reject" and not feedback:
-        return jsonify({"error": "A rejection reason is required."}), 400
+    if decision in {"reject", "request_resubmission"} and not feedback:
+        return jsonify({"error": "A reason or correction instruction is required for this decision."}), 400
     previous = operation.status
     operation.status = "Completed" if decision == "approve" else "Rejected"
     operation.review_feedback = feedback or None
@@ -1472,7 +1479,8 @@ def review_operation(operation_id):
     execution.verified_at = operation.reviewed_at
     execution.review_feedback = feedback or None
     try:
-        _log(operation, user, "verified" if decision == "approve" else "rejected", previous, feedback or None, {
+        review_action = "verified" if decision == "approve" else ("resubmission_requested" if decision == "request_resubmission" else "rejected")
+        _log(operation, user, review_action, previous, feedback or None, {
             "reviewed_by_id": user.id,
             "reviewed_at": operation.reviewed_at.isoformat(),
             "decision": decision,
@@ -1483,10 +1491,10 @@ def review_operation(operation_id):
             db.session.add(Notification(
                 recipient_id=operation.assigned_to_id,
                 organization_id=operation.organization_id,
-                title="Work approved" if decision == "approve" else "Work needs correction",
+                title=("Work approved" if decision == "approve" else ("Resubmission requested" if decision == "request_resubmission" else "Work rejected")),
                 message=(
-                    feedback or "Your work has been approved. Your task has been reviewed and approved. Great work, thank you!"
-                ) if decision == "approve" else "Your submitted work was rejected. Reason: " + feedback,
+                    feedback or "Your work has been reviewed and approved. Thank you."
+                ) if decision == "approve" else (("Please correct and resubmit: " if decision == "request_resubmission" else "Your submitted work was rejected. Reason: ") + feedback),
                 notification_type="operation_review",
                 resource_type="operation",
                 resource_id=str(operation.id),
@@ -1498,7 +1506,7 @@ def review_operation(operation_id):
     recipient = db.session.get(User, operation.assigned_to_id) if operation.assigned_to_id else None
     email_delivery = _send_review_email(recipient, operation, decision, feedback)
     return jsonify({
-        "message": "Operation verified and completed." if decision == "approve" else "Operation rejected. The assignee can correct the work and resubmit it.",
+        "message": ("Operation verified and completed." if decision == "approve" else ("Corrections requested. The assignee can start a new attempt and resubmit." if decision == "request_resubmission" else "Operation rejected. The assignee can review the reason and start a new attempt if permitted.")),
         "operation": operation.to_dict(),
         "execution": execution.to_dict(),
         "employee_notification": "created" if operation.assigned_to_id else "not_available",
