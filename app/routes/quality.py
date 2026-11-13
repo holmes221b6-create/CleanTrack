@@ -274,15 +274,17 @@ def schedule_update(schedule_id):
             pending[0].scheduled_at=new_due
             pending[0].status="scheduled"
             for extra in pending[1:]:
-                extra.status="cancelled"
+                db.session.delete(extra)
     if "active" in d:
         row.active=bool(d["active"])
         pending=InspectionRecord.query.filter_by(schedule_id=row.id,status="scheduled").all()
         if not row.active:
             for item in pending:item.status="cancelled"
-        elif row.recurrence=="once":
-            cancelled=InspectionRecord.query.filter_by(schedule_id=row.id,status="cancelled").order_by(InspectionRecord.scheduled_at.asc()).first()
-            if cancelled:cancelled.status="scheduled"
+        else:
+            cancelled=InspectionRecord.query.filter_by(schedule_id=row.id,status="cancelled").order_by(InspectionRecord.scheduled_at.asc()).all()
+            if cancelled:
+                cancelled[0].status="scheduled"
+                for extra in cancelled[1:]:db.session.delete(extra)
     db.session.commit()
     return jsonify({"message":"Inspection schedule updated.","active":row.active}),200
 
