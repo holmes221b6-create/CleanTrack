@@ -166,5 +166,20 @@ def cancel_meeting(meeting_id):
     except Exception:
         return jsonify({"error":"Zoom could not cancel this meeting. No local changes were made."}),502
     row.status="cancelled"
+    members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
+        .filter(TeamMember.team_id == row.team_id,
+                User.organization_id == user.organization_id,
+                User.account_status == "active",
+                User.id != user.id).all())
+    for member in members:
+        db.session.add(Notification(
+            recipient_id=member.id,
+            organization_id=user.organization_id,
+            title="Team meeting cancelled",
+            message=f'"{row.topic}" scheduled for {row.start_at.strftime("%d %b %Y, %H:%M UTC")} has been cancelled.',
+            notification_type="meeting_cancelled",
+            resource_type="Meeting",
+            resource_id=str(row.id),
+        ))
     db.session.commit()
-    return jsonify({"message":"Meeting cancelled."})
+    return jsonify({"message":"Meeting cancelled and team notifications sent."})
