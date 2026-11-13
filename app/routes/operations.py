@@ -1395,6 +1395,10 @@ def bulk_review_operations():
         ).order_by(OperationExecution.attempt_number.desc()).first()
         if execution is None:
             return jsonify({"error": "A selected submission has no execution record. Review it individually after checking its history."}), 409
+        validation = _submission_validation_summary(operation, execution)
+        if not validation["all_satisfied"]:
+            missing_labels = [item["label"] for item in validation["checks"] if not item["satisfied"]]
+            return jsonify({"error": "Bulk approval stopped. Outstanding requirements: " + ", ".join(missing_labels[:8]) + ". Review the submission individually."}), 409
         expected = operation.checklist if isinstance(operation.checklist, list) else []
         results = execution.checklist_results if isinstance(execution.checklist_results, list) else []
         completed_items = {row.get("item") for row in results if isinstance(row, dict) and row.get("completed") is True}
