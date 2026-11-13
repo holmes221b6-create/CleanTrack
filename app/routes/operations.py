@@ -1332,6 +1332,12 @@ def supervisor_review_queue():
         row["team_name"] = item.team.name if item.team else None
         execution = latest_execution.get(item.id)
         row["execution"] = execution.to_dict() if execution else None
+        submitted_for_review = execution.submitted_at if execution and execution.submitted_at else item.submitted_at
+        if submitted_for_review and submitted_for_review.tzinfo is None:
+            submitted_for_review = submitted_for_review.replace(tzinfo=timezone.utc)
+        wait_hours = max(0, round((datetime.now(timezone.utc) - submitted_for_review).total_seconds() / 3600)) if submitted_for_review and item.status.lower() == "submitted" else 0
+        row["review_wait_hours"] = wait_hours
+        row["review_overdue"] = item.status.lower() == "submitted" and wait_hours >= 24
         row["started_at"] = execution.started_at.isoformat() if execution and execution.started_at else None
         row["execution_submitted_at"] = execution.submitted_at.isoformat() if execution and execution.submitted_at else row.get("submitted_at")
         row["time_taken_minutes"] = (
