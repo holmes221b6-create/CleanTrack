@@ -15,7 +15,7 @@ from app.models.zone import Zone
 from app.services.permissions import get_current_user, roles_required
 
 incident_reports_bp = Blueprint("incident_reports", __name__, url_prefix="/api")
-_ALLOWED_EVIDENCE_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
+_ALLOWED_EVIDENCE_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain", "video/mp4", "video/webm", "video/quicktime"}
 _MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
 _MAX_EVIDENCE_FILES = 5
 
@@ -29,14 +29,14 @@ def _save_evidence(report, actor, files, required=False):
     for item in files:
         content_type = (item.mimetype or "").lower()
         if content_type not in _ALLOWED_EVIDENCE_TYPES:
-            raise ValueError("Evidence must be JPG, PNG, WEBP, PDF or TXT files.")
+            raise ValueError("Evidence must be JPG, PNG, WEBP, PDF, TXT, MP4, WEBM or MOV files.")
         data = item.read(_MAX_EVIDENCE_BYTES + 1)
         if not data or len(data) > _MAX_EVIDENCE_BYTES:
             raise ValueError("Each evidence file must be between 1 byte and 10 MB.")
         name = secure_filename(item.filename) or "evidence"
         row = IncidentReportAttachment(report_id=report.id, organization_id=report.organization_id,
             uploaded_by_id=actor.id, filename=name[:255], content_type=content_type,
-            category="image" if content_type.startswith("image/") else "document",
+            category="image" if content_type.startswith("image/") else ("video" if content_type.startswith("video/") else "document"),
             size=len(data), data=data)
         db.session.add(row)
         saved.append(row)
@@ -185,6 +185,45 @@ def supervisor_staff_reports():
         IncidentReport.supervisor_acknowledged_at.is_(None)
     ).order_by(IncidentReport.created_at.desc()).limit(300).all()
     return jsonify({"items": [row.to_dict() for row in rows]}), 200
+
+@incident_reports_bp.get("/supervisor/incident-reports/recurring")
+@roles_required("Supervisor")
+def supervisor_recurring_incidents():
+    """Detect repeated incident patterns from this Supervisor's own team records."""
+    user = get_current_user()
+    memberships = _memberships(user)
+    team_ids = [team.id for _, team in memberships]
+    if len(team_ids) != 1:
+        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+    cutoff = _now() - timedelta(days=180)
+    rows = _query(user).filter(
+        IncidentReport.team_id == team_ids[0],
+        IncidentReport.supervisor_id == user.id,
+        IncidentReport.origin == "staff",
+        IncidentReport.created_at >= cutoff
+    ).order_by(IncidentReport.created_at.desc()).limit(1000).all()
+    groups = {}
+    for row in rows:
+        place_id = row.zone_id or row.location_id or 0
+        place_name = row.zone.name if row.zone else (row.location.name if row.location else "Unspecified location")
+        key = (row.category, place_id)
+        if key not in groups:
+            groups[key] = {"category": row.category, "location": place_name,
+                "count": 0, "reports": [], "latest_at": row.created_at.isoformat() if row.created_at else None,
+                "high_or_critical": 0}
+        group = groups[key]
+        group["count"] += 1
+        if row.severity in {"high", "critical"}:
+            group["high_or_critical"] += 1
+        if len(group["reports"]) < 10:
+            group["reports"].append({"id": row.id, "reference": f"INC-{row.id:06d}",
+                "title": row.title, "severity": row.severity, "status": row.status,
+                "created_at": row.created_at.isoformat() if row.created_at else None})
+    patterns = [g for g in groups.values() if g["count"] >= 2]
+    patterns.sort(key=lambda g: (g["count"], g["high_or_critical"], g["latest_at"] or ""), reverse=True)
+    return jsonify({"items": patterns, "lookback_days": 180,
+        "minimum_occurrences": 2, "source_count": len(rows)}), 200
+
 
 @incident_reports_bp.get("/supervisor/incident-reports/history")
 @roles_required("Supervisor")
