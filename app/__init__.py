@@ -130,6 +130,12 @@ def create_app(config_class=Config):
                 floor_plan_columns = {item["name"] for item in inspect(connection).get_columns("zone_floor_plans")}
                 if "boundary" not in floor_plan_columns:
                     connection.execute(text("ALTER TABLE zone_floor_plans ADD COLUMN boundary JSON"))
+            if "meetings" in tables:
+                meeting_columns = {item["name"] for item in inspect(connection).get_columns("meetings")}
+                if "audience_role" not in meeting_columns:
+                    connection.execute(text("ALTER TABLE meetings ADD COLUMN audience_role VARCHAR(20) NOT NULL DEFAULT 'Staff'"))
+                if connection.dialect.name == "postgresql" and "team_id" in meeting_columns:
+                    connection.execute(text("ALTER TABLE meetings ALTER COLUMN team_id DROP NOT NULL"))
             if "organizations" in tables:
                 columns = {item["name"] for item in inspect(connection).get_columns("organizations")}
                 additive_columns = {
