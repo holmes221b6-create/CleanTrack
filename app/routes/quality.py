@@ -180,7 +180,9 @@ def set_team_leader(team_id):
     staff_id = data.get("staff_id")
     if staff_id in (None, ""):
         current = TeamLeaderAssignment.query.filter_by(team_id=team.id, organization_id=user.organization_id).first()
-        if current: db.session.delete(current)
+        if current:
+            _notify(current.user, "Team Leader designation removed", "Your Team Leader inspection access has been removed.")
+            db.session.delete(current)
         db.session.add(AuditLog(actor_id=user.id, organization_id=user.organization_id, action="team_leader.removed",
             resource_type="Team", resource_id=str(team.id), details={"team_id":team.id}))
         db.session.commit()
@@ -192,7 +194,9 @@ def set_team_leader(team_id):
     current = TeamLeaderAssignment.query.filter_by(team_id=team.id, organization_id=user.organization_id).first()
     if current and current.user_id == staff.id:
         return jsonify({"message":"This person is already the Team Leader.", "team_leader":{"id":staff.id,"name":staff.full_name}}), 200
-    if current: db.session.delete(current)
+    if current:
+        _notify(current.user, "Team Leader designation changed", "Another Staff member has been designated as your team's Team Leader.")
+        db.session.delete(current)
     # A person may hold only one Team Leader designation across the organisation.
     other = TeamLeaderAssignment.query.filter_by(user_id=staff.id, organization_id=user.organization_id).first()
     if other: db.session.delete(other)
