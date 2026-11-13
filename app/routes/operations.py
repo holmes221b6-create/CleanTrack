@@ -1516,6 +1516,10 @@ def review_operation(operation_id):
     if execution is None:
         db.session.rollback()
         return jsonify({"error": "No execution record could be associated with this submission. The review was not saved."}), 409
+    validation_summary = _submission_validation_summary(operation, execution)
+    if decision == "approve" and not validation_summary["all_satisfied"]:
+        missing = [item["label"] for item in validation_summary["checks"] if not item["satisfied"]]
+        return jsonify({"error": "Approval blocked. Outstanding requirements: " + ", ".join(missing[:8])}), 409
     execution.status = "Completed" if decision == "approve" else ("Resubmission Required" if decision == "request_resubmission" else "Rejected")
     execution.verified_by_id = user.id
     execution.verified_at = operation.reviewed_at
