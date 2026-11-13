@@ -273,6 +273,7 @@ def schedule_update(schedule_id):
     if "scheduled_at" in d:
         try: new_due=_dt(d.get("scheduled_at"),row.timezone_name)
         except ValueError as e:return jsonify({"error":str(e)}),400
+        if new_due < datetime.now(timezone.utc):return jsonify({"error":"Choose a future date and time."}),400
         existing=InspectionRecord.query.filter_by(schedule_id=row.id).all()
         if any(x.status not in {"scheduled","cancelled"} for x in existing):
             return jsonify({"error":"A schedule cannot be rescheduled after an inspection has started or been submitted."}),409
@@ -304,6 +305,7 @@ def schedule_create():
     d=request.get_json(silent=True) or {};tzname=str(d.get("timezone") or "Asia/Kolkata")
     try: due=_dt(d.get("scheduled_at"),tzname);lid,zid,oid=_refs(user,team,d)
     except ValueError as e:return jsonify({"error":str(e)}),400
+    if due < datetime.now(timezone.utc):return jsonify({"error":"Schedule the inspection for a future date and time."}),400
     template=None
     if d.get("template_id"):
         template=InspectionTemplate.query.filter_by(id=d.get("template_id"),organization_id=user.organization_id,team_id=team.id,is_archived=False).first()
