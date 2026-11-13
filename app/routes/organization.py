@@ -14,6 +14,7 @@ from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.location import Location
 from app.models.zone import Zone
+from app.models.notification import Notification
 from app.models.operation import Operation
 from app.services.permissions import get_current_user, roles_required
 
@@ -190,6 +191,7 @@ def my_organization_profile():
         "avatar_url": organization.avatar_url,
         "contact_email": organization.contact_email,
         "status": organization.status,
+        "role_labels": organization.role_labels or {"Admin": "Admin", "Supervisor": "Supervisor", "Staff": "Staff"},
     }), 200
 
 @organization_bp.route("/current", methods=["GET", "POST", "PATCH"])
@@ -944,4 +946,71 @@ def restore_suspended_organization_member(member_id):
     return jsonify({
         "message": "Member access restored. " + ("The scheduled termination remains in effect." if pending_termination else "The member is active."),
         "staff_member": member.to_dict(),
+    }), 200
+
+
+@organization_bp.patch("/role-labels")
+@roles_required("Admin", "Supervisor", "Staff")
+def update_organization_role_labels():
+    actor = get_current_user()
+    organization = db.session.get(Organization, actor.organization_id) if actor and actor.organization_id else None
+    if organization is None:
+        return jsonify({"error": "Your account is not linked to an organization."}), 409
+    if organization.status == "archived":
+        return jsonify({"error": "Restore the organization before editing role names."}), 423
+
+    data = request.get_json(silent=True) or {}
+    role = actor.role
+    raw = data.get("label")
+    if not isinstance(raw, str):
+        return jsonify({"error": "Enter a role name."}), 400
+    label = raw.strip()
+    if len(label) < 2 or len(label) > 40:
+        return jsonify({"error": "Role names must contain between 2 and 40 characters."}), 400
+    if any(ord(ch) < 32 for ch in label):
+        return jsonify({"error": "Role name contains unsupported characters."}), 400
+
+    labels = dict(organization.role_labels or {"Admin": "Admin", "Supervisor": "Supervisor", "Staff": "Staff"})
+    labels.setdefault("Admin", "Admin")
+    labels.setdefault("Supervisor", "Supervisor")
+    labels.setdefault("Staff", "Staff")
+    previous = labels.get(role, role)
+    if previous == label:
+        return jsonify({"message": "No role name changes were made.", "role_labels": labels}), 200
+    if any(key != role and value.strip().casefold() == label.casefold() for key, value in labels.items()):
+        return jsonify({"error": "Each role must have a different display name."}), 400
+
+    labels[role] = label
+    organization.role_labels = labels
+    changed_text = f'{previous} is now called {label}.'
+    _record_organization_audit(actor, organization, "organization.role_label_updated", {
+        "canonical_role": role,
+        "previous_label": previous,
+        "new_label": label,
+        "message": changed_text,
+    })
+    members = User.query.filter(
+        User.organization_id == organization.id,
+        User.account_status == "active",
+    ).all()
+    for member in members:
+        db.session.add(Notification(
+            recipient_id=member.id,
+            organization_id=organization.id,
+            title="Organisation role name updated",
+            message=f'{actor.full_name} changed the "{previous}" role name to "{label}". Access permissions and features are unchanged.',
+            notification_type="organization_role_label",
+            resource_type="Organization",
+            resource_id=str(organization.id),
+        ))
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Role name could not be saved."}), 500
+
+    return jsonify({
+        "message": "Role name updated and organisation members notified.",
+        "role_labels": labels,
+        "role_label": label,
     }), 200
