@@ -383,10 +383,15 @@ def inspection_submit(record_id):
     passed=sum(1 for x in normalized if x["checked"]);total=len(normalized)
     row.checklist=normalized;row.outcome="pass" if passed==total else "fail";row.score=round(passed/total*100,1) if total else 0
     row.findings=str(d.get("findings") or "").strip()[:4000];row.inspected_by_id=user.id
-    row.submitted_at=datetime.now(timezone.utc);row.status="submitted"
-    supervisors=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
-        TeamMember.team_id==team.id,User.organization_id=user.organization_id,User.role=="Supervisor",User.account_status=="active").all()
-    for sup in supervisors:_notify(sup,"Inspection submitted",f"{row.title} has been submitted for your review.",row)
+    row.submitted_at=datetime.now(timezone.utc)
+    if user.role=="Supervisor":
+        # A Supervisor's own inspection does not enter their own review queue.
+        row.status="approved";row.reviewed_by_id=user.id;row.reviewed_at=row.submitted_at
+    else:
+        row.status="submitted"
+        supervisors=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
+            TeamMember.team_id==team.id,User.organization_id==user.organization_id,User.role=="Supervisor",User.account_status=="active").all()
+        for sup in supervisors:_notify(sup,"Inspection submitted",f"{row.title} has been submitted for your review.",row)
     db.session.commit();return jsonify({"inspection":row.to_dict()}),200
 
 @quality_bp.patch("/inspections/<int:record_id>/review")
