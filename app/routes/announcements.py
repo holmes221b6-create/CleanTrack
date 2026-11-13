@@ -141,6 +141,10 @@ def _audience_users(item):
 def _is_target_recipient(user, item):
     if user.organization_id != item.organization_id or user.account_status != "active":
         return False
+    # Escalated team alerts are actionable by organisation Admins even when
+    # they are not members of the originating team.
+    if user.role == "Admin" and item.announcement_type == "alert" and item.escalate_to_admin and item.escalated_at:
+        return True
     if item.audience_scope == "organization":
         return True
     if item.audience_scope == "supervisors":
