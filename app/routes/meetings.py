@@ -55,7 +55,7 @@ def _team_for_user(team_id, user):
                 Team.status == "active", TeamMember.user_id == user.id).first())
 
 def _serialize(row, user):
-    return {"id":row.id,"team_id":row.team_id,"team_name":row.team.name if row.team else "",
+    return {"id":row.id,"team_id":row.team_id,"team_name":row.team.name if row.team else ("All Supervisors" if row.audience_role == "Supervisor" else "Team"),"audience_role":row.audience_role,
         "topic":row.topic,"agenda":row.agenda,"start_at":row.start_at.isoformat(),
         "duration_minutes":row.duration_minutes,"status":row.status,
         "created_by":row.creator.full_name if row.creator else "",
@@ -69,22 +69,25 @@ def list_meetings():
     q = Meeting.query.filter_by(organization_id=user.organization_id)
     if user.role == "Admin":
         pass
+    elif user.role == "Supervisor":
+        team_ids = db.session.query(TeamMember.team_id).filter_by(user_id=user.id).subquery()
+        q = q.filter(db.or_(Meeting.team_id.in_(team_ids), Meeting.audience_role == "Supervisor"))
     else:
         team_ids = db.session.query(TeamMember.team_id).filter_by(user_id=user.id).subquery()
-        q = q.filter(Meeting.team_id.in_(team_ids))
+        q = q.filter(Meeting.team_id.in_(team_ids), Meeting.audience_role == "Staff")
     rows = q.order_by(Meeting.start_at.desc()).limit(100).all()
     return jsonify({"meetings":[_serialize(row,user) for row in rows]})
 
 @meetings_bp.post("")
-@roles_required("Supervisor")
+@roles_required("Admin","Supervisor")
 def create_meeting():
     user = get_current_user()
     data = request.get_json(silent=True) or {}
     topic = str(data.get("topic") or "").strip()
     agenda = str(data.get("agenda") or "").strip()
     try:
-        team_id = int(data.get("team_id"))
         duration = int(data.get("duration_minutes", 40))
+        team_id = int(data.get("team_id")) if user.role == "Supervisor" else None
         start_at = datetime.fromisoformat(str(data.get("start_at")).replace("Z","+00:00"))
         if start_at.tzinfo is None:
             start_at = start_at.replace(tzinfo=timezone.utc)
@@ -93,8 +96,8 @@ def create_meeting():
         return jsonify({"error":"Provide a valid team, start time and duration."}), 400
     if not topic or len(topic)>200 or len(agenda)>5000 or duration < 5 or duration > 180:
         return jsonify({"error":"Topic, agenda or duration is invalid. Duration must be 5–180 minutes."}), 400
-    team = _team_for_user(team_id,user)
-    if not team:
+    team = _team_for_user(team_id,user) if user.role == "Supervisor" else None
+    if user.role == "Supervisor" and not team:
         return jsonify({"error":"You can only schedule meetings for a team you belong to."}), 403
     cfg = _zoom_config()
     if not all(cfg.values()):
@@ -112,15 +115,20 @@ def create_meeting():
         return jsonify({"error":detail}), 502
     if not zoom.get("id") or not zoom.get("join_url"):
         return jsonify({"error":"Zoom returned an incomplete meeting response."}), 502
-    row = Meeting(organization_id=user.organization_id,team_id=team.id,created_by_id=user.id,
+    row = Meeting(organization_id=user.organization_id,team_id=team.id if team else None,
+        audience_role="Staff" if user.role == "Supervisor" else "Supervisor",created_by_id=user.id,
         zoom_meeting_id=str(zoom["id"]),topic=topic,agenda=agenda,start_at=start_at,
         duration_minutes=duration,status="scheduled",join_url=zoom["join_url"],
         start_url=zoom.get("start_url"),password=zoom.get("password"))
     db.session.add(row)
     db.session.flush()
-    members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
-        .filter(TeamMember.team_id==team.id,User.organization_id==user.organization_id,
-                User.account_status=="active",User.role=="Staff",User.id != user.id).all())
+    if user.role == "Admin":
+        members = User.query.filter_by(organization_id=user.organization_id,
+            account_status="active",role="Supervisor").all()
+    else:
+        members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
+            .filter(TeamMember.team_id==team.id,User.organization_id==user.organization_id,
+                    User.account_status=="active",User.role=="Staff",User.id != user.id).all())
     for member in members:
         db.session.add(Notification(recipient_id=member.id,organization_id=user.organization_id,
             title="Team meeting scheduled",message=f"{topic} — {start_at.strftime('%d %b %Y, %H:%M UTC')}",
@@ -135,8 +143,12 @@ def meeting_signature(meeting_id):
     row = Meeting.query.filter_by(id=meeting_id,organization_id=user.organization_id).first()
     if not row or row.status != "scheduled":
         return jsonify({"error":"Meeting not found or no longer available."}),404
-    if user.role != "Admin" and not _team_for_user(row.team_id,user):
-        return jsonify({"error":"You are not a member of this meeting's team."}),403
+    if user.role == "Staff" and (row.audience_role != "Staff" or not _team_for_user(row.team_id,user)):
+        return jsonify({"error":"You are not authorised to join this meeting."}),403
+    if user.role == "Supervisor" and row.audience_role == "Staff" and not _team_for_user(row.team_id,user):
+        return jsonify({"error":"You are not authorised to join this meeting."}),403
+    if user.role == "Supervisor" and row.audience_role == "Supervisor" and row.created_by_id == user.id:
+        return jsonify({"error":"The host should launch the meeting using the Zoom host link."}),403
     cfg = _zoom_config()
     if not cfg["ZOOM_MEETING_SDK_CLIENT_ID"] or not cfg["ZOOM_MEETING_SDK_CLIENT_SECRET"]:
         return jsonify({"error":"Meeting SDK credentials are not configured on the server."}),503
@@ -155,7 +167,7 @@ def cancel_meeting(meeting_id):
     row = Meeting.query.filter_by(id=meeting_id,organization_id=user.organization_id).first()
     if not row:
         return jsonify({"error":"Meeting not found."}),404
-    if user.role == "Supervisor" and (row.created_by_id != user.id or not _team_for_user(row.team_id,user)):
+    if user.role == "Supervisor" and (row.audience_role != "Staff" or row.created_by_id != user.id or not _team_for_user(row.team_id,user)):
         return jsonify({"error":"Only the hosting Supervisor or an Admin can cancel this meeting."}),403
     if row.status != "scheduled":
         return jsonify({"error":"Only scheduled meetings can be cancelled."}),409
@@ -166,11 +178,15 @@ def cancel_meeting(meeting_id):
     except Exception:
         return jsonify({"error":"Zoom could not cancel this meeting. No local changes were made."}),502
     row.status="cancelled"
-    members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
-        .filter(TeamMember.team_id == row.team_id,
-                User.organization_id == user.organization_id,
-                User.account_status == "active",
-                User.id != user.id).all())
+    if row.audience_role == "Supervisor":
+        members = User.query.filter_by(organization_id=user.organization_id,
+            account_status="active",role="Supervisor").all()
+    else:
+        members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
+            .filter(TeamMember.team_id == row.team_id,
+                    User.organization_id == user.organization_id,
+                    User.account_status == "active",
+                    User.id != user.id).all())
     for member in members:
         db.session.add(Notification(
             recipient_id=member.id,
