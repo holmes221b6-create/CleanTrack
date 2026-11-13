@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.notification import Notification
 from app.models.audit_log import AuditLog
 from app.models.operational_records import QualityInspection
+from app.routes.supervisor_records import _refs as _supervisor_refs
 from app.services.permissions import get_current_user, roles_required
 
 quality_bp = Blueprint("quality", __name__, url_prefix="/api/quality")
@@ -43,23 +44,9 @@ def _dt(value, timezone_name="Asia/Kolkata"):
         raise ValueError("Enter a valid scheduled date and time.")
 
 def _refs(user, team, data):
-    from app.models.location import Location
-    from app.models.zone import Zone
-    from app.models.operation import Operation
-    def valid_id(v):
-        if v in (None, ""): return None
-        try: return int(v)
-        except (TypeError, ValueError): raise ValueError("Invalid location, zone or operation.")
-    lid, zid, oid = valid_id(data.get("location_id")), valid_id(data.get("zone_id")), valid_id(data.get("operation_id"))
-    location = Location.query.filter_by(id=lid, organization_id=user.organization_id, team_id=team.id).first() if lid else None
-    operation = Operation.query.filter_by(id=oid, organization_id=user.organization_id, team_id=team.id).first() if oid else None
-    zone = Zone.query.filter_by(id=zid, organization_id=user.organization_id).first() if zid else None
-    if lid and not location: raise ValueError("The selected location is outside your team.")
-    if oid and not operation: raise ValueError("The selected operation is outside your team.")
-    if zid and (not zone or (zone.team_id != team.id and (not location or zone.location_id != location.id))):
-        raise ValueError("The selected zone is outside your team.")
-    if zone and location and zone.location_id != location.id: raise ValueError("The zone does not belong to the selected location.")
-    return lid, zid, oid
+    operation, location, zone = _supervisor_refs(user, team, data)
+    return (location.id if location else None, zone.id if zone else None,
+            operation.id if operation else None)
 
 def _checklist(raw):
     if not isinstance(raw, list) or not raw or len(raw) > 60:
