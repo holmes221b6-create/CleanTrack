@@ -282,6 +282,8 @@ def schedule_update(schedule_id):
         if any(x.status not in {"scheduled","cancelled"} for x in existing):
             return jsonify({"error":"A schedule cannot be rescheduled after an inspection has started or been submitted."}),409
         row.first_due_at=new_due
+        if row.assignee and row.assigned_to_id!=row.created_by_id:
+            _notify(row.assignee,"Inspection rescheduled",f"{row.title} has a new scheduled time: {new_due.isoformat()}.")
         pending=sorted(existing,key=lambda x:x.scheduled_at or datetime.min.replace(tzinfo=timezone.utc))
         if pending:
             pending[0].scheduled_at=new_due
@@ -290,6 +292,8 @@ def schedule_update(schedule_id):
                 db.session.delete(extra)
     if "active" in d:
         row.active=bool(d["active"])
+        if row.assignee and row.assigned_to_id!=row.created_by_id:
+            _notify(row.assignee,"Inspection schedule updated",f"The schedule for {row.title} was "+("paused." if not row.active else "resumed."))
         pending=InspectionRecord.query.filter_by(schedule_id=row.id,status="scheduled").all()
         if not row.active:
             for item in pending:item.status="cancelled"
@@ -386,7 +390,9 @@ def inspection_submit(record_id):
         normalized.append({"label":old["label"],"checked":new["checked"]})
     passed=sum(1 for x in normalized if x["checked"]);total=len(normalized)
     row.checklist=normalized;row.outcome="pass" if passed==total else "fail";row.score=round(passed/total*100,1) if total else 0
-    row.findings=str(d.get("findings") or "").strip()[:4000];row.inspected_by_id=user.id
+    row.findings=str(d.get("findings") or "").strip()[:4000]
+    if passed<total and not row.findings:return jsonify({"error":"Add findings or corrective-action details for checklist items that failed."}),400
+    row.inspected_by_id=user.id
     row.submitted_at=datetime.now(timezone.utc)
     if user.role=="Supervisor":
         # A Supervisor's own inspection does not enter their own review queue.
@@ -486,7 +492,7 @@ def quality_analytics():
         if r.outcome=="pass":group["passed"]+=1
         if r.outcome=="fail":group["failed"]+=1
         for item in (r.checklist or []):
-            if not item.get("checked"):
+            if isinstance(item,dict) and not item.get("checked"):
                 label=item.get("label","Unspecified item")
                 item_failures[label]=item_failures.get(label,0)+1
     recurring=[{"checklist_item":k,"failures":v} for k,v in item_failures.items() if v>=2]
