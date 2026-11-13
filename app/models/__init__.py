@@ -24,6 +24,7 @@ from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.profile_qualification import ProfileQualification
+from app.models.quality_inspection import TeamLeaderAssignment, InspectionTemplate, InspectionSchedule, InspectionRecord
 from app.models.zone import Zone
 from app.models.zone_floor_plan import ZoneFloorPlan
 
@@ -58,6 +59,10 @@ __all__ = [
     "TeamMember",
     "User",
     "ProfileQualification",
+    "TeamLeaderAssignment",
+    "InspectionTemplate",
+    "InspectionSchedule",
+    "InspectionRecord",
     "Zone",
     "ZoneFloorPlan",
     "StaffOnboarding",
