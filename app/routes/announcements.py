@@ -563,6 +563,81 @@ def list_announcements():
     return jsonify({"announcements": result}), 200
 
 
+@announcements_bp.post("/urgent/staff")
+@roles_required("Staff")
+def create_staff_urgent_alert():
+    """Create an immediate team alert from Staff and notify the assigned Supervisor and Admins."""
+    user = get_current_user()
+    data = request.get_json(silent=True) or {}
+    title = data.get("title")
+    message = data.get("message")
+    if not isinstance(title, str) or not title.strip() or len(title.strip()) > 200:
+        return jsonify({"error": "Alert title is required and must be 200 characters or fewer."}), 400
+    if not isinstance(message, str) or not message.strip() or len(message.strip()) > 12000:
+        return jsonify({"error": "Alert details are required and must be 12,000 characters or fewer."}), 400
+    try:
+        team_id = int(data.get("team_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Choose one of your assigned teams."}), 400
+    assigned = team_id in _team_ids(user)
+    team = Team.query.filter_by(id=team_id, organization_id=user.organization_id, status="active").first()
+    if not assigned or team is None:
+        return jsonify({"error": "You can raise urgent alerts only for an active team assigned to you."}), 403
+    severity = str(data.get("severity") or "high").lower()
+    if severity not in {"high", "critical"}:
+        return jsonify({"error": "Urgent alerts must be High or Critical."}), 400
+
+    item = Announcement(
+        organization_id=user.organization_id,
+        created_by_id=user.id,
+        title=title.strip(),
+        message=message.strip(),
+        announcement_type="alert",
+        audience_scope="team",
+        team_id=team.id,
+        severity=severity,
+        status="published",
+        alert_status="open",
+        is_pinned=True,
+        requires_acknowledgement=True,
+        escalate_to_admin=True,
+        escalation_after_minutes=15,
+        published=True,
+        published_at=_now(),
+    )
+    try:
+        db.session.add(item)
+        db.session.flush()
+        _publish(item, actor=user)
+        # Staff urgent alerts always notify every active organisation Admin immediately,
+        # even if an Admin happens to also be a member of the selected team.
+        admin_ids = [row.id for row in User.query.filter_by(
+            organization_id=user.organization_id, role="Admin", account_status="active"
+        ).all() if row.id != user.id]
+        existing_admin_notices = {
+            row.recipient_id for row in Notification.query.filter_by(
+                organization_id=user.organization_id,
+                resource_type="Announcement",
+                resource_id=str(item.id),
+            ).all()
+        }
+        for admin_id in admin_ids:
+            if admin_id not in existing_admin_notices:
+                admin = db.session.get(User, admin_id)
+                if admin:
+                    _send_notice(admin, item, "escalated_alert")
+        item.escalated_at = item.escalated_at or _now()
+        _audit(user, "announcement.staff_urgent_alert_created", item, {
+            "team_id": team.id, "severity": severity,
+            "notified_supervisor_and_admin": True,
+        })
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "Urgent alert could not be published. Please try again."}), 500
+    return jsonify({"message": "Urgent alert sent to your team Supervisor and organisation Admin.", "announcement": item.to_dict()}), 201
+
+
 @announcements_bp.post("")
 @roles_required("Admin", "Supervisor")
 def create_announcement():
