@@ -139,6 +139,14 @@ def _record_query(user, team=None):
         q = q.filter_by(assigned_to_id=user.id)
     return q
 
+def process_due_inspections():
+    now=datetime.now(timezone.utc)
+    schedules=InspectionSchedule.query.filter_by(active=True).all()
+    for schedule in schedules:
+        _materialize(schedule,now)
+    if schedules:
+        db.session.commit()
+
 @quality_bp.get("/team-leader")
 @roles_required("Staff", "Supervisor")
 def my_team_leader_status():
