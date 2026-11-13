@@ -8,7 +8,8 @@ class Meeting(db.Model):
     __tablename__ = "meetings"
     id = db.Column(db.Integer, primary_key=True)
     organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
-    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=False, index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=True, index=True)
+    audience_role = db.Column(db.String(20), nullable=False, default="Staff", index=True)
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
     zoom_meeting_id = db.Column(db.String(40), nullable=False, unique=True, index=True)
     topic = db.Column(db.String(200), nullable=False)
