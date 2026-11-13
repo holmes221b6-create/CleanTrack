@@ -5,6 +5,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 from flask import Blueprint, jsonify, request
+from sqlalchemy import or_
 from app.extensions import db
 from app.models.meeting import Meeting
 from app.models.team import Team
@@ -71,7 +72,7 @@ def list_meetings():
         pass
     elif user.role == "Supervisor":
         team_ids = db.session.query(TeamMember.team_id).filter_by(user_id=user.id).subquery()
-        q = q.filter(db.or_(Meeting.team_id.in_(team_ids), Meeting.audience_role == "Supervisor"))
+        q = q.filter(or_(Meeting.team_id.in_(team_ids), Meeting.audience_role == "Supervisor"))
     else:
         team_ids = db.session.query(TeamMember.team_id).filter_by(user_id=user.id).subquery()
         q = q.filter(Meeting.team_id.in_(team_ids), Meeting.audience_role == "Staff")
