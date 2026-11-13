@@ -143,10 +143,11 @@ def meeting_signature(meeting_id):
     cfg = _zoom_config()
     if not cfg["ZOOM_MEETING_SDK_CLIENT_ID"] or not cfg["ZOOM_MEETING_SDK_CLIENT_SECRET"]:
         return jsonify({"error":"Meeting SDK credentials are not configured on the server."}),503
-    return jsonify({"signature":_sdk_signature(row.zoom_meeting_id,0),
+    sdk_role = 1 if row.created_by_id == user.id else 0
+    return jsonify({"signature":_sdk_signature(row.zoom_meeting_id,sdk_role),
         "client_id":cfg["ZOOM_MEETING_SDK_CLIENT_ID"],"meeting_number":row.zoom_meeting_id,
         "password":row.password or "","user_name":user.full_name,"user_email":user.email,
-        "role":0}),200
+        "role":sdk_role}),200
 
 @meetings_bp.post("/<int:meeting_id>/cancel")
 @roles_required("Admin","Supervisor")
