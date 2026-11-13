@@ -148,7 +148,7 @@ def meeting_signature(meeting_id):
     if sdk_role == 1:
         try:
             token = _zoom_token(cfg)
-            host_auth = _zoom_api("GET", "/users/me/token?type=zak", token)
+            host_auth = _zoom_api("POST", "/users/"+quote(user.email, safe="")+"/token", token, {"type":"zak"})
             result["zak"] = host_auth.get("token")
             if not result["zak"]:
                 raise ValueError("Zoom did not return a host access token.")
