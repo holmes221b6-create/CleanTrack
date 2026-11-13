@@ -134,6 +134,8 @@ def _audience_users(item):
         )
         if item.creator and item.creator.role == "Supervisor":
             query = query.filter(User.role == "Staff")
+        elif item.creator and item.creator.role == "Staff" and item.announcement_type == "alert":
+            query = query.filter(User.role == "Supervisor")
         return query.all()
     return []
 
@@ -151,6 +153,8 @@ def _is_target_recipient(user, item):
         return user.role == "Supervisor"
     if item.audience_scope == "team":
         if item.creator and item.creator.role == "Supervisor" and user.role != "Staff":
+            return False
+        if item.creator and item.creator.role == "Staff" and item.announcement_type == "alert" and user.role != "Supervisor":
             return False
         return item.team_id in _team_ids(user)
     return False
