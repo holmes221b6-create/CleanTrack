@@ -333,7 +333,7 @@ def supervisor_create_admin_report():
     if len(memberships) != 1:
         return jsonify({"error": "Your account must belong to exactly one active team."}), 409
     _, team = memberships[0]
-    data = request.get_json(silent=True) or {}
+    data = request.form if request.content_type and request.content_type.startswith("multipart/form-data") else (request.get_json(silent=True) or {})
     title = str(data.get("title") or "").strip()
     description = str(data.get("description") or "").strip()
     severity = str(data.get("severity") or "medium").lower()
@@ -355,7 +355,12 @@ def supervisor_create_admin_report():
     )
     db.session.add(report)
     db.session.flush()
-    _event(report, user, "supervisor_reported_to_admin", "Supervisor submitted a direct report to Admin.")
+    try:
+        _save_evidence(report, user, request.files.getlist("evidence"), required=True)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+    _event(report, user, "supervisor_reported_to_admin", "Supervisor submitted a direct report to Admin with evidence.")
     for admin in admins:
         _notify(admin.id, user.organization_id, "Supervisor report to Admin",
             user.full_name + " submitted: " + report.title + " (INC-" + f"{report.id:06d}" + ").",
