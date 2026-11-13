@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request
+from sqlalchemy import and_, or_
 from app.extensions import db
 from app.models.incident_report import IncidentReport, IncidentReportEvent
 from app.models.notification import Notification
@@ -198,9 +199,9 @@ def admin_incident_inbox():
     user = get_current_user()
     rows = _query(user).filter(
         IncidentReport.forwarded_at.isnot(None),
-        db.or_(
+        or_(
             IncidentReport.admin_acknowledged_at.is_(None),
-            db.and_(
+            and_(
                 IncidentReport.staff_resolved_at.isnot(None),
                 IncidentReport.admin_resolution_acknowledged_at.is_(None)
             )
