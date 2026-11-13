@@ -92,6 +92,8 @@ def _materialize(schedule, now=None):
             checklist=[dict(x, checked=False) for x in (schedule.checklist_snapshot or [])],
             scheduled_at=due, status="scheduled")
         db.session.add(row)
+        if schedule.assigned_to_id != schedule.created_by_id and schedule.assignee:
+            _notify(schedule.assignee, "Recurring inspection assigned", f"{schedule.title} is due for inspection.", row)
         try:
             db.session.flush()
         except Exception:
