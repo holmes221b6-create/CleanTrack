@@ -10,6 +10,10 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
+def default_role_labels():
+    return {"Admin": "Admin", "Supervisor": "Supervisor", "Staff": "Staff"}
+
+
 def generate_organization_code():
     alphabet = string.ascii_uppercase + string.digits
     return "CT-" + "".join(secrets.choice(alphabet) for _ in range(8))
@@ -33,6 +37,7 @@ class Organization(db.Model):
     contact_email = db.Column(db.String(254), nullable=True)
     policy_text = db.Column(db.Text, nullable=True)
     whatsapp_supervisors_group_url = db.Column(db.String(500), nullable=True)
+    role_labels = db.Column(db.JSON, nullable=False, default=default_role_labels)
 
     status = db.Column(db.String(20), nullable=False, default="active")
     plan = db.Column(db.String(30), nullable=False, default="Free/Demo")
@@ -66,6 +71,7 @@ class Organization(db.Model):
             "contact_email": self.contact_email,
             "policy_text": self.policy_text,
             "whatsapp_supervisors_group_url": self.whatsapp_supervisors_group_url,
+            "role_labels": self.role_labels or default_role_labels(),
             "status": self.status,
             "plan": self.plan,
             "created_at": (
