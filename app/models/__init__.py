@@ -5,6 +5,7 @@ from app.models.announcement_attachment import AnnouncementAttachment
 from app.models.announcement_receipt import AnnouncementReceipt
 from app.models.audit_log import AuditLog
 from app.models.invitation import Invitation
+from app.models.incident_report import IncidentReport, IncidentReportEvent
 from app.models.location import Location
 from app.models.location_floor_plan import LocationFloorPlan
 from app.models.membership_request import MembershipRequest
@@ -32,6 +33,8 @@ __all__ = [
     "AuditLog",
     "BillingProviderEvent",
     "Invitation",
+    "IncidentReport",
+    "IncidentReportEvent",
     "Location",
     "LocationFloorPlan",
     "MembershipRequest",
