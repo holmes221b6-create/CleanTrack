@@ -24,7 +24,11 @@ def _accessible_locations(user,team):
  zone_location_ids=db.session.query(Zone.location_id).filter(Zone.organization_id==user.organization_id,or_(Zone.team_id==team.id,Zone.supervisor_id==user.id))
  return Location.query.filter(Location.organization_id==user.organization_id,or_(Location.team_id==team.id,Location.id.in_(zone_location_ids)))
 def _accessible_zones(user,team,location_ids=None):
+ team_location_ids=[row[0] for row in db.session.query(Location.id).filter(
+  Location.organization_id==user.organization_id,Location.team_id==team.id
+ ).all()]
  rules=[Zone.team_id==team.id,Zone.supervisor_id==user.id]
+ if team_location_ids: rules.append(Zone.location_id.in_(team_location_ids))
  if location_ids is not None: rules.append(Zone.location_id.in_(location_ids))
  return Zone.query.filter(Zone.organization_id==user.organization_id,or_(*rules))
 def _refs(user,team,data):
