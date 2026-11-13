@@ -192,6 +192,36 @@ def staff_resolve_report(report_id):
     db.session.commit()
     return jsonify({"item": report.to_dict()}), 200
 
+@incident_reports_bp.get("/admin/incident-reports")
+@roles_required("Admin")
+def admin_incident_inbox():
+    user = get_current_user()
+    rows = _query(user).filter(
+        IncidentReport.forwarded_at.isnot(None),
+        db.or_(
+            IncidentReport.admin_acknowledged_at.is_(None),
+            db.and_(
+                IncidentReport.staff_resolved_at.isnot(None),
+                IncidentReport.admin_resolution_acknowledged_at.is_(None)
+            )
+        )
+    ).order_by(IncidentReport.updated_at.desc()).limit(300).all()
+    return jsonify({"items": [row.to_dict() for row in rows]}), 200
+
+
+@incident_reports_bp.get("/admin/incident-reports/<int:report_id>/events")
+@roles_required("Admin")
+def admin_incident_events(report_id):
+    user = get_current_user()
+    report = _query(user).filter_by(id=report_id).first_or_404()
+    if not report.forwarded_at:
+        return jsonify({"error": "This report has not been forwarded to Admin."}), 404
+    events = IncidentReportEvent.query.filter_by(
+        report_id=report.id, organization_id=user.organization_id
+    ).order_by(IncidentReportEvent.created_at.asc()).all()
+    return jsonify({"events": [event.to_dict() for event in events]}), 200
+
+
 @incident_reports_bp.post("/admin/incident-reports/<int:report_id>/acknowledge")
 @roles_required("Admin")
 def admin_acknowledge_report(report_id):
