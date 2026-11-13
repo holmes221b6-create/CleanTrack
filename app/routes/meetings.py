@@ -59,7 +59,7 @@ def _serialize(row, user):
         "topic":row.topic,"agenda":row.agenda,"start_at":row.start_at.isoformat(),
         "duration_minutes":row.duration_minutes,"status":row.status,
         "created_by":row.creator.full_name if row.creator else "",
-        "is_host":row.created_by_id == user.id,"join_url":row.join_url if row.status != "cancelled" else None,
+        "is_host":row.created_by_id == user.id,"host_start_url":row.start_url if row.created_by_id == user.id and row.status == "scheduled" else None,"join_url":row.join_url if row.status != "cancelled" else None,
         "created_at":row.created_at.isoformat() if row.created_at else None}
 
 @meetings_bp.get("")
@@ -140,24 +140,12 @@ def meeting_signature(meeting_id):
     cfg = _zoom_config()
     if not cfg["ZOOM_MEETING_SDK_CLIENT_ID"] or not cfg["ZOOM_MEETING_SDK_CLIENT_SECRET"]:
         return jsonify({"error":"Meeting SDK credentials are not configured on the server."}),503
-    sdk_role = 1 if row.created_by_id == user.id else 0
+    # Host launches the Zoom host URL; embedded SDK is for participants.
+    sdk_role = 0
     result = {"signature":_sdk_signature(row.zoom_meeting_id,sdk_role),
         "client_id":cfg["ZOOM_MEETING_SDK_CLIENT_ID"],"meeting_number":row.zoom_meeting_id,
         "password":row.password or "","user_name":user.full_name,"user_email":user.email,
         "role":sdk_role}
-    if sdk_role == 1:
-        try:
-            token = _zoom_token(cfg)
-            host_auth = _zoom_api("POST", "/users/"+quote(user.email, safe="")+"/token", token, {"type":"zak"})
-            result["zak"] = host_auth.get("token")
-            if not result["zak"]:
-                raise ValueError("Zoom did not return a host access token.")
-        except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
-            detail = "Zoom could not authorize the host. Confirm the Server-to-Server OAuth app has the User: View a user's ZAK token admin scope."
-            if isinstance(exc, HTTPError):
-                try: detail = json.loads(exc.read().decode()).get("message", detail)
-                except Exception: pass
-            return jsonify({"error":detail}),502
     return jsonify(result),200
 
 @meetings_bp.post("/<int:meeting_id>/cancel")
