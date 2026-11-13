@@ -127,14 +127,16 @@ def _record_query(user, team=None):
     return q
 
 @quality_bp.get("/team-leader")
-@roles_required("Staff")
+@roles_required("Staff", "Supervisor")
 def my_team_leader_status():
     user = get_current_user()
     team, err = _team_scope(user)
     if err: return err
-    assignment = _leader(team.id, user.id, user.organization_id)
-    return jsonify({"is_team_leader": bool(assignment), "designation": "Team Leader" if assignment else None,
-        "team_id": team.id, "team_name": team.name}), 200
+    assignment = TeamLeaderAssignment.query.filter_by(team_id=team.id, organization_id=user.organization_id).first()
+    is_leader = bool(assignment and assignment.user_id == user.id)
+    return jsonify({"is_team_leader": is_leader, "designation": "Team Leader" if is_leader else None,
+        "team_id": team.id, "team_name": team.name,
+        "team_leader": ({"id":assignment.user.id,"name":assignment.user.full_name} if assignment and assignment.user else None)}), 200
 
 @quality_bp.get("/team-leader/<int:team_id>")
 @roles_required("Supervisor")
