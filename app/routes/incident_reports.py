@@ -112,7 +112,7 @@ def supervisor_staff_reports():
     if len(team_ids) != 1:
         return jsonify({"error": "Your account must belong to exactly one active team."}), 409
     rows = _query(user).filter(IncidentReport.team_id == team_ids[0],
-        IncidentReport.supervisor_id == user.id,
+        IncidentReport.supervisor_id == user.id, IncidentReport.origin == "staff",
         IncidentReport.supervisor_acknowledged_at.is_(None)
     ).order_by(IncidentReport.created_at.desc()).limit(300).all()
     return jsonify({"items": [row.to_dict() for row in rows]}), 200
@@ -127,7 +127,7 @@ def supervisor_report_history():
         return jsonify({"error": "Your account must belong to exactly one active team."}), 409
     cutoff = _now() - timedelta(days=7)
     rows = _query(user).filter(IncidentReport.team_id == team_ids[0],
-        IncidentReport.supervisor_id == user.id, IncidentReport.created_at >= cutoff
+        IncidentReport.supervisor_id == user.id, IncidentReport.origin == "staff", IncidentReport.created_at >= cutoff
     ).order_by(IncidentReport.created_at.desc()).limit(500).all()
     return jsonify({"items": [row.to_dict() for row in rows]}), 200
 
@@ -254,3 +254,59 @@ def admin_acknowledge_report(report_id):
         _event(report, user, "admin_acknowledged", "Admin acknowledged the forwarded report.")
         db.session.commit()
     return jsonify({"item": report.to_dict()}), 200
+
+
+@incident_reports_bp.post("/supervisor/admin-reports")
+@roles_required("Supervisor")
+def supervisor_create_admin_report():
+    user = get_current_user()
+    memberships = _memberships(user)
+    if len(memberships) != 1:
+        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
+    _, team = memberships[0]
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title") or "").strip()
+    description = str(data.get("description") or "").strip()
+    severity = str(data.get("severity") or "medium").lower()
+    category = str(data.get("category") or "other").lower()
+    if not title or not description:
+        return jsonify({"error": "A title and description are required."}), 400
+    if severity not in {"low", "medium", "high", "critical"} or category not in {"equipment", "safety", "staffing", "resource", "facility", "operational", "other"}:
+        return jsonify({"error": "Choose a valid category and severity."}), 400
+    admins = User.query.filter_by(organization_id=user.organization_id, role="Admin", account_status="active").all()
+    if not admins:
+        return jsonify({"error": "No active Admin is available in this organisation."}), 409
+    report = IncidentReport(
+        organization_id=user.organization_id, team_id=team.id,
+        reported_by_id=user.id, supervisor_id=user.id, origin="supervisor",
+        title=title[:180], description=description, report_type="issue",
+        category=category, severity=severity, status="forwarded_to_admin",
+        forwarded_at=_now(), forwarded_by_id=user.id,
+        supervisor_note=str(data.get("supervisor_note") or "").strip()[:4000]
+    )
+    db.session.add(report)
+    db.session.flush()
+    _event(report, user, "supervisor_reported_to_admin", "Supervisor submitted a direct report to Admin.")
+    for admin in admins:
+        _notify(admin.id, user.organization_id, "Supervisor report to Admin",
+            user.full_name + " submitted: " + report.title + " (INC-" + f"{report.id:06d}" + ").",
+            report.id, "supervisor_report")
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "The report could not be saved."}), 500
+    return jsonify({"item": report.to_dict()}), 201
+
+
+@incident_reports_bp.get("/supervisor/admin-reports")
+@roles_required("Supervisor")
+def supervisor_admin_report_history():
+    user = get_current_user()
+    cutoff = _now() - timedelta(days=7)
+    rows = _query(user).filter(
+        IncidentReport.origin == "supervisor",
+        IncidentReport.reported_by_id == user.id,
+        IncidentReport.created_at >= cutoff
+    ).order_by(IncidentReport.created_at.desc()).limit(300).all()
+    return jsonify({"items": [row.to_dict() for row in rows]}), 200
