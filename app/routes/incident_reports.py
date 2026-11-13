@@ -87,6 +87,31 @@ def _optional_ref(value, model, user, team_id, label):
         raise ValueError("The selected " + label + " is outside your team access.")
     return row
 
+
+@incident_reports_bp.get("/staff/incident-reports/options")
+@roles_required("Staff")
+def staff_incident_report_options():
+    user = get_current_user()
+    memberships = _memberships(user)
+    return jsonify({"teams": [{"id": team.id, "name": team.name} for _, team in memberships]}), 200
+
+
+@incident_reports_bp.get("/staff/incident-reports")
+@roles_required("Staff")
+def staff_incident_report_list():
+    user = get_current_user()
+    rows = _query(user).filter_by(reported_by_id=user.id).order_by(IncidentReport.created_at.desc()).limit(200).all()
+    return jsonify({"items": [row.to_dict() for row in rows]}), 200
+
+
+@incident_reports_bp.get("/staff/incident-reports/<int:report_id>/events")
+@roles_required("Staff")
+def staff_incident_report_events(report_id):
+    user = get_current_user()
+    report = _query(user).filter_by(id=report_id, reported_by_id=user.id).first_or_404()
+    rows = IncidentReportEvent.query.filter_by(report_id=report.id, organization_id=user.organization_id).order_by(IncidentReportEvent.created_at.asc()).all()
+    return jsonify({"events": [row.to_dict() for row in rows]}), 200
+
 @incident_reports_bp.post("/staff/incident-reports")
 @roles_required("Staff")
 def create_staff_report():
