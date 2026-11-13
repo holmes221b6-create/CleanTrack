@@ -132,7 +132,7 @@ def create_meeting():
                     User.account_status=="active",User.role=="Staff",User.id != user.id).all())
     for member in members:
         db.session.add(Notification(recipient_id=member.id,organization_id=user.organization_id,
-            title="Team meeting scheduled",message=f"{topic} — {start_at.strftime('%d %b %Y, %H:%M UTC')}",
+            title="Supervisor meeting scheduled" if user.role == "Admin" else "Team meeting scheduled",message=f"{topic} — {start_at.strftime('%d %b %Y, %H:%M UTC')}",
             notification_type="meeting",resource_type="Meeting",resource_id=str(row.id)))
     db.session.commit()
     return jsonify({"meeting":_serialize(row,user),"host_start_url":row.start_url}),201
@@ -192,7 +192,7 @@ def cancel_meeting(meeting_id):
         db.session.add(Notification(
             recipient_id=member.id,
             organization_id=user.organization_id,
-            title="Team meeting cancelled",
+            title="Supervisor meeting cancelled" if row.audience_role == "Supervisor" else "Team meeting cancelled",
             message=f'"{row.topic}" scheduled for {row.start_at.strftime("%d %b %Y, %H:%M UTC")} has been cancelled.',
             notification_type="meeting_cancelled",
             resource_type="Meeting",
