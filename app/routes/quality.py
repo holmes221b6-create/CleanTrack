@@ -262,7 +262,27 @@ def schedule_update(schedule_id):
     if err:return err
     row=InspectionSchedule.query.filter_by(id=schedule_id,organization_id=user.organization_id,team_id=team.id).first_or_404()
     d=request.get_json(silent=True) or {}
-    if "active" in d: row.active=bool(d["active"])
+    if "scheduled_at" in d:
+        try: new_due=_dt(d.get("scheduled_at"),row.timezone_name)
+        except ValueError as e:return jsonify({"error":str(e)}),400
+        existing=InspectionRecord.query.filter_by(schedule_id=row.id).all()
+        if any(x.status not in {"scheduled","cancelled"} for x in existing):
+            return jsonify({"error":"A schedule cannot be rescheduled after an inspection has started or been submitted."}),409
+        row.first_due_at=new_due
+        pending=sorted(existing,key=lambda x:x.scheduled_at or datetime.min.replace(tzinfo=timezone.utc))
+        if pending:
+            pending[0].scheduled_at=new_due
+            pending[0].status="scheduled"
+            for extra in pending[1:]:
+                extra.status="cancelled"
+    if "active" in d:
+        row.active=bool(d["active"])
+        pending=InspectionRecord.query.filter_by(schedule_id=row.id,status="scheduled").all()
+        if not row.active:
+            for item in pending:item.status="cancelled"
+        elif row.recurrence=="once":
+            cancelled=InspectionRecord.query.filter_by(schedule_id=row.id,status="cancelled").order_by(InspectionRecord.scheduled_at.asc()).first()
+            if cancelled:cancelled.status="scheduled"
     db.session.commit()
     return jsonify({"message":"Inspection schedule updated.","active":row.active}),200
 
