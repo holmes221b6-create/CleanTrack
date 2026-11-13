@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta, timezone
-from flask import Blueprint, jsonify, request
+from io import BytesIO
+from flask import Blueprint, jsonify, request, send_file
+from werkzeug.utils import secure_filename
 from sqlalchemy import and_, or_
 from app.extensions import db
-from app.models.incident_report import IncidentReport, IncidentReportEvent
+from app.models.incident_report import IncidentReport, IncidentReportEvent, IncidentReportAttachment
 from app.models.notification import Notification
 from app.models.team import Team
 from app.models.team_member import TeamMember
@@ -13,6 +15,43 @@ from app.models.zone import Zone
 from app.services.permissions import get_current_user, roles_required
 
 incident_reports_bp = Blueprint("incident_reports", __name__, url_prefix="/api")
+_ALLOWED_EVIDENCE_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
+_MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
+_MAX_EVIDENCE_FILES = 5
+
+def _save_evidence(report, actor, files, required=False):
+    files = [item for item in (files or []) if item and item.filename]
+    if required and not files:
+        raise ValueError("At least one evidence attachment is required.")
+    if len(files) > _MAX_EVIDENCE_FILES:
+        raise ValueError("You can attach up to five evidence files.")
+    saved = []
+    for item in files:
+        content_type = (item.mimetype or "").lower()
+        if content_type not in _ALLOWED_EVIDENCE_TYPES:
+            raise ValueError("Evidence must be JPG, PNG, WEBP, PDF or TXT files.")
+        data = item.read(_MAX_EVIDENCE_BYTES + 1)
+        if not data or len(data) > _MAX_EVIDENCE_BYTES:
+            raise ValueError("Each evidence file must be between 1 byte and 10 MB.")
+        name = secure_filename(item.filename) or "evidence"
+        row = IncidentReportAttachment(report_id=report.id, organization_id=report.organization_id,
+            uploaded_by_id=actor.id, filename=name[:255], content_type=content_type,
+            category="image" if content_type.startswith("image/") else "document",
+            size=len(data), data=data)
+        db.session.add(row)
+        saved.append(row)
+    return saved
+
+def _accessible_report(user, report_id):
+    report = _query(user).filter_by(id=report_id).first_or_404()
+    role = str(user.role or "").lower()
+    if role == "staff" and report.reported_by_id != user.id:
+        return None
+    if role == "supervisor" and report.supervisor_id != user.id:
+        return None
+    if role == "admin" and not report.forwarded_at:
+        return None
+    return report
 
 def _now():
     return datetime.now(timezone.utc)
@@ -53,7 +92,8 @@ def _optional_ref(value, model, user, team_id, label):
 def create_staff_report():
     user = get_current_user()
     memberships = _memberships(user)
-    requested_team_id = (request.get_json(silent=True) or {}).get("team_id")
+    d = request.form if request.content_type and request.content_type.startswith("multipart/form-data") else (request.get_json(silent=True) or {})
+    requested_team_id = d.get("team_id")
     if requested_team_id not in (None, ""):
         try:
             requested_team_id = int(requested_team_id)
@@ -70,7 +110,6 @@ def create_staff_report():
                 User.role == "Supervisor", User.account_status == "active").all())
     if len(supervisors) != 1:
         return jsonify({"error": "Your team must have exactly one active Supervisor assigned before reports can be submitted."}), 409
-    d = request.get_json(silent=True) or {}
     title, description = str(d.get("title") or "").strip(), str(d.get("description") or "").strip()
     kind, category, severity = (str(d.get("report_type") or "issue").lower(),
         str(d.get("category") or "other").lower(), str(d.get("severity") or "medium").lower())
@@ -93,7 +132,12 @@ def create_staff_report():
         report_type=kind, category=category, severity=severity, status="reported")
     db.session.add(report)
     db.session.flush()
-    _event(report, user, "reported", "Staff submitted this " + kind + " to the Team Supervisor.")
+    try:
+        _save_evidence(report, user, request.files.getlist("evidence"), required=True)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+    _event(report, user, "reported", "Staff submitted this " + kind + " with evidence to the Team Supervisor.")
     _notify(supervisors[0].id, user.organization_id, "New staff " + kind,
         user.full_name + " reported: " + title, report.id, "incident_report")
     try:
@@ -189,7 +233,7 @@ def staff_resolve_report(report_id):
     if report.staff_resolved_at:
         return jsonify({"error": "A resolution has already been submitted for this report."}), 409
     report.staff_resolution_note, report.staff_resolved_at = note[:4000], _now()
-    report.status = "resolution_pending_supervisor" if not report.forwarded_at else "resolution_pending_admin"
+    report.status = "resolution_submitted"
     _event(report, user, "staff_resolved", "Staff reported the issue resolved: " + note[:3500])
     _notify(report.supervisor_id, user.organization_id, "Staff reported an issue resolved",
         user.full_name + " submitted a resolution for " + report.title + ".", report.id, "incident_resolution")
