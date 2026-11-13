@@ -117,17 +117,14 @@ def create_meeting():
         duration_minutes=duration,status="scheduled",join_url=zoom["join_url"],
         start_url=zoom.get("start_url"),password=zoom.get("password"))
     db.session.add(row)
+    db.session.flush()
     members = (User.query.join(TeamMember, TeamMember.user_id == User.id)
         .filter(TeamMember.team_id==team.id,User.organization_id==user.organization_id,
                 User.account_status=="active",User.role=="Staff",User.id != user.id).all())
     for member in members:
         db.session.add(Notification(recipient_id=member.id,organization_id=user.organization_id,
             title="Team meeting scheduled",message=f"{topic} — {start_at.strftime('%d %b %Y, %H:%M UTC')}",
-            notification_type="meeting",resource_type="Meeting",resource_id="pending"))
-    db.session.flush()
-    for notification in db.session.new:
-        if isinstance(notification, Notification) and notification.resource_type == "Meeting" and notification.resource_id == "pending":
-            notification.resource_id = str(row.id)
+            notification_type="meeting",resource_type="Meeting",resource_id=str(row.id)))
     db.session.commit()
     return jsonify({"meeting":_serialize(row,user),"host_start_url":row.start_url}),201
 
@@ -144,10 +141,24 @@ def meeting_signature(meeting_id):
     if not cfg["ZOOM_MEETING_SDK_CLIENT_ID"] or not cfg["ZOOM_MEETING_SDK_CLIENT_SECRET"]:
         return jsonify({"error":"Meeting SDK credentials are not configured on the server."}),503
     sdk_role = 1 if row.created_by_id == user.id else 0
-    return jsonify({"signature":_sdk_signature(row.zoom_meeting_id,sdk_role),
+    result = {"signature":_sdk_signature(row.zoom_meeting_id,sdk_role),
         "client_id":cfg["ZOOM_MEETING_SDK_CLIENT_ID"],"meeting_number":row.zoom_meeting_id,
         "password":row.password or "","user_name":user.full_name,"user_email":user.email,
-        "role":sdk_role}),200
+        "role":sdk_role}
+    if sdk_role == 1:
+        try:
+            token = _zoom_token(cfg)
+            host_auth = _zoom_api("GET", "/users/me/token?type=zak", token)
+            result["zak"] = host_auth.get("token")
+            if not result["zak"]:
+                raise ValueError("Zoom did not return a host access token.")
+        except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
+            detail = "Zoom could not authorize the host. Confirm the Server-to-Server OAuth app has the User: View a user's ZAK token admin scope."
+            if isinstance(exc, HTTPError):
+                try: detail = json.loads(exc.read().decode()).get("message", detail)
+                except Exception: pass
+            return jsonify({"error":detail}),502
+    return jsonify(result),200
 
 @meetings_bp.post("/<int:meeting_id>/cancel")
 @roles_required("Admin","Supervisor")
