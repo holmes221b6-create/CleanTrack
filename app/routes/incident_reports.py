@@ -354,3 +354,61 @@ def supervisor_admin_report_history():
         IncidentReport.created_at >= cutoff
     ).order_by(IncidentReport.created_at.desc()).limit(300).all()
     return jsonify({"items": [row.to_dict() for row in rows]}), 200
+
+
+@incident_reports_bp.patch("/supervisor/incident-reports/<int:report_id>/status")
+@roles_required("Supervisor")
+def supervisor_update_report_status(report_id):
+    user = get_current_user()
+    report = _query(user).filter_by(id=report_id, supervisor_id=user.id, origin="staff").first_or_404()
+    data = request.get_json(silent=True) or {}
+    new_status = str(data.get("status") or "").lower()
+    note = str(data.get("note") or "").strip()
+    allowed = {"acknowledged", "in_progress", "awaiting_staff_response"}
+    if new_status not in allowed:
+        return jsonify({"error": "Choose a valid Supervisor lifecycle status."}), 400
+    if report.status in {"resolved", "resolution_submitted"}:
+        return jsonify({"error": "This report is already in the resolution stage and cannot be moved backwards."}), 409
+    if report.status == "reported" and new_status == "awaiting_staff_response":
+        return jsonify({"error": "A report must be acknowledged before requesting more information."}), 409
+    if new_status == "awaiting_staff_response" and not note:
+        return jsonify({"error": "Add a note explaining what information is required from Staff."}), 400
+    report.status = new_status
+    _event(report, user, "status_changed", "Status changed to " + new_status.replace("_", " ") + (": " + note[:3000] if note else "."))
+    _notify(report.reported_by_id, user.organization_id, "Incident report update",
+        "Your report " + report.title + " is now " + new_status.replace("_", " ") + (". " + note[:700] if note else "."),
+        report.id, "incident_status")
+    db.session.commit()
+    return jsonify({"item": report.to_dict()}), 200
+
+
+@incident_reports_bp.post("/incident-reports/<int:report_id>/attachments")
+@roles_required("Staff")
+def staff_add_incident_evidence(report_id):
+    user = get_current_user()
+    report = _query(user).filter_by(id=report_id, reported_by_id=user.id).first_or_404()
+    if report.status == "resolved":
+        return jsonify({"error": "Evidence cannot be added after the report is resolved."}), 409
+    try:
+        rows = _save_evidence(report, user, request.files.getlist("evidence"), required=True)
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"error": str(exc)}), 400
+    _event(report, user, "evidence_added", str(len(rows)) + " evidence attachment(s) added.")
+    db.session.commit()
+    return jsonify({"attachments": [row.to_dict() for row in rows]}), 201
+
+
+@incident_reports_bp.get("/incident-reports/attachments/<int:attachment_id>/download")
+@roles_required("Staff", "Supervisor", "Admin")
+def download_incident_evidence(attachment_id):
+    user = get_current_user()
+    attachment = IncidentReportAttachment.query.filter_by(
+        id=attachment_id, organization_id=user.organization_id
+    ).first_or_404()
+    report = _query(user).filter_by(id=attachment.report_id).first_or_404()
+    role = str(user.role or "").lower()
+    if (role == "staff" and report.reported_by_id != user.id) or (role == "supervisor" and report.supervisor_id != user.id) or (role == "admin" and not report.forwarded_at):
+        return jsonify({"error": "You do not have access to this evidence."}), 404
+    return send_file(BytesIO(attachment.data), mimetype=attachment.content_type,
+        as_attachment=True, download_name=attachment.filename, max_age=0)
