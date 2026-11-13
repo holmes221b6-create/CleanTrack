@@ -242,6 +242,17 @@ def schedules_list():
     return jsonify({"schedules":[{"id":s.id,"title":s.title,"assigned_to_id":s.assigned_to_id,"assigned_to":s.assignee.full_name if s.assignee else None,
         "recurrence":s.recurrence,"first_due_at":s.first_due_at.isoformat(),"active":s.active,"timezone":s.timezone_name} for s in rows]}),200
 
+@quality_bp.patch("/schedules/<int:schedule_id>")
+@roles_required("Supervisor")
+def schedule_update(schedule_id):
+    user=get_current_user();team,err=_team_scope(user)
+    if err:return err
+    row=InspectionSchedule.query.filter_by(id=schedule_id,organization_id=user.organization_id,team_id=team.id).first_or_404()
+    d=request.get_json(silent=True) or {}
+    if "active" in d: row.active=bool(d["active"])
+    db.session.commit()
+    return jsonify({"message":"Inspection schedule updated.","active":row.active}),200
+
 @quality_bp.post("/schedules")
 @roles_required("Supervisor")
 def schedule_create():
