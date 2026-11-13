@@ -378,6 +378,9 @@ def create_app(config_class=Config):
             "operation_scheduler_running": bool(
                 getattr(app.extensions.get("cleantrack_operation_scheduler"), "running", False)
             ),
+            "quality_scheduler_running": bool(
+                getattr(app.extensions.get("mechnar_quality_scheduler"), "running", False)
+            ),
         }), 200
 
     @app.get("/api/health/db")
