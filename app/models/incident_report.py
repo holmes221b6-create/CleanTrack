@@ -32,6 +32,8 @@ class IncidentReport(db.Model):
     supervisor_note = db.Column(db.Text)
     admin_acknowledged_at = db.Column(db.DateTime(timezone=True))
     admin_acknowledged_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    admin_resolution_acknowledged_at = db.Column(db.DateTime(timezone=True))
+    admin_resolution_acknowledged_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, index=True)
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
@@ -39,6 +41,7 @@ class IncidentReport(db.Model):
     supervisor = db.relationship("User", foreign_keys=[supervisor_id])
     forwarder = db.relationship("User", foreign_keys=[forwarded_by_id])
     admin_acknowledger = db.relationship("User", foreign_keys=[admin_acknowledged_by_id])
+    admin_resolution_acknowledger = db.relationship("User", foreign_keys=[admin_resolution_acknowledged_by_id])
     operation = db.relationship("Operation")
     location = db.relationship("Location")
     zone = db.relationship("Zone")
@@ -59,6 +62,7 @@ class IncidentReport(db.Model):
             "forwarded_at": self.forwarded_at.isoformat() if self.forwarded_at else None,
             "supervisor_note": self.supervisor_note,
             "admin_acknowledged_at": self.admin_acknowledged_at.isoformat() if self.admin_acknowledged_at else None,
+            "admin_resolution_acknowledged_at": self.admin_resolution_acknowledged_at.isoformat() if self.admin_resolution_acknowledged_at else None,
             "reported_by_id": self.reported_by_id,
             "reported_by": self.reporter.full_name if self.reporter else None,
             "supervisor_id": self.supervisor_id,
