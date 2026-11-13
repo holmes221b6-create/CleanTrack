@@ -46,6 +46,7 @@ class IncidentReport(db.Model):
     operation = db.relationship("Operation")
     location = db.relationship("Location")
     zone = db.relationship("Zone")
+    attachments = db.relationship("IncidentReportAttachment", back_populates="report", cascade="all, delete-orphan", lazy="selectin")
 
     def to_dict(self):
         return {
@@ -74,6 +75,7 @@ class IncidentReport(db.Model):
             "location_name": self.location.name if self.location else None,
             "zone_id": self.zone_id,
             "zone_name": self.zone.name if self.zone else None,
+            "attachments": [item.to_dict() for item in sorted(self.attachments, key=lambda row: row.created_at or utc_now())],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -98,4 +100,37 @@ class IncidentReportEvent(db.Model):
             "event_type": self.event_type,
             "message": self.message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+
+class IncidentReportAttachment(db.Model):
+    """Private evidence file attached to an incident or issue report."""
+    __tablename__ = "incident_report_attachments"
+
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, db.ForeignKey("incident_reports.id", ondelete="CASCADE"), nullable=False, index=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    uploaded_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    filename = db.Column(db.String(255), nullable=False)
+    content_type = db.Column(db.String(120), nullable=False)
+    category = db.Column(db.String(20), nullable=False, default="file")
+    size = db.Column(db.Integer, nullable=False)
+    data = db.Column(db.LargeBinary, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+
+    report = db.relationship("IncidentReport", back_populates="attachments")
+    uploaded_by = db.relationship("User")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "filename": self.filename,
+            "content_type": self.content_type,
+            "category": self.category,
+            "size": self.size,
+            "uploaded_by_id": self.uploaded_by_id,
+            "uploaded_by": self.uploaded_by.full_name if self.uploaded_by else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "download_url": f"/api/incident-reports/attachments/{self.id}/download",
         }
