@@ -480,7 +480,8 @@ def quality_analytics():
     passed=[r for r in completed if r.outcome=="pass"]
     failed=[r for r in completed if r.outcome=="fail"]
     now=datetime.now(timezone.utc)
-    pending=[r for r in rows if r.status in {"scheduled","in_progress","submitted","returned"}]
+    pending=[r for r in rows if r.status in {"scheduled","in_progress","returned"}]
+    awaiting_review=sum(1 for r in rows if r.status=="submitted")
     overdue=[r for r in pending if r.scheduled_at and r.scheduled_at<now]
     item_failures={}
     location_groups={}
@@ -511,7 +512,7 @@ def quality_analytics():
             "passed":sum(1 for r in subset if r.outcome=="pass"),"failed":sum(1 for r in subset if r.outcome=="fail")})
     returned=sum(1 for r in rows if r.status in {"returned","admin_returned"})
     submitted=sum(1 for r in rows if r.submitted_at is not None)
-    return jsonify({"total":len(rows),"completed":len(completed),"pending":len(pending),"overdue":len(overdue),
+    return jsonify({"total":len(rows),"completed":len(completed),"pending":len(pending),"awaiting_review":awaiting_review,"overdue":len(overdue),
         "pass_rate":round(len(passed)/len(completed)*100,1) if completed else None,"passed":len(passed),"failed":len(failed),
         "returned":returned,"reinspection_rate":round(returned/submitted*100,1) if submitted else None,
         "average_score":round(sum(r.score for r in completed if r.score is not None)/max(1,sum(1 for r in completed if r.score is not None)),1) if any(r.score is not None for r in completed) else None,
