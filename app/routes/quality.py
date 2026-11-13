@@ -445,7 +445,7 @@ def inspection_admin_review(record_id):
     row.admin_reviewed_at=datetime.now(timezone.utc);row.admin_notes=notes
     row.status="admin_acknowledged" if action=="acknowledge" else "admin_returned"
     if action=="return":
-        supervisors=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(TeamMember.team_id==row.team_id,User.role=="Supervisor",User.organization_id=user.organization_id,User.account_status=="active").all()
+        supervisors=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(TeamMember.team_id==row.team_id,User.role=="Supervisor",User.organization_id==user.organization_id,User.account_status=="active").all()
         for sup in supervisors:_notify(sup,"Admin returned an inspection report",notes,row)
     db.session.commit();return jsonify({"inspection":row.to_dict()}),200
 
