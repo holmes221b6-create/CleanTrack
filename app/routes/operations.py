@@ -181,6 +181,47 @@ def _send_review_email(recipient, operation, decision, feedback):
     return "sent" if _send_mechnar_email(recipient.email, subject, text_body) else "failed"
 
 
+def _submission_validation_summary(operation, execution):
+    """Return requirement-by-requirement validation for the exact submitted attempt."""
+    checks = []
+    checklist = operation.checklist if isinstance(operation.checklist, list) else []
+    results = execution.checklist_results if execution and isinstance(execution.checklist_results, list) else []
+    results_by_item = {row.get("item"): row.get("completed") is True for row in results if isinstance(row, dict)}
+    for item in checklist:
+        checks.append({"label": "Checklist: " + str(item), "category": "checklist", "satisfied": results_by_item.get(item, False)})
+
+    evidence_query = TaskEvidence.query.filter(TaskEvidence.operation_id == operation.id)
+    if execution:
+        evidence_query = evidence_query.filter((TaskEvidence.execution_id == execution.id) | (TaskEvidence.execution_id.is_(None)))
+    else:
+        evidence_query = evidence_query.filter(TaskEvidence.execution_id.is_(None))
+    evidence_rows = evidence_query.all()
+    evidence_types = {row.evidence_type for row in evidence_rows}
+    photo_stages = {row.stage for row in evidence_rows if row.evidence_type == "photo"}
+    required = operation.required_evidence if isinstance(operation.required_evidence, list) else []
+    evidence_checks = {
+        "photo": ("At least one photo", "photo" in evidence_types),
+        "before_photo": ("Before-work photo", "before" in photo_stages),
+        "after_photo": ("After-work photo", "after" in photo_stages),
+        "document": ("Document or attachment", "document" in evidence_types),
+        "note": ("Completion note", bool(execution and (execution.completion_notes or "").strip())),
+    }
+    for key in required:
+        if key in evidence_checks:
+            label, satisfied = evidence_checks[key]
+            checks.append({"label": label, "category": "evidence", "satisfied": satisfied})
+
+    qualifications = operation.required_qualifications if isinstance(operation.required_qualifications, list) else []
+    performer_id = execution.performed_by_id if execution else operation.assigned_to_id
+    held = set()
+    if performer_id and qualifications:
+        held = {str(item.title or "").strip().casefold() for item in ProfileQualification.query.filter_by(user_id=performer_id).all()}
+    for qualification in qualifications:
+        checks.append({"label": "Qualification: " + str(qualification), "category": "qualification", "satisfied": str(qualification).strip().casefold() in held})
+
+    return {"checks": checks, "total": len(checks), "satisfied": sum(1 for item in checks if item["satisfied"]), "all_satisfied": all(item["satisfied"] for item in checks)}
+
+
 def _operation_is_overdue(operation, now=None):
     now = now or datetime.now(timezone.utc)
     due = operation.due_at
@@ -715,6 +756,7 @@ def get_operation(operation_id):
     ).all()
     result["executions"] = [entry.to_dict() for entry in executions]
     latest_execution = executions[-1] if executions else None
+    result["validation_summary"] = _submission_validation_summary(operation, latest_execution)
     if latest_execution:
         result["started_at"] = latest_execution.started_at.isoformat() if latest_execution.started_at else None
         result["execution_submitted_at"] = latest_execution.submitted_at.isoformat() if latest_execution.submitted_at else None
@@ -1123,8 +1165,8 @@ def start_operation(operation_id):
     elif user.role == "Supervisor":
         if operation.assigned_to_id != user.id and not _can_manage(operation, user):
             return jsonify({"error": "You can only start work for an operation assigned to you or within your authorized team."}), 403
-    if operation.status.lower() not in {"assigned", "pending", "rejected"}:
-        return jsonify({"error": "Only pending, assigned, or rejected work can be started."}), 409
+    if operation.status.lower() not in {"assigned", "pending", "resubmission required"}:
+        return jsonify({"error": "Only pending, assigned, or work returned for resubmission can be started."}), 409
     previous = operation.status
     operation.status = "In Progress"
     latest_attempt = db.session.query(func.max(OperationExecution.attempt_number)).filter_by(
@@ -1267,7 +1309,7 @@ def supervisor_review_queue():
     items = Operation.query.filter(
         Operation.organization_id == user.organization_id,
         Operation.team_id.in_(team_ids),
-        func.lower(Operation.status).in_(("submitted", "completed", "rejected")),
+        func.lower(Operation.status).in_(("submitted", "completed", "rejected", "resubmission required")),
         Operation.requires_verification.is_(True),
     ).order_by(Operation.submitted_at.asc(), Operation.created_at.asc()).limit(500).all()
     operation_ids = [item.id for item in items]
@@ -1275,7 +1317,7 @@ def supervisor_review_queue():
     if operation_ids:
         executions = OperationExecution.query.filter(
             OperationExecution.operation_id.in_(operation_ids),
-            func.lower(OperationExecution.status).in_(("submitted", "completed", "rejected")),
+            func.lower(OperationExecution.status).in_(("submitted", "completed", "rejected", "resubmission required")),
         ).order_by(OperationExecution.attempt_number.desc(), OperationExecution.created_at.desc()).all()
         for execution in executions:
             latest_execution.setdefault(execution.operation_id, execution)
@@ -1449,7 +1491,7 @@ def review_operation(operation_id):
     if decision in {"reject", "request_resubmission"} and not feedback:
         return jsonify({"error": "A reason or correction instruction is required for this decision."}), 400
     previous = operation.status
-    operation.status = "Completed" if decision == "approve" else "Rejected"
+    operation.status = "Completed" if decision == "approve" else ("Resubmission Required" if decision == "request_resubmission" else "Rejected")
     operation.review_feedback = feedback or None
     operation.reviewed_at = datetime.now(timezone.utc)
     execution = OperationExecution.query.filter_by(
@@ -1474,7 +1516,7 @@ def review_operation(operation_id):
     if execution is None:
         db.session.rollback()
         return jsonify({"error": "No execution record could be associated with this submission. The review was not saved."}), 409
-    execution.status = "Completed" if decision == "approve" else "Rejected"
+    execution.status = "Completed" if decision == "approve" else ("Resubmission Required" if decision == "request_resubmission" else "Rejected")
     execution.verified_by_id = user.id
     execution.verified_at = operation.reviewed_at
     execution.review_feedback = feedback or None
@@ -1506,7 +1548,7 @@ def review_operation(operation_id):
     recipient = db.session.get(User, operation.assigned_to_id) if operation.assigned_to_id else None
     email_delivery = _send_review_email(recipient, operation, decision, feedback)
     return jsonify({
-        "message": ("Operation verified and completed." if decision == "approve" else ("Corrections requested. The assignee can start a new attempt and resubmit." if decision == "request_resubmission" else "Operation rejected. The assignee can review the reason and start a new attempt if permitted.")),
+        "message": ("Operation verified and completed." if decision == "approve" else ("Corrections requested. The assignee can start a new attempt and resubmit." if decision == "request_resubmission" else "Operation rejected. This submission is closed.")),
         "operation": operation.to_dict(),
         "execution": execution.to_dict(),
         "employee_notification": "created" if operation.assigned_to_id else "not_available",
