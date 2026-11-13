@@ -9,6 +9,7 @@ from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.notification import Notification
 from app.models.audit_log import AuditLog
+from app.models.operational_records import QualityInspection
 from app.services.permissions import get_current_user, roles_required
 
 quality_bp = Blueprint("quality", __name__, url_prefix="/api/quality")
@@ -118,6 +119,29 @@ def _materialize_team(team_id, organization_id):
     schedules = InspectionSchedule.query.filter_by(team_id=team_id, organization_id=organization_id, active=True).all()
     for schedule in schedules: _materialize(schedule)
     if schedules: db.session.commit()
+
+def _import_legacy_inspections(user, team=None):
+    query=QualityInspection.query.filter_by(organization_id=user.organization_id)
+    if team is not None: query=query.filter_by(team_id=team.id)
+    legacy_rows=query.order_by(QualityInspection.created_at.asc()).limit(3000).all()
+    existing={row[0] for row in db.session.query(InspectionRecord.legacy_source_id).filter(
+        InspectionRecord.legacy_source_id.isnot(None),InspectionRecord.organization_id==user.organization_id).all()}
+    changed=False
+    for old in legacy_rows:
+        if old.id in existing: continue
+        checklist=old.checklist or []
+        passed=sum(1 for item in checklist if isinstance(item,dict) and item.get("checked"))
+        score=round(passed/len(checklist)*100,1) if checklist else None
+        done=old.status=="completed"
+        row=InspectionRecord(organization_id=old.organization_id,team_id=old.team_id,
+            legacy_source_id=old.id,created_by_id=old.created_by_id,assigned_to_id=old.created_by_id,
+            inspected_by_id=old.created_by_id if done else None,operation_id=old.operation_id,
+            location_id=old.location_id,zone_id=old.zone_id,title=old.title,checklist=checklist,
+            status="legacy_completed" if done else "scheduled",outcome=old.outcome,
+            findings=old.findings,score=score,scheduled_at=old.inspected_at or old.created_at,
+            submitted_at=old.inspected_at if done else None)
+        db.session.add(row);changed=True
+    if changed: db.session.commit()
 
 def _record_query(user, team=None):
     q = InspectionRecord.query.filter_by(organization_id=user.organization_id)
@@ -304,6 +328,8 @@ def inspections_list():
     if user.role=="Supervisor":
         team,err=_team_scope(user)
         if err:return err
+        _import_legacy_inspections(user,team)
+        _import_legacy_inspections(user,team)
         _materialize_team(team.id,user.organization_id)
         rows=_record_query(user,team).order_by(InspectionRecord.scheduled_at.desc()).limit(1000).all()
     elif user.role=="Staff":
@@ -313,6 +339,7 @@ def inspections_list():
         _materialize_team(team.id,user.organization_id)
         rows=_record_query(user,team).order_by(InspectionRecord.scheduled_at.desc()).limit(500).all()
     else:
+        _import_legacy_inspections(user)
         rows=InspectionRecord.query.filter_by(organization_id=user.organization_id).order_by(InspectionRecord.scheduled_at.desc()).limit(2000).all()
     return jsonify({"items":[x.to_dict() for x in rows]}),200
 
@@ -395,8 +422,9 @@ def quality_analytics():
         if err:return err
         q=InspectionRecord.query.filter_by(organization_id=user.organization_id,team_id=team.id)
     else:q=InspectionRecord.query.filter_by(organization_id=user.organization_id)
+    _import_legacy_inspections(user,team if user.role=="Supervisor" else None)
     rows=q.order_by(InspectionRecord.scheduled_at.desc()).limit(5000).all()
-    completed=[r for r in rows if r.status in {"approved","forwarded","admin_acknowledged","admin_returned"}]
+    completed=[r for r in rows if r.status in {"approved","forwarded","admin_acknowledged","admin_returned","legacy_completed"}]
     passed=[r for r in completed if r.outcome=="pass"]
     failed=[r for r in completed if r.outcome=="fail"]
     now=datetime.now(timezone.utc)
