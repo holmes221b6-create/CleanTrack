@@ -401,6 +401,22 @@ def inspection_admin_review(record_id):
         for sup in supervisors:_notify(sup,"Admin returned an inspection report",notes,row)
     db.session.commit();return jsonify({"inspection":row.to_dict()}),200
 
+@quality_bp.post("/inspections/<int:record_id>/resend-admin")
+@roles_required("Supervisor")
+def inspection_resend_admin(record_id):
+    user=get_current_user();team,err=_team_scope(user)
+    if err:return err
+    row=InspectionRecord.query.filter_by(id=record_id,organization_id=user.organization_id,team_id=team.id,status="admin_returned").first_or_404()
+    d=request.get_json(silent=True) or {}
+    row.admin_notes=str(d.get("notes") or "").strip()[:4000]
+    row.admin_reviewed_at=None
+    row.forwarded_at=datetime.now(timezone.utc)
+    row.status="forwarded"
+    admins=User.query.filter_by(organization_id=user.organization_id,role="Admin",account_status="active").all()
+    for admin in admins:_notify(admin,"Updated inspection report resubmitted",f"{row.title} has been resubmitted by {user.full_name}.",row)
+    db.session.commit()
+    return jsonify({"inspection":row.to_dict()}),200
+
 @quality_bp.get("/analytics")
 @roles_required("Supervisor","Admin")
 def quality_analytics():
