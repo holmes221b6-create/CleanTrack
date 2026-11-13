@@ -394,8 +394,14 @@ def supervisor_update_report_status(report_id):
         return jsonify({"error": "Choose a valid Supervisor lifecycle status."}), 400
     if report.status in {"resolved", "resolution_submitted"}:
         return jsonify({"error": "This report is already in the resolution stage and cannot be moved backwards."}), 409
-    if report.status == "reported" and new_status == "awaiting_staff_response":
-        return jsonify({"error": "A report must be acknowledged before requesting more information."}), 409
+    transitions = {
+        "reported": {"acknowledged", "in_progress"},
+        "acknowledged": {"in_progress", "awaiting_staff_response"},
+        "in_progress": {"awaiting_staff_response"},
+        "awaiting_staff_response": {"in_progress"},
+    }
+    if new_status not in transitions.get(report.status, set()):
+        return jsonify({"error": "That lifecycle transition is not allowed from the current status."}), 409
     if new_status == "awaiting_staff_response" and not note:
         return jsonify({"error": "Add a note explaining what information is required from Staff."}), 400
     report.status = new_status
