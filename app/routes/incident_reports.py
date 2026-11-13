@@ -53,9 +53,18 @@ def _optional_ref(value, model, user, team_id, label):
 def create_staff_report():
     user = get_current_user()
     memberships = _memberships(user)
-    if len(memberships) != 1:
-        return jsonify({"error": "Your account must belong to exactly one active team."}), 409
-    _, team = memberships[0]
+    requested_team_id = (request.get_json(silent=True) or {}).get("team_id")
+    if requested_team_id not in (None, ""):
+        try:
+            requested_team_id = int(requested_team_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Select a valid team."}), 400
+        selected = [pair for pair in memberships if pair[1].id == requested_team_id]
+    else:
+        selected = memberships if len(memberships) == 1 else []
+    if len(selected) != 1:
+        return jsonify({"error": "Select one of your assigned teams before submitting this report."}), 409
+    _, team = selected[0]
     supervisors = (User.query.join(TeamMember, TeamMember.user_id == User.id)
         .filter(TeamMember.team_id == team.id, User.organization_id == user.organization_id,
                 User.role == "Supervisor", User.account_status == "active").all())
