@@ -213,6 +213,7 @@ def create_app(config_class=Config):
                 incident_additions = {
                     "admin_resolution_acknowledged_at": "TIMESTAMP WITH TIME ZONE",
                     "admin_resolution_acknowledged_by_id": "INTEGER REFERENCES users(id)",
+                    "origin": "VARCHAR(20) NOT NULL DEFAULT 'staff'",
                 }
                 for column, sql_type in incident_additions.items():
                     if column not in incident_columns:
