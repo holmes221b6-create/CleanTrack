@@ -510,4 +510,4 @@ def quality_analytics():
         "returned":returned,"reinspection_rate":round(returned/submitted*100,1) if submitted else None,
         "average_score":round(sum(r.score for r in completed if r.score is not None)/max(1,sum(1 for r in completed if r.score is not None)),1) if any(r.score is not None for r in completed) else None,
         "repeated_failures":recurring,"by_location":by_location,"monthly_trend":trend,
-        "recent":[r.to_dict() for r in rows[:20]]}),2000
+        "recent":[r.to_dict() for r in rows[:20]]}),200
