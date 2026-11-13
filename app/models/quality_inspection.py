@@ -69,6 +69,7 @@ class InspectionRecord(db.Model):
     organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=False, index=True)
     schedule_id = db.Column(db.Integer, db.ForeignKey("inspection_schedules.id", ondelete="SET NULL"), nullable=True, index=True)
+    legacy_source_id = db.Column(db.Integer, nullable=True, unique=True)
     template_id = db.Column(db.Integer, db.ForeignKey("inspection_templates.id"), nullable=True)
     created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     assigned_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
@@ -103,7 +104,7 @@ class InspectionRecord(db.Model):
     __table_args__ = (db.UniqueConstraint("schedule_id", "scheduled_at", name="uq_inspection_schedule_occurrence"),)
 
     def to_dict(self):
-        return {"id": self.id, "title": self.title, "team_id": self.team_id, "schedule_id": self.schedule_id,
+        return {"id": self.id, "title": self.title, "team_id": self.team_id, "schedule_id": self.schedule_id, "legacy": self.legacy_source_id is not None,
                 "template_id": self.template_id, "checklist": self.checklist or [], "status": self.status,
                 "outcome": self.outcome, "findings": self.findings, "score": self.score,
                 "scheduled_at": self.scheduled_at.isoformat() if self.scheduled_at else None,
