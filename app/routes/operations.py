@@ -334,6 +334,43 @@ def _team_context(team_id, location_id, zone_id, user, allow_area_only=False):
     return None
 
 
+@operations_bp.get("/capacity-preview")
+@roles_required("Admin", "Supervisor")
+def operation_capacity_preview():
+    user=get_current_user()
+    try: team_id=int(request.args.get("team_id",""))
+    except (TypeError,ValueError): return jsonify({"error":"Choose a valid team."}),400
+    team=Team.query.filter_by(id=team_id,organization_id=user.organization_id,status="active").first()
+    if not team:return jsonify({"error":"Team not found."}),404
+    if user.role=="Supervisor" and team_id not in _team_ids(user):
+        return jsonify({"error":"You can only review capacity for your assigned teams."}),403
+    members=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
+        TeamMember.team_id==team_id,User.organization_id==user.organization_id,
+        User.account_status=="active",User.role=="Staff").all()
+    member_ids=[m.id for m in members]
+    open_ops=Operation.query.filter(Operation.organization_id==user.organization_id,
+        Operation.team_id==team_id,db.func.lower(Operation.status).notin_(
+            ["completed","approved","verified","closed","cancelled","canceled"])).all()
+    busy_ids={op.assigned_to_id for op in open_ops if op.assigned_to_id in member_ids}
+    high_ops=[op for op in open_ops if str(op.priority or "").lower() in {"high","urgent","critical"}]
+    result={"team_id":team_id,"team_name":team.name,"staff_count":len(member_ids),
+        "busy_staff":len(busy_ids),"available_staff":max(0,len(member_ids)-len(busy_ids)),
+        "utilization_percent":round(len(busy_ids)/len(member_ids)*100) if member_ids else 0,
+        "open_operations":len(open_ops),"high_priority_operations":len(high_ops),
+        "unestimated_operations":sum(1 for op in open_ops if op.estimated_minutes is None)}
+    assignee_raw=request.args.get("assigned_to_id")
+    if assignee_raw:
+        try: assignee_id=int(assignee_raw)
+        except (TypeError,ValueError):return jsonify({"error":"Invalid assignee."}),400
+        if assignee_id not in member_ids:return jsonify({"error":"Selected person is not an active Staff member in this team."}),400
+        personal=[op for op in open_ops if op.assigned_to_id==assignee_id]
+        result["assignee"]={"id":assignee_id,"open_operations":len(personal),
+            "high_priority_operations":sum(1 for op in personal if str(op.priority or "").lower() in {"high","urgent","critical"}),
+            "estimated_minutes":sum(int(op.estimated_minutes or 0) for op in personal),
+            "missing_estimates":sum(1 for op in personal if op.estimated_minutes is None)}
+    return jsonify({"capacity":result}),200
+
+
 @operations_bp.route("", methods=["GET", "POST"])
 @roles_required("Admin", "Supervisor", "Staff")
 def operations_collection():
