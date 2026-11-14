@@ -155,7 +155,10 @@ def inventory_create():
         storage_location=str(d.get("storage_location") or "")[:180],team_id=d.get("team_id"),
         assigned_to_id=d.get("assigned_to_id"),purchase_date=datetime.strptime(d["purchase_date"],"%Y-%m-%d").date() if d.get("purchase_date") else None,
         warranty_until=datetime.strptime(d["warranty_until"],"%Y-%m-%d").date() if d.get("warranty_until") else None,
-        notes=str(d.get("notes") or "")[:8000],created_by_id=user.id)
+        notes=str(d.get("notes") or "")[:8000],
+        maintenance_due_at=datetime.strptime(d["maintenance_due_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d.get("maintenance_due_at") else None,
+        last_maintenance_at=datetime.strptime(d["last_maintenance_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d.get("last_maintenance_at") else None,
+        created_by_id=user.id)
     db.session.add(item);db.session.commit()
     return jsonify({"item":_inventory_dict(item),"message":"Inventory item saved."}),201
 
@@ -176,6 +179,14 @@ def inventory_update(item_id):
                 if value<0:raise InvalidOperation()
                 setattr(item,key,value)
             except (InvalidOperation,ValueError):return jsonify({"error":f"{key} must be zero or greater."}),400
+    for key in ("purchase_date","warranty_until"):
+        if key in d:
+            try:setattr(item,key,datetime.strptime(d[key],"%Y-%m-%d").date() if d[key] else None)
+            except (TypeError,ValueError):return jsonify({"error":f"Invalid {key} date."}),400
+    for key in ("maintenance_due_at","last_maintenance_at"):
+        if key in d:
+            try:setattr(item,key,datetime.strptime(d[key],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d[key] else None)
+            except (TypeError,ValueError):return jsonify({"error":f"Invalid {key} date."}),400
     if "team_id" in d:
         if d["team_id"] is not None and not Team.query.filter_by(id=d["team_id"],organization_id=user.organization_id).first():return jsonify({"error":"Invalid team."}),400
         item.team_id=d["team_id"]
