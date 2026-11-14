@@ -10,6 +10,9 @@ from app.models.team_member import TeamMember
 from app.models.user import User
 from app.models.operation import Operation
 from app.models.notification import Notification
+from app.models.incident_report import IncidentReport
+from app.models.operational_records import ShiftHandover
+from app.models.quality_inspection import InspectionRecord
 from app.services.permissions import get_current_user, roles_required
 
 org_tools_bp = Blueprint("org_tools", __name__, url_prefix="/api/org-tools")
@@ -253,28 +256,51 @@ def _evaluate_escalations(organization_id):
     if not rules:return
     for rule in rules:
         cutoff=now-timedelta(minutes=rule.threshold_minutes)
-        q=Operation.query.filter(Operation.organization_id==organization_id,Operation.due_at.isnot(None),
-            Operation.due_at<=cutoff,Operation.status.notin_(list(DONE)))
-        if rule.team_id:q=q.filter(Operation.team_id==rule.team_id)
-        if rule.trigger_type=="high_priority_overdue":q=q.filter(Operation.priority.in_(["High","Critical","Urgent"]))
-        for op in q.limit(500).all():
+        candidates=[]
+        if rule.trigger_type in {"operation_overdue","high_priority_overdue"}:
+            q=Operation.query.filter(Operation.organization_id==organization_id,Operation.due_at.isnot(None),
+                Operation.due_at<=cutoff,Operation.status.notin_(list(DONE)))
+            if rule.team_id:q=q.filter(Operation.team_id==rule.team_id)
+            if rule.trigger_type=="high_priority_overdue":q=q.filter(Operation.priority.in_(["High","Critical","Urgent"]))
+            candidates=[("Operation",op.id,op.team_id,op.title,
+                f"{op.title} passed its due time by at least {rule.threshold_minutes} minutes.",
+                [op.assignee,op.assigned_supervisor]) for op in q.limit(500).all()]
+        elif rule.trigger_type=="incident_unacknowledged":
+            q=IncidentReport.query.filter(IncidentReport.organization_id==organization_id,
+                IncidentReport.supervisor_acknowledged_at.is_(None),IncidentReport.created_at<=cutoff,
+                IncidentReport.status.notin_(["resolved","closed","rejected"]))
+            if rule.team_id:q=q.filter(IncidentReport.team_id==rule.team_id)
+            candidates=[("IncidentReport",x.id,x.team_id,x.title,
+                f"Incident report has not been acknowledged within {rule.threshold_minutes} minutes.",
+                [x.reporter,x.supervisor]) for x in q.limit(500).all()]
+        elif rule.trigger_type=="inspection_failed":
+            q=InspectionRecord.query.filter(InspectionRecord.organization_id==organization_id,
+                InspectionRecord.outcome=="fail",InspectionRecord.status.notin_(["approved","closed"]))
+            if rule.team_id:q=q.filter(InspectionRecord.team_id==rule.team_id)
+            candidates=[("InspectionRecord",x.id,x.team_id,x.title,
+                "A failed inspection requires follow-up and review.",[x.assignee,x.reviewer]) for x in q.limit(500).all()]
+        elif rule.trigger_type=="handover_unacknowledged":
+            q=ShiftHandover.query.filter(ShiftHandover.organization_id==organization_id,
+                ShiftHandover.acknowledged_at.is_(None),ShiftHandover.outgoing_at<=cutoff,
+                ShiftHandover.status.notin_(["draft","cancelled","canceled"]))
+            if rule.team_id:q=q.filter(ShiftHandover.team_id==rule.team_id)
+            candidates=[("ShiftHandover",x.id,x.team_id,x.shift_label,
+                f"Shift handover has not been acknowledged within {rule.threshold_minutes} minutes.",
+                [x.creator]) for x in q.limit(500).all()]
+        for resource_type,resource_id,team_id,title,message,resource_recipients in candidates:
             exists=EscalationEvent.query.filter_by(organization_id=organization_id,rule_id=rule.id,
-                resource_type="Operation",resource_id=str(op.id)).first()
+                resource_type=resource_type,resource_id=str(resource_id)).first()
             if exists:continue
-            event=EscalationEvent(organization_id=organization_id,rule_id=rule.id,team_id=op.team_id,
-                resource_type="Operation",resource_id=str(op.id),title=f"Overdue operation: {op.title}",
-                message=f"{op.title} passed its due time by at least {rule.threshold_minutes} minutes.",
-                severity=rule.severity)
+            event=EscalationEvent(organization_id=organization_id,rule_id=rule.id,team_id=team_id,
+                resource_type=resource_type,resource_id=str(resource_id),title=f"Escalation: {title}",
+                message=message,severity=rule.severity)
             db.session.add(event);db.session.flush()
-            recipients=[]
-            if op.assigned_supervisor_id:
-                supervisor=db.session.get(User,op.assigned_supervisor_id)
-                if supervisor and supervisor.organization_id==organization_id:recipients.append(supervisor)
+            recipients=[x for x in resource_recipients if x]
             if rule.notify_admin:
                 recipients.extend(User.query.filter_by(organization_id=organization_id,role="Admin",account_status="active").all())
             seen=set()
             for recipient in recipients:
-                if recipient.id in seen:continue
+                if recipient.id in seen or recipient.organization_id!=organization_id or recipient.account_status!="active":continue
                 seen.add(recipient.id)
-                _notify(recipient,"Operational escalation",event.message,"escalation","EscalationEvent",event.id)
+                _notify(recipient,"Operational escalation",message,"escalation","EscalationEvent",event.id)
     db.session.commit()
