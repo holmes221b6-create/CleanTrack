@@ -36,7 +36,7 @@ from app.routes.analytics import analytics_bp
 from app.routes.reports import reports_bp
 from app.routes.billing import billing_bp
 from app.routes.meetings import meetings_bp
-from app.routes.organization_features import org_tools_bp
+from app.routes.organization_features import org_tools_bp, _evaluate_escalations
 from app.services.audit_retention import purge_expired_audit_logs
 
 from app.models.audit_log import AuditLog
@@ -340,6 +340,7 @@ def create_app(config_class=Config):
             if user is not None and user.organization_id:
                 _process_due_schedules(user.organization_id)
                 _process_escalations(user.organization_id)
+                _evaluate_escalations(user.organization_id)
         except Exception:
             # Anonymous/login requests and expired sessions should continue to
             # their normal handler. Do not turn a missed scheduler check into a
