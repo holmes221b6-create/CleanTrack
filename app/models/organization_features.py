@@ -1,0 +1,86 @@
+from datetime import datetime, timezone
+from app.extensions import db
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+class TeamPolicy(db.Model):
+    __tablename__ = "team_policies"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=False, index=True)
+    author_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    title = db.Column(db.String(180), nullable=False)
+    objectives = db.Column(db.Text)
+    responsibilities = db.Column(db.Text)
+    instructions = db.Column(db.Text)
+    standards = db.Column(db.Text)
+    safety_guidance = db.Column(db.Text)
+    status = db.Column(db.String(16), nullable=False, default="draft", index=True)
+    version = db.Column(db.Integer, nullable=False, default=1)
+    published_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+class InventoryItem(db.Model):
+    __tablename__ = "inventory_items"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    name = db.Column(db.String(180), nullable=False)
+    category = db.Column(db.String(80), nullable=False, default="General")
+    description = db.Column(db.Text)
+    sku = db.Column(db.String(80))
+    asset_tag = db.Column(db.String(100))
+    serial_number = db.Column(db.String(120))
+    quantity = db.Column(db.Numeric(12, 2), nullable=False, default=1)
+    minimum_quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    unit = db.Column(db.String(32), nullable=False, default="units")
+    condition = db.Column(db.String(24), nullable=False, default="good")
+    status = db.Column(db.String(24), nullable=False, default="available", index=True)
+    storage_location = db.Column(db.String(180))
+    location_id = db.Column(db.Integer, db.ForeignKey("locations.id"), index=True)
+    zone_id = db.Column(db.Integer, db.ForeignKey("zones.id"), index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), index=True)
+    assigned_to_id = db.Column(db.Integer, db.ForeignKey("users.id"), index=True)
+    purchase_date = db.Column(db.Date)
+    warranty_until = db.Column(db.Date)
+    maintenance_due_at = db.Column(db.DateTime(timezone=True), index=True)
+    last_maintenance_at = db.Column(db.DateTime(timezone=True))
+    notes = db.Column(db.Text)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+class EscalationRule(db.Model):
+    __tablename__ = "escalation_rules"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    name = db.Column(db.String(160), nullable=False)
+    trigger_type = db.Column(db.String(48), nullable=False, default="operation_overdue")
+    threshold_minutes = db.Column(db.Integer, nullable=False, default=60)
+    severity = db.Column(db.String(16), nullable=False, default="medium")
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), index=True)
+    notify_admin = db.Column(db.Boolean, nullable=False, default=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+class EscalationEvent(db.Model):
+    __tablename__ = "escalation_events"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    rule_id = db.Column(db.Integer, db.ForeignKey("escalation_rules.id"), nullable=False, index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), index=True)
+    resource_type = db.Column(db.String(40), nullable=False)
+    resource_id = db.Column(db.String(80), nullable=False)
+    title = db.Column(db.String(180), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    severity = db.Column(db.String(16), nullable=False, default="medium")
+    status = db.Column(db.String(20), nullable=False, default="open", index=True)
+    acknowledged_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    acknowledged_at = db.Column(db.DateTime(timezone=True))
+    resolved_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    resolved_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    __table_args__ = (db.UniqueConstraint("organization_id", "rule_id", "resource_type", "resource_id", name="uq_escalation_resource_rule"),)
