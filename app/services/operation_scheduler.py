@@ -388,10 +388,14 @@ def process_due_operations():
         .filter(Organization.status == "active")
         .order_by(Organization.id.asc()).all()
     ]
+    # Run MECHNAR's organisation-wide incident/inspection/operation risk
+    # evaluator in the same periodic dispatcher as operation reminders.
+    from app.routes.organization_features import _evaluate_escalations
     for organization_id in organization_ids:
         try:
             _process_schedules(organization_id, now)
             _process_reminders(organization_id, now)
+            _evaluate_escalations(organization_id)
         except Exception:
             db.session.rollback()
             raise
