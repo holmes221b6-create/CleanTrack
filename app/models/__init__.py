@@ -27,6 +27,7 @@ from app.models.profile_qualification import ProfileQualification
 from app.models.quality_inspection import TeamLeaderAssignment, InspectionTemplate, InspectionSchedule, InspectionRecord
 from app.models.zone import Zone
 from app.models.zone_floor_plan import ZoneFloorPlan
+from app.models.organization_features import TeamPolicy, InventoryItem, EscalationRule, EscalationEvent
 
 __all__ = [
     "Announcement",
@@ -65,6 +66,10 @@ __all__ = [
     "InspectionRecord",
     "Zone",
     "ZoneFloorPlan",
+    "TeamPolicy",
+    "InventoryItem",
+    "EscalationRule",
+    "EscalationEvent",
     "StaffOnboarding",
 ]
 
