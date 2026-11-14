@@ -350,7 +350,7 @@ def operation_capacity_preview():
     member_ids=[m.id for m in members]
     open_ops=Operation.query.filter(Operation.organization_id==user.organization_id,
         Operation.team_id==team_id,func.lower(Operation.status).notin_(
-            ["completed","approved","verified","closed","cancelled","canceled"])).all()
+            ["completed","approved","verified","closed","cancelled","canceled","submitted"])).all()
     busy_ids={op.assigned_to_id for op in open_ops if op.assigned_to_id in member_ids}
     high_ops=[op for op in open_ops if str(op.priority or "").lower() in {"high","urgent","critical"}]
     result={"team_id":team_id,"team_name":team.name,"staff_count":len(member_ids),
