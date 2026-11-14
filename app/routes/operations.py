@@ -349,7 +349,7 @@ def operation_capacity_preview():
         User.account_status=="active",User.role=="Staff").all()
     member_ids=[m.id for m in members]
     open_ops=Operation.query.filter(Operation.organization_id==user.organization_id,
-        Operation.team_id==team_id,db.func.lower(Operation.status).notin_(
+        Operation.team_id==team_id,func.lower(Operation.status).notin_(
             ["completed","approved","verified","closed","cancelled","canceled"])).all()
     busy_ids={op.assigned_to_id for op in open_ops if op.assigned_to_id in member_ids}
     high_ops=[op for op in open_ops if str(op.priority or "").lower() in {"high","urgent","critical"}]
@@ -357,6 +357,7 @@ def operation_capacity_preview():
         "busy_staff":len(busy_ids),"available_staff":max(0,len(member_ids)-len(busy_ids)),
         "utilization_percent":round(len(busy_ids)/len(member_ids)*100) if member_ids else 0,
         "open_operations":len(open_ops),"high_priority_operations":len(high_ops),
+        "high_priority_staff":len({op.assigned_to_id for op in high_ops if op.assigned_to_id in member_ids}),
         "unestimated_operations":sum(1 for op in open_ops if op.estimated_minutes is None)}
     assignee_raw=request.args.get("assigned_to_id")
     if assignee_raw:
