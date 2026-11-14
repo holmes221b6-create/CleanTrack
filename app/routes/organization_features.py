@@ -1,7 +1,7 @@
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, InvalidOperation
 from flask import Blueprint, jsonify, request
-from sqlalchemy import or_
+from sqlalchemy import or_, cast, String
 
 from app.extensions import db
 from app.models.organization_features import TeamPolicy, InventoryItem, EscalationRule, EscalationEvent
@@ -176,10 +176,10 @@ def escalation_list():
         ids=_team_ids(user)
         if user.role=="Supervisor":q=q.filter(EscalationEvent.team_id.in_(ids)) if ids else q.filter(EscalationEvent.id<0)
         else:
-            assigned=Operation.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(Operation.id)
-            incidents=IncidentReport.query.filter_by(organization_id=user.organization_id,reported_by_id=user.id).with_entities(IncidentReport.id)
-            handovers=ShiftHandover.query.filter_by(organization_id=user.organization_id,created_by_id=user.id).with_entities(ShiftHandover.id)
-            inspections=InspectionRecord.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(InspectionRecord.id)
+            assigned=Operation.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(cast(Operation.id, String))
+            incidents=IncidentReport.query.filter_by(organization_id=user.organization_id,reported_by_id=user.id).with_entities(cast(IncidentReport.id, String))
+            handovers=ShiftHandover.query.filter_by(organization_id=user.organization_id,created_by_id=user.id).with_entities(cast(ShiftHandover.id, String))
+            inspections=InspectionRecord.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(cast(InspectionRecord.id, String))
             q=q.filter(or_(
                 (EscalationEvent.resource_type=="Operation") & EscalationEvent.resource_id.in_(assigned),
                 (EscalationEvent.resource_type=="IncidentReport") & EscalationEvent.resource_id.in_(incidents),
