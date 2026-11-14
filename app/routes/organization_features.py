@@ -357,8 +357,8 @@ def _evaluate_escalations(organization_id):
         elif rule.trigger_type=="inspection_repeat_failure":
             since=now-timedelta(days=30)
             failed=InspectionRecord.query.filter(InspectionRecord.organization_id==organization_id,
-                InspectionRecord.outcome=="fail",InspectionRecord.created_at>=since).order_by(
-                InspectionRecord.created_at.desc()).limit(1500).all()
+                InspectionRecord.outcome=="fail",InspectionRecord.submitted_at>=since).order_by(
+                InspectionRecord.submitted_at.desc()).limit(1500).all()
             patterns={}
             for row in failed:
                 key=(row.team_id,row.location_id,row.zone_id,(row.title or "").strip().lower())
