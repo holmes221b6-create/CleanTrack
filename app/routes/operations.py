@@ -362,7 +362,11 @@ def operation_capacity_preview():
     if assignee_raw:
         try: assignee_id=int(assignee_raw)
         except (TypeError,ValueError):return jsonify({"error":"Invalid assignee."}),400
-        if assignee_id not in member_ids:return jsonify({"error":"Selected person is not an active Staff member in this team."}),400
+        selected=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
+            TeamMember.team_id==team_id,User.id==assignee_id,
+            User.organization_id==user.organization_id,User.account_status=="active",
+            User.role.in_(["Staff","Supervisor"])).first()
+        if selected is None:return jsonify({"error":"Selected person is not an active member of this team."}),400
         personal=[op for op in open_ops if op.assigned_to_id==assignee_id]
         result["assignee"]={"id":assignee_id,"open_operations":len(personal),
             "high_priority_operations":sum(1 for op in personal if str(op.priority or "").lower() in {"high","urgent","critical"}),
