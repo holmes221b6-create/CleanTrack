@@ -231,13 +231,20 @@ def workforce_capacity():
         open_ops=Operation.query.filter(Operation.organization_id==user.organization_id,Operation.team_id==team.id,Operation.status.notin_(list(DONE))).all()
         workload=sum(int(op.estimated_minutes or 0) for op in open_ops)
         people=[]
-        for person in members:
-            assigned=[op for op in open_ops if op.assigned_to_id==person.id]
-            people.append({"id":person.id,"name":person.full_name,"open_operations":len(assigned),
-                "estimated_minutes":sum(int(op.estimated_minutes or 0) for op in assigned)})
-        result.append({"team_id":team.id,"team_name":team.name,"staff_count":len(members),
-            "configured_capacity":team.capacity,"open_operations":len(open_ops),"estimated_workload_minutes":workload,
-            "people":people,"capacity_flag":"over_capacity" if team.capacity is not None and len(members)>team.capacity else "within_capacity"})
+        if user.role != "Staff":
+            for person in members:
+                assigned=[op for op in open_ops if op.assigned_to_id==person.id]
+                people.append({"id":person.id,"name":person.full_name,"open_operations":len(assigned),
+                    "estimated_minutes":sum(int(op.estimated_minutes or 0) for op in assigned)})
+        else:
+            own=[op for op in open_ops if op.assigned_to_id==user.id]
+            people=[{"id":user.id,"name":"My workload","open_operations":len(own),
+                "estimated_minutes":sum(int(op.estimated_minutes or 0) for op in own)}]
+        result.append({"team_id":team.id,"team_name":team.name,"staff_count":len(members) if user.role != "Staff" else None,
+            "configured_capacity":team.capacity if user.role != "Staff" else None,
+            "open_operations":len(open_ops) if user.role != "Staff" else len([op for op in open_ops if op.assigned_to_id==user.id]),
+            "estimated_workload_minutes":workload if user.role != "Staff" else sum(int(op.estimated_minutes or 0) for op in open_ops if op.assigned_to_id==user.id),
+            "people":people,"capacity_flag":"over_capacity" if user.role != "Staff" and team.capacity is not None and len(members)>team.capacity else "within_capacity"})
     return jsonify({"teams":result,"method":"Based on active team membership and open operations. Estimated workload uses operation estimated_minutes; missing estimates are not guessed."}),200
 
 def _evaluate_escalations(organization_id):
