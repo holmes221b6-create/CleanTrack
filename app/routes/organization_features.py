@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import hashlib
 from decimal import Decimal, InvalidOperation
 from flask import Blueprint, jsonify, request
 from sqlalchemy import or_, cast, String
@@ -304,9 +305,26 @@ def workforce_capacity():
     return jsonify({"teams":result,"method":"Based on active team membership and open operations. Estimated workload uses operation estimated_minutes; missing estimates are not guessed."}),200
 
 def _evaluate_escalations(organization_id):
+    # Organisation defaults are system-managed. No manual rule setup is needed.
+    defaults=[
+        ("MECHNAR · High incident unresolved","incident_high_unresolved",30,"high"),
+        ("MECHNAR · Critical incident unresolved","incident_critical_unresolved",5,"critical"),
+        ("MECHNAR · Repeated inspection failures","inspection_repeat_failure",0,"high"),
+        ("MECHNAR · High-priority operation overdue","high_priority_overdue",30,"high"),
+    ]
+    existing={r.name for r in EscalationRule.query.filter_by(organization_id=organization_id).all()}
+    system_actor=User.query.filter_by(organization_id=organization_id,role="Admin",account_status="active").first()
+    if system_actor is None:
+        system_actor=User.query.filter_by(organization_id=organization_id,account_status="active").first()
+    if system_actor:
+        for name,trigger,threshold,severity in defaults:
+            if name not in existing:
+                db.session.add(EscalationRule(organization_id=organization_id,name=name,
+                    trigger_type=trigger,threshold_minutes=threshold,severity=severity,
+                    team_id=None,notify_admin=True,enabled=True,created_by_id=system_actor.id))
+        db.session.flush()
     now=datetime.now(timezone.utc)
     rules=EscalationRule.query.filter_by(organization_id=organization_id,enabled=True).all()
-    if not rules:return
     for rule in rules:
         cutoff=now-timedelta(minutes=rule.threshold_minutes)
         candidates=[]
@@ -316,15 +334,19 @@ def _evaluate_escalations(organization_id):
             if rule.team_id:q=q.filter(Operation.team_id==rule.team_id)
             if rule.trigger_type=="high_priority_overdue":q=q.filter(Operation.priority.in_(["High","Critical","Urgent"]))
             candidates=[("Operation",op.id,op.team_id,op.title,
-                f"{op.title} passed its due time by at least {rule.threshold_minutes} minutes.",
+                f"{op.title} is still open at least {rule.threshold_minutes} minutes after its deadline.",
                 [op.assignee,op.assigned_supervisor]) for op in q.limit(500).all()]
-        elif rule.trigger_type=="incident_unacknowledged":
+        elif rule.trigger_type in {"incident_unacknowledged","incident_high_unresolved","incident_critical_unresolved"}:
             q=IncidentReport.query.filter(IncidentReport.organization_id==organization_id,
-                IncidentReport.supervisor_acknowledged_at.is_(None),IncidentReport.created_at<=cutoff,
+                IncidentReport.created_at<=cutoff,
                 IncidentReport.status.notin_(["resolved","closed","rejected"]))
+            if rule.trigger_type=="incident_unacknowledged":
+                q=q.filter(IncidentReport.supervisor_acknowledged_at.is_(None))
+            else:
+                q=q.filter(IncidentReport.severity==rule.severity)
             if rule.team_id:q=q.filter(IncidentReport.team_id==rule.team_id)
             candidates=[("IncidentReport",x.id,x.team_id,x.title,
-                f"Incident report has not been acknowledged within {rule.threshold_minutes} minutes.",
+                f"{rule.severity.title()} priority incident remains unresolved after {rule.threshold_minutes} minutes.",
                 [x.reporter,x.supervisor]) for x in q.limit(500).all()]
         elif rule.trigger_type=="inspection_failed":
             q=InspectionRecord.query.filter(InspectionRecord.organization_id==organization_id,
@@ -332,6 +354,27 @@ def _evaluate_escalations(organization_id):
             if rule.team_id:q=q.filter(InspectionRecord.team_id==rule.team_id)
             candidates=[("InspectionRecord",x.id,x.team_id,x.title,
                 "A failed inspection requires follow-up and review.",[x.assignee,x.reviewer]) for x in q.limit(500).all()]
+        elif rule.trigger_type=="inspection_repeat_failure":
+            since=now-timedelta(days=30)
+            failed=InspectionRecord.query.filter(InspectionRecord.organization_id==organization_id,
+                InspectionRecord.outcome=="fail",InspectionRecord.created_at>=since).order_by(
+                InspectionRecord.created_at.desc()).limit(1500).all()
+            patterns={}
+            for row in failed:
+                key=(row.team_id,row.location_id,row.zone_id,(row.title or "").strip().lower())
+                patterns.setdefault(key,[]).append(row)
+            for key,rows in patterns.items():
+                if len(rows)<2:continue
+                latest=rows[0]
+                fingerprint=hashlib.sha1("|".join(map(str,key)).encode("utf-8")).hexdigest()[:24]
+                recipients=[latest.assignee,latest.reviewer]
+                recipients.extend(User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
+                    TeamMember.team_id==latest.team_id,User.organization_id==organization_id,
+                    User.role=="Supervisor",User.account_status=="active").all())
+                candidates.append(("InspectionPattern","pattern:"+fingerprint,latest.team_id,
+                    latest.title or "Inspection pattern",
+                    f"MECHNAR detected {len(rows)} failed inspections with the same title and work area in the last 30 days. Review the recurring cause.",
+                    recipients))
         elif rule.trigger_type=="handover_unacknowledged":
             q=ShiftHandover.query.filter(ShiftHandover.organization_id==organization_id,
                 ShiftHandover.acknowledged_at.is_(None),ShiftHandover.outgoing_at<=cutoff,
@@ -345,7 +388,7 @@ def _evaluate_escalations(organization_id):
                 resource_type=resource_type,resource_id=str(resource_id)).first()
             if exists:continue
             event=EscalationEvent(organization_id=organization_id,rule_id=rule.id,team_id=team_id,
-                resource_type=resource_type,resource_id=str(resource_id),title=f"Escalation: {title}",
+                resource_type=resource_type,resource_id=str(resource_id),title=f"MECHNAR Alert: {title}",
                 message=message,severity=rule.severity)
             db.session.add(event);db.session.flush()
             recipients=[x for x in resource_recipients if x]
@@ -355,5 +398,5 @@ def _evaluate_escalations(organization_id):
             for recipient in recipients:
                 if recipient.id in seen or recipient.organization_id!=organization_id or recipient.account_status!="active":continue
                 seen.add(recipient.id)
-                _notify(recipient,"Operational escalation",message,"escalation","EscalationEvent",event.id)
+                _notify(recipient,"MECHNAR operational alert",message,"escalation","EscalationEvent",event.id)
     db.session.commit()
