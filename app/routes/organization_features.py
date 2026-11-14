@@ -75,7 +75,12 @@ def get_team_policy():
     result=[]
     for team in teams:
         policy=TeamPolicy.query.filter_by(organization_id=user.organization_id,team_id=team.id,status="published").order_by(TeamPolicy.version.desc(),TeamPolicy.id.desc()).first()
-        result.append({"team":{"id":team.id,"name":team.name},"policy":_policy_dict(policy) if policy else None})
+        drafts=[]
+        if user.role in {"Admin","Supervisor"}:
+            drafts=[_policy_dict(row) for row in TeamPolicy.query.filter_by(
+                organization_id=user.organization_id,team_id=team.id,status="draft"
+            ).order_by(TeamPolicy.updated_at.desc(),TeamPolicy.id.desc()).all()]
+        result.append({"team":{"id":team.id,"name":team.name},"policy":_policy_dict(policy) if policy else None,"drafts":drafts})
     return jsonify({"teams":result}),200
 
 @org_tools_bp.post("/team-policy")
@@ -89,16 +94,25 @@ def save_team_policy():
     title=str(data.get("title") or "").strip()
     if not title or len(title)>180: return jsonify({"error":"Policy title is required (maximum 180 characters)."}),400
     status="published" if data.get("publish") is True else "draft"
-    latest=TeamPolicy.query.filter_by(organization_id=user.organization_id,team_id=team.id).order_by(TeamPolicy.version.desc()).first()
-    policy=TeamPolicy(organization_id=user.organization_id,team_id=team.id,author_id=user.id,
-        title=title,objectives=str(data.get("objectives") or "")[:12000],
-        responsibilities=str(data.get("responsibilities") or "")[:12000],
-        instructions=str(data.get("instructions") or "")[:20000],
-        standards=str(data.get("standards") or "")[:12000],
-        safety_guidance=str(data.get("safety_guidance") or "")[:12000],
-        status=status,version=(latest.version+1 if latest else 1),
-        published_at=datetime.now(timezone.utc) if status=="published" else None)
-    db.session.add(policy); db.session.flush()
+    policy_id=data.get("policy_id")
+    if policy_id is not None:
+        policy=TeamPolicy.query.filter_by(id=policy_id,organization_id=user.organization_id,
+            team_id=team.id,status="draft").first()
+        if policy is None:return jsonify({"error":"Draft not found or no longer editable."}),404
+    else:
+        latest=TeamPolicy.query.filter_by(organization_id=user.organization_id,team_id=team.id).order_by(TeamPolicy.version.desc()).first()
+        policy=TeamPolicy(organization_id=user.organization_id,team_id=team.id,author_id=user.id,
+            version=(latest.version+1 if latest else 1))
+        db.session.add(policy)
+    policy.title=title
+    policy.objectives=str(data.get("objectives") or "")[:12000]
+    policy.responsibilities=str(data.get("responsibilities") or "")[:12000]
+    policy.instructions=str(data.get("instructions") or "")[:20000]
+    policy.standards=str(data.get("standards") or "")[:12000]
+    policy.safety_guidance=str(data.get("safety_guidance") or "")[:12000]
+    policy.status=status
+    policy.published_at=datetime.now(timezone.utc) if status=="published" else None
+    db.session.flush()
     if status=="published":
         recipients=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(
             TeamMember.team_id==team.id,User.organization_id==user.organization_id,
