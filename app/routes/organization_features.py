@@ -265,11 +265,25 @@ def workforce_capacity():
             own=[op for op in open_ops if op.assigned_to_id==user.id]
             people=[{"id":user.id,"name":"My workload","open_operations":len(own),
                 "estimated_minutes":sum(int(op.estimated_minutes or 0) for op in own)}]
+        unassigned_count=sum(1 for op in open_ops if not op.assigned_to_id)
+        missing_estimates=sum(1 for op in open_ops if op.estimated_minutes is None)
+        workload_values=[p["estimated_minutes"] for p in people]
+        average_workload=(sum(workload_values)/len(workload_values)) if workload_values else 0
+        overloaded=[p for p in people if average_workload and p["estimated_minutes"]>average_workload*1.5 and p["estimated_minutes"]>=60]
+        recommendations=[]
+        if unassigned_count and user.role!="Staff":recommendations.append(f"{unassigned_count} open operation(s) are not assigned to an individual.")
+        if overloaded and user.role!="Staff":recommendations.append("Workload is uneven: "+", ".join(p["name"] for p in overloaded)+" have more than 1.5× the team average estimated workload.")
+        if missing_estimates and user.role!="Staff":recommendations.append(f"{missing_estimates} open operation(s) have no effort estimate, so workload totals may be understated.")
+        if team.capacity is not None and len(members)>team.capacity and user.role!="Staff":recommendations.append("Active membership exceeds the team's configured headcount capacity.")
+        if user.role=="Staff" and not people:recommendations.append("No assigned workload was found for your account.")
         result.append({"team_id":team.id,"team_name":team.name,"staff_count":len(members) if user.role != "Staff" else None,
             "configured_capacity":team.capacity if user.role != "Staff" else None,
             "open_operations":len(open_ops) if user.role != "Staff" else len([op for op in open_ops if op.assigned_to_id==user.id]),
             "estimated_workload_minutes":workload if user.role != "Staff" else sum(int(op.estimated_minutes or 0) for op in open_ops if op.assigned_to_id==user.id),
-            "people":people,"capacity_flag":"over_capacity" if user.role != "Staff" and team.capacity is not None and len(members)>team.capacity else "within_capacity"})
+            "unassigned_operations":unassigned_count if user.role!="Staff" else None,
+            "missing_effort_estimates":missing_estimates if user.role!="Staff" else None,
+            "recommendations":recommendations,"people":people,
+            "capacity_flag":"over_capacity" if user.role != "Staff" and team.capacity is not None and len(members)>team.capacity else "within_capacity"})
     return jsonify({"teams":result,"method":"Based on active team membership and open operations. Estimated workload uses operation estimated_minutes; missing estimates are not guessed."}),200
 
 def _evaluate_escalations(organization_id):
