@@ -177,7 +177,15 @@ def escalation_list():
         if user.role=="Supervisor":q=q.filter(EscalationEvent.team_id.in_(ids)) if ids else q.filter(EscalationEvent.id<0)
         else:
             assigned=Operation.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(Operation.id)
-            q=q.filter(EscalationEvent.team_id.in_(ids)) if ids else q.filter(EscalationEvent.resource_id.in_(assigned))
+            incidents=IncidentReport.query.filter_by(organization_id=user.organization_id,reported_by_id=user.id).with_entities(IncidentReport.id)
+            handovers=ShiftHandover.query.filter_by(organization_id=user.organization_id,created_by_id=user.id).with_entities(ShiftHandover.id)
+            inspections=InspectionRecord.query.filter_by(organization_id=user.organization_id,assigned_to_id=user.id).with_entities(InspectionRecord.id)
+            q=q.filter(or_(
+                (EscalationEvent.resource_type=="Operation") & EscalationEvent.resource_id.in_(assigned),
+                (EscalationEvent.resource_type=="IncidentReport") & EscalationEvent.resource_id.in_(incidents),
+                (EscalationEvent.resource_type=="ShiftHandover") & EscalationEvent.resource_id.in_(handovers),
+                (EscalationEvent.resource_type=="InspectionRecord") & EscalationEvent.resource_id.in_(inspections)
+            ))
     events=q.order_by(EscalationEvent.created_at.desc()).limit(300).all()
     return jsonify({"events":[{"id":e.id,"team_id":e.team_id,"resource_type":e.resource_type,"resource_id":e.resource_id,
         "title":e.title,"message":e.message,"severity":e.severity,"status":e.status,
@@ -193,7 +201,7 @@ def escalation_rule_create():
     user=get_current_user();d=request.get_json(silent=True) or {}
     name=str(d.get("name") or "").strip(); trigger=d.get("trigger_type","operation_overdue")
     if not name or len(name)>160:return jsonify({"error":"Rule name is required."}),400
-    if trigger not in {"operation_overdue","high_priority_overdue"}:return jsonify({"error":"Unsupported trigger type."}),400
+    if trigger not in {"operation_overdue","high_priority_overdue","incident_unacknowledged","inspection_failed","handover_unacknowledged"}:return jsonify({"error":"Unsupported trigger type."}),400
     try:threshold=int(d.get("threshold_minutes",60))
     except (TypeError,ValueError):return jsonify({"error":"Threshold must be minutes."}),400
     if threshold<1 or threshold>525600:return jsonify({"error":"Threshold must be between 1 minute and 365 days."}),400
