@@ -212,10 +212,16 @@ def escalation_list():
                 (EscalationEvent.resource_type=="InspectionRecord") & EscalationEvent.resource_id.in_(inspections)
             ))
     events=q.order_by(EscalationEvent.created_at.desc()).limit(300).all()
-    return jsonify({"events":[{"id":e.id,"team_id":e.team_id,"resource_type":e.resource_type,"resource_id":e.resource_id,
-        "title":e.title,"message":e.message,"severity":e.severity,"status":e.status,
-        "created_at":e.created_at.isoformat(),"acknowledged_at":e.acknowledged_at.isoformat() if e.acknowledged_at else None,
-        "resolved_at":e.resolved_at.isoformat() if e.resolved_at else None} for e in events],
+    serialized=[]
+    for e in events:
+        can_update=user.role=="Admin" or (user.role=="Supervisor" and e.team_id in _team_ids(user))
+        if user.role=="Staff" and e.resource_type=="Operation" and e.resource_id.isdigit():
+            can_update=Operation.query.filter_by(id=int(e.resource_id),organization_id=user.organization_id,assigned_to_id=user.id).first() is not None
+        serialized.append({"id":e.id,"team_id":e.team_id,"resource_type":e.resource_type,"resource_id":e.resource_id,
+            "title":e.title,"message":e.message,"severity":e.severity,"status":e.status,"can_update":can_update,
+            "created_at":e.created_at.isoformat(),"acknowledged_at":e.acknowledged_at.isoformat() if e.acknowledged_at else None,
+            "resolved_at":e.resolved_at.isoformat() if e.resolved_at else None})
+    return jsonify({"events":serialized,
         "rules":[{"id":r.id,"name":r.name,"trigger_type":r.trigger_type,"threshold_minutes":r.threshold_minutes,
         "severity":r.severity,"team_id":r.team_id,"notify_admin":r.notify_admin,"enabled":r.enabled}
         for r in EscalationRule.query.filter_by(organization_id=user.organization_id).order_by(EscalationRule.id.asc()).all()] if user.role=="Admin" else []}),200
