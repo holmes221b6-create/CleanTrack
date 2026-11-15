@@ -33,7 +33,7 @@ def _can_manage_team(user, team_id):
     return Team.query.filter_by(id=team_id, organization_id=user.organization_id).first()
 
 def _policy_dict(p):
-    return {"id":p.id,"team_id":p.team_id,"title":p.title,"objectives":p.objectives or "",
+    return {"id":p.id,"team_id":p.team_id,"title":p.title,"policy_type":getattr(p,"policy_type","structured") or "structured","objectives":p.objectives or "",
             "responsibilities":p.responsibilities or "","instructions":p.instructions or "",
             "standards":p.standards or "","safety_guidance":p.safety_guidance or "",
             "status":p.status,"version":p.version,"author_id":p.author_id,
@@ -105,12 +105,17 @@ def save_team_policy():
         policy=TeamPolicy(organization_id=user.organization_id,team_id=team.id,author_id=user.id,
             version=(latest.version+1 if latest else 1))
         db.session.add(policy)
-    policy.title=title
-    policy.objectives=str(data.get("objectives") or "")[:12000]
-    policy.responsibilities=str(data.get("responsibilities") or "")[:12000]
-    policy.instructions=str(data.get("instructions") or "")[:20000]
-    policy.standards=str(data.get("standards") or "")[:12000]
-    policy.safety_guidance=str(data.get("safety_guidance") or "")[:12000]
+    policy_type="custom" if data.get("policy_type")=="custom" else "structured"
+    custom_content=str(data.get("custom_content") or "")[:50000].strip()
+    if policy_type=="custom" and not custom_content:
+        return jsonify({"error":"Write the policy before saving or publishing."}),400
+    policy.policy_type=policy_type
+    policy.title=title if policy_type=="structured" else (title if title else "Custom policy")
+    policy.objectives=str(data.get("objectives") or "")[:12000] if policy_type=="structured" else ""
+    policy.responsibilities=str(data.get("responsibilities") or "")[:12000] if policy_type=="structured" else ""
+    policy.instructions=(str(data.get("instructions") or "")[:20000] if policy_type=="structured" else custom_content)
+    policy.standards=str(data.get("standards") or "")[:12000] if policy_type=="structured" else ""
+    policy.safety_guidance=str(data.get("safety_guidance") or "")[:12000] if policy_type=="structured" else ""
     policy.status=status
     policy.published_at=datetime.now(timezone.utc) if status=="published" else None
     db.session.flush()
