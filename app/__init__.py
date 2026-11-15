@@ -157,6 +157,10 @@ def create_app(config_class=Config):
                     SET role_labels = CAST('{"Admin":"Admin","Supervisor":"Supervisor","Staff":"Staff"}' AS JSON)
                     WHERE role_labels IS NULL
                 """))
+            if "team_policies" in tables:
+                policy_columns = {item["name"] for item in inspect(connection).get_columns("team_policies")}
+                if "policy_type" not in policy_columns:
+                    connection.execute(text("ALTER TABLE team_policies ADD COLUMN policy_type VARCHAR(20) NOT NULL DEFAULT 'structured'"))
             if "operations" in tables:
                 operation_columns = {item["name"] for item in inspect(connection).get_columns("operations")}
                 operation_additions = {
