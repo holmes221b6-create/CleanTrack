@@ -11,6 +11,7 @@ class TeamPolicy(db.Model):
     team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), nullable=False, index=True)
     author_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     title = db.Column(db.String(180), nullable=False)
+    policy_type = db.Column(db.String(20), nullable=False, default="structured")
     objectives = db.Column(db.Text)
     responsibilities = db.Column(db.Text)
     instructions = db.Column(db.Text)
