@@ -18,6 +18,8 @@ class User(db.Model):
     full_name = db.Column(db.String(120), nullable=False)
     phone = db.Column(db.String(30), nullable=True)
     avatar_url = db.Column(db.String(500), nullable=True)
+    # Separate Personnel identity photo; intentionally distinct from the top-right account avatar.
+    personnel_avatar_url = db.Column(db.Text, nullable=True)
     preferences = db.Column(db.JSON, nullable=False, default=dict)
     skills = db.Column(db.JSON, nullable=False, default=list)
 
@@ -69,6 +71,7 @@ class User(db.Model):
             "full_name": self.full_name,
             "phone": self.phone,
             "avatar_url": self.avatar_url,
+            "personnel_avatar_url": self.personnel_avatar_url,
             "preferences": self.preferences or {},
             "skills": self.skills or [],
             "role": self.role,
