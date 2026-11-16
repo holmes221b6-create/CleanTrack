@@ -18,6 +18,8 @@ from app.models.zone import Zone
 from app.models.operation import Operation
 from app.models.operation_log import OperationLog
 from app.models.audit_log import AuditLog
+from app.models.profile_qualification import ProfileQualification
+from app.models.quality_inspection import TeamLeaderAssignment
 from app.services.audit_retention import audit_cutoff, purge_expired_audit_logs
 from app.models.notification import Notification
 from app.services.permissions import get_current_user, roles_required
@@ -696,11 +698,26 @@ def supervisor_own_team():
         .order_by(func.lower(User.full_name))
         .all()
     )
+    qualification_rows = ProfileQualification.query.filter(
+        ProfileQualification.user_id.in_([member.id for _, member in member_rows])
+    ).order_by(ProfileQualification.title.asc()).all() if member_rows else []
+    qualifications_by_user = {}
+    for qualification in qualification_rows:
+        qualifications_by_user.setdefault(qualification.user_id, []).append({
+            "title": qualification.title, "issuer": qualification.issuer,
+        })
+    team_leader_assignment = TeamLeaderAssignment.query.filter_by(
+        team_id=team.id, organization_id=user.organization_id
+    ).first()
     members = [{
         "id": member.id,
         "name": member.full_name,
         "role": member.role,
         "account_status": member.account_status,
+        "personnel_avatar_url": member.personnel_avatar_url,
+        "skills": member.skills or [],
+        "qualifications": qualifications_by_user.get(member.id, []),
+        "is_team_leader": bool(team_leader_assignment and team_leader_assignment.user_id == member.id),
         "assigned_at": membership.assigned_at.isoformat() if membership.assigned_at else None,
     } for membership, member in member_rows]
 
