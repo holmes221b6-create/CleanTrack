@@ -346,6 +346,20 @@ def current_user():
                     return json_error("Avatar URL must be an HTTP(S) URL of at most 500 characters.", 400)
                 user.avatar_url = avatar_url or None
 
+            if "personnel_avatar_url" in data:
+                personnel_avatar_url = data.get("personnel_avatar_url")
+                if personnel_avatar_url is not None and not isinstance(personnel_avatar_url, str):
+                    return json_error("Personnel profile picture must be text.", 400)
+                personnel_avatar_url = (personnel_avatar_url or "").strip()
+                is_remote_image = personnel_avatar_url.startswith(("https://", "http://")) and len(personnel_avatar_url) <= 500
+                is_image_data = (
+                    len(personnel_avatar_url) <= 200000
+                    and re.match(r"^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$", personnel_avatar_url)
+                )
+                if personnel_avatar_url and not (is_remote_image or is_image_data):
+                    return json_error("Use a valid image URL or a compressed PNG, JPG, or WEBP image under 150 KB.", 400)
+                user.personnel_avatar_url = personnel_avatar_url or None
+
             if "preferences" in data:
                 incoming = data.get("preferences")
                 if not isinstance(incoming, dict) or len(str(incoming)) > 20000:
