@@ -87,7 +87,7 @@ def directory():
             if c.supervisor_cleared_at: last_query=last_query.filter(PersonnelMessage.created_at>c.supervisor_cleared_at)
             last=last_query.order_by(PersonnelMessage.created_at.desc()).first()
         members.append({"id":m.id,"name":m.full_name,"email":m.email,"phone":m.phone,
-            "avatar_url":m.avatar_url,"role":m.role,"account_status":m.account_status,
+            "avatar_url":m.personnel_avatar_url,"role":m.role,"account_status":m.account_status,
             "joined_at":m.created_at.isoformat() if m.created_at else None,
             "workload":workload.get(m.id,0),"completed_operations":completed.get(m.id,0),
             "overdue_operations":overdue.get(m.id,0),"availability":"not_recorded",
@@ -149,7 +149,7 @@ def profile(staff_id):
         "name": staff.full_name,
         "email": staff.email,
         "phone": staff.phone,
-        "avatar_url": staff.avatar_url,
+        "avatar_url": staff.personnel_avatar_url,
         "role": staff.role,
         "joined_at": staff.created_at.isoformat() if staff.created_at else None,
         "account_status": staff.account_status,
