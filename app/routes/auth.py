@@ -444,6 +444,91 @@ def current_user():
         return json_error("Authentication required.", 401)
 
 
+@auth_bp.route("/me/qualifications", methods=["GET", "POST"])
+def current_user_qualifications():
+    try:
+        verify_jwt_in_request()
+        user = db.session.get(User, int(get_jwt_identity()))
+        if user is None or user.account_status not in {"active", "termination_pending"}:
+            return json_error("Authentication required.", 401)
+
+        from app.models.profile_qualification import ProfileQualification
+        if request.method == "GET":
+            rows = ProfileQualification.query.filter_by(user_id=user.id).order_by(
+                ProfileQualification.created_at.desc()
+            ).all()
+            return jsonify({"qualifications": [{
+                "id": row.id, "title": row.title, "issuer": row.issuer,
+                "issue_date": row.issue_date, "file_name": row.file_name,
+                "mime_type": row.mime_type,
+                "created_at": row.created_at.isoformat() if row.created_at else None
+            } for row in rows]}), 200
+
+        title = (request.form.get("title") or "").strip()
+        issuer = (request.form.get("issuer") or "").strip()
+        issue_date = (request.form.get("issue_date") or "").strip()
+        upload = request.files.get("file")
+        if not 2 <= len(title) <= 180:
+            return json_error("Qualification title must contain 2 to 180 characters.", 400)
+        if len(issuer) > 180 or len(issue_date) > 20:
+            return json_error("Issuer or issue date is too long.", 400)
+        if upload is None or not upload.filename:
+            return json_error("Attach the qualification document.", 400)
+        from werkzeug.utils import secure_filename
+        filename = secure_filename(upload.filename)[:255]
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        allowed = {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+        if extension not in allowed:
+            return json_error("Use a PDF, PNG, JPG or WEBP qualification document.", 400)
+        data = upload.stream.read(5 * 1024 * 1024 + 1)
+        if not data or len(data) > 5 * 1024 * 1024:
+            return json_error("Qualification documents must be smaller than 5 MB.", 400)
+        valid_signature = (
+            (extension == "pdf" and data.startswith(b"%PDF-")) or
+            (extension == "png" and data.startswith(b"\x89PNG\r\n\x1a\n")) or
+            (extension in {"jpg", "jpeg"} and data.startswith(b"\xff\xd8\xff")) or
+            (extension == "webp" and len(data) > 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP")
+        )
+        if not valid_signature:
+            return json_error("The uploaded file does not match its file type.", 400)
+        row = ProfileQualification(
+            user_id=user.id, title=title, issuer=issuer or None,
+            issue_date=issue_date or None, file_name=filename,
+            mime_type=allowed[extension], file_data=data
+        )
+        db.session.add(row)
+        db.session.commit()
+        return jsonify({"qualification": {
+            "id": row.id, "title": row.title, "issuer": row.issuer,
+            "issue_date": row.issue_date, "file_name": row.file_name,
+            "mime_type": row.mime_type
+        }}), 201
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Personnel qualification request failed.")
+        return json_error("Qualification details could not be processed.", 500)
+
+
+@auth_bp.delete("/me/qualifications/<int:qualification_id>")
+def delete_current_user_qualification(qualification_id):
+    try:
+        verify_jwt_in_request()
+        user = db.session.get(User, int(get_jwt_identity()))
+        if user is None or user.account_status not in {"active", "termination_pending"}:
+            return json_error("Authentication required.", 401)
+        from app.models.profile_qualification import ProfileQualification
+        row = ProfileQualification.query.filter_by(id=qualification_id, user_id=user.id).first()
+        if row is None:
+            return json_error("Qualification record not found.", 404)
+        db.session.delete(row)
+        db.session.commit()
+        return jsonify({"message": "Qualification removed."}), 200
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("Personnel qualification removal failed.")
+        return json_error("Qualification could not be removed.", 500)
+
+
 @auth_bp.post("/logout")
 def logout():
     """Clear the authenticated browser session cookies."""
