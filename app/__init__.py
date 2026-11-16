@@ -76,6 +76,7 @@ def create_app(config_class=Config):
                     "termination_requested_at": "TIMESTAMP WITH TIME ZONE",
                     "termination_effective_at": "TIMESTAMP WITH TIME ZONE",
                     "avatar_url": "VARCHAR(500)",
+                    "personnel_avatar_url": "TEXT",
                     "preferences": "JSON",
                     "last_login_at": "TIMESTAMP WITH TIME ZONE",
                 }
