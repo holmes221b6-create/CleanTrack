@@ -951,11 +951,16 @@ def inventory_transfer_update(transfer_id):
         try: _location_balance(user.id,user.organization_id,item.id,row.from_location,-qty)
         except ValueError as exc: db.session.rollback();return jsonify({"error":str(exc)}),409
         item.quantity=current-qty;row.status="in_transit";row.dispatched_by_id=user.id;row.dispatched_at=datetime.now(timezone.utc)
-        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_out",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
+        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_out",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=(row.from_location+" → "+row.to_location+((" · MAX OVERRIDE: "+str(d.get("override_reason") or "")[:300]) if d.get("allow_over_maximum") else ""))[:4000],performed_by_id=user.id))
     elif action=="receive" and row.status=="in_transit":
-        qty=Decimal(str(row.quantity))
+        qty=Decimal(str(row.quantity)); projected=Decimal(str(item.quantity or 0))+qty
+        maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
+        if maximum>0 and projected>maximum and not d.get("allow_over_maximum"):
+            return jsonify({"error":"Transfer receipt exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(projected),"requires_override":True}),409
+        if maximum>0 and projected>maximum and not str(d.get("override_reason") or "").strip():
+            return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
         _location_balance(user.id,user.organization_id,item.id,row.to_location,qty)
-        item.quantity=Decimal(str(item.quantity or 0))+qty;row.status="received";row.received_by_id=user.id;row.received_at=datetime.now(timezone.utc)
+        item.quantity=projected;row.status="received";row.received_by_id=user.id;row.received_at=datetime.now(timezone.utc)
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_in",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
     else:return jsonify({"error":"This transfer action is not valid for its current status."}),409
     db.session.commit()
