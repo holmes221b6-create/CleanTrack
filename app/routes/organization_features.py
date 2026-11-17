@@ -134,7 +134,7 @@ def inventory_list():
     user=get_current_user()
     q=InventoryItem.query.filter_by(organization_id=user.organization_id)
     if user.role=="Supervisor":
-        ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id)) if ids else q.filter(InventoryItem.assigned_to_id==user.id)
+        ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))) if ids else q.filter(or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
     elif user.role=="Staff":
         ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id)) if ids else q.filter(InventoryItem.assigned_to_id==user.id)
     rows=q.order_by(InventoryItem.name.asc()).limit(1000).all()
@@ -173,6 +173,7 @@ def inventory_create():
 def inventory_update(item_id):
     user=get_current_user(); item=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
     if not item:return jsonify({"error":"Inventory item not found."}),404
+    if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user): return jsonify({"error":"This item is outside your team scope."}),403
     d=request.get_json(silent=True) or {}
     fields={"name":180,"category":80,"description":8000,"sku":80,"asset_tag":100,"serial_number":120,
             "unit":32,"condition":24,"status":24,"storage_location":180,"notes":8000}
@@ -456,6 +457,7 @@ def inventory_request_create():
     if d.get("item_id"):
         item=InventoryItem.query.filter_by(id=d["item_id"],organization_id=user.organization_id).first()
         if not item:return jsonify({"error":"Inventory item not found."}),404
+        if user.role=="Staff" and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"This item is outside your permitted inventory."}),403
         name=item.name
     team_ids=_team_ids(user); team_id=d.get("team_id")
     if user.role!="Admin":team_id=next(iter(team_ids),None)
