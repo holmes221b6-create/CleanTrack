@@ -486,8 +486,8 @@ def inventory_record_movement(item_id):
         if balance<0:return jsonify({"error":"The adjustment would make total stock negative."}),409
     maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
     if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and not d.get("allow_over_maximum"):
-        return jsonify({"error":"This receipt exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(balance),"requires_override":True}),409
-    if kind in {"receipt","transfer_in"} and maximum>0 and balance>maximum and not str(d.get("override_reason") or "").strip():
+        return jsonify({"error":"This movement exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(balance),"requires_override":True}),409
+    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and not str(d.get("override_reason") or "").strip():
         return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
     delta=abs(balance-current); item.quantity=balance
     try:
@@ -499,7 +499,7 @@ def inventory_record_movement(item_id):
             _location_balance(user.id,user.organization_id,item.id,location,qty-prior)
     except ValueError as exc:
         db.session.rollback();return jsonify({"error":str(exc)}),409
-    movement=InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type=kind,quantity=delta,balance_after=balance,reference=str(d.get("reference") or "")[:180],notes=str(d.get("notes") or "")[:4000],performed_by_id=user.id)
+    movement=InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type=kind,quantity=delta,balance_after=balance,reference=str(d.get("reference") or "")[:180],notes=(str(d.get("notes") or "")[:3400] + ((" | MAX OVERRIDE: "+str(d.get("override_reason") or "")[:500]) if d.get("allow_over_maximum") else ""))[:4000],performed_by_id=user.id)
     db.session.add(movement);db.session.commit()
     return jsonify({"item":_inventory_dict(item),"message":"Stock movement recorded."}),201
 
