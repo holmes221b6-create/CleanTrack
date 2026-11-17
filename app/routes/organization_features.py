@@ -569,8 +569,8 @@ def inventory_request_update(request_id):
         try:fulfilled=Decimal(str(d.get("fulfilled_quantity",req.quantity)))
         except (InvalidOperation,ValueError):return jsonify({"error":"Invalid fulfilled quantity."}),400
         previous=Decimal(str(req.fulfilled_quantity or 0))
-        if fulfilled<previous or fulfilled>Decimal(str(req.quantity)) or (status=="partially_fulfilled" and fulfilled<=0):
-            return jsonify({"error":"Fulfilled quantity must be greater than the amount already issued and no greater than requested."}),400
+        if fulfilled<previous or fulfilled>Decimal(str(req.quantity)) or (status=="partially_fulfilled" and (fulfilled<=0 or fulfilled>=Decimal(str(req.quantity)))) or (status=="fulfilled" and fulfilled!=Decimal(str(req.quantity))):
+            return jsonify({"error":"A partial fulfilment must remain below the requested total; a fulfilled request must reach the full requested quantity."}),400
         delta=fulfilled-previous
         if delta>0:
             item=InventoryItem.query.filter_by(id=req.item_id,organization_id=user.organization_id).with_for_update().first()
