@@ -668,7 +668,7 @@ def inventory_purchase_create():
         supplier=InventorySupplier.query.filter_by(id=d["supplier_id"],organization_id=user.organization_id).first()
         if not supplier:return jsonify({"error":"Supplier does not belong to this organisation."}),400
         supplier_name=supplier.name
-    if invoice_number and InventoryPurchase.query.filter_by(organization_id=user.organization_id,invoice_number=invoice_number).first():
+    if invoice_number and InventoryPurchase.query.filter(InventoryPurchase.organization_id==user.organization_id,func.lower(InventoryPurchase.invoice_number)==invoice_number.lower()).first():
         return jsonify({"error":"This invoice number is already recorded in this organisation."}),409
     parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0"); discount_total=Decimal("0")
     try:
@@ -719,7 +719,7 @@ def inventory_purchase_update(purchase_id):
         if not supplier_name:return jsonify({"error":"Supplier name is required."}),400
         if invoice_number:
             duplicate=InventoryPurchase.query.filter(InventoryPurchase.organization_id==user.organization_id,
-                InventoryPurchase.invoice_number==invoice_number,InventoryPurchase.id!=purchase.id).first()
+                func.lower(InventoryPurchase.invoice_number)==invoice_number.lower(),InventoryPurchase.id!=purchase.id).first()
             if duplicate:return jsonify({"error":"This invoice number is already recorded in this organisation."}),409
         supplier=None
         if d.get("supplier_id"):
@@ -901,7 +901,7 @@ def inventory_purchase_invoice_upload():
     if not signatures.get(mimetype,False):return jsonify({"error":"The file contents do not match the selected invoice format."}),415
     extracted_text, extraction_method = _extract_invoice_text(data, mimetype)
     parsed = _parse_invoice_rules(extracted_text)
-    if parsed.get("invoice_number") and InventoryPurchase.query.filter_by(organization_id=user.organization_id,invoice_number=parsed["invoice_number"]).first():
+    if parsed.get("invoice_number") and InventoryPurchase.query.filter(InventoryPurchase.organization_id==user.organization_id,func.lower(InventoryPurchase.invoice_number)==parsed["invoice_number"].lower()).first():
         return jsonify({"error":"This invoice number already exists in this organisation. The upload was not recorded."}),409
     purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=None,
         invoice_number=parsed.get("invoice_number") or None,status="draft",
