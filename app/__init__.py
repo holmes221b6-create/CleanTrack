@@ -57,6 +57,24 @@ def create_app(config_class=Config):
     # protected database tables rather than an ephemeral Render filesystem.
     with app.app_context():
         db.create_all()
+        # Inventory: additive stock ceiling and an organisation-scoped location ledger.
+        with db.engine.begin() as connection:
+            tables_now = set(inspect(connection).get_table_names())
+            if "inventory_items" in tables_now:
+                cols = {item["name"] for item in inspect(connection).get_columns("inventory_items")}
+                if "maximum_quantity" not in cols:
+                    connection.execute(text("ALTER TABLE inventory_items ADD COLUMN maximum_quantity NUMERIC(12, 2) NOT NULL DEFAULT 0"))
+            if "inventory_location_stocks" in tables_now and "inventory_items" in tables_now:
+                connection.execute(text("""
+                    INSERT INTO inventory_location_stocks (organization_id, item_id, location_name, quantity, updated_at)
+                    SELECT organization_id, id,
+                           COALESCE(NULLIF(storage_location, ''), 'Unassigned / central stock'),
+                           COALESCE(quantity, 0), CURRENT_TIMESTAMP
+                    FROM inventory_items
+                    WHERE COALESCE(quantity, 0) > 0
+                    ON CONFLICT (organization_id, item_id, location_name) DO NOTHING
+                """))
+
         # In-place compatibility migration: preserve user IDs and every linked
         # operation, membership, assignment and historical record.
         with db.engine.begin() as connection:
