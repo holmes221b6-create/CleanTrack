@@ -180,3 +180,21 @@ class InventoryPurchaseLine(db.Model):
     discount_amount = db.Column(db.Numeric(14, 2), nullable=False, default=0)
     line_total = db.Column(db.Numeric(14, 2), nullable=False, default=0)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class InventoryTransfer(db.Model):
+    __tablename__ = "inventory_transfers"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("inventory_items.id"), nullable=False, index=True)
+    from_location = db.Column(db.String(180), nullable=False)
+    to_location = db.Column(db.String(180), nullable=False)
+    quantity = db.Column(db.Numeric(12, 2), nullable=False)
+    status = db.Column(db.String(24), nullable=False, default="pending", index=True)
+    requested_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    dispatched_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    received_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    notes = db.Column(db.Text)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    dispatched_at = db.Column(db.DateTime(timezone=True))
+    received_at = db.Column(db.DateTime(timezone=True))
