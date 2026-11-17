@@ -162,6 +162,8 @@ def inventory_create():
         quantity=Decimal(str(d.get("quantity",1))); minimum=Decimal(str(d.get("minimum_quantity",0))); maximum=Decimal(str(d.get("maximum_quantity",0) or 0))
         if quantity<0 or minimum<0 or maximum<0 or (maximum>0 and maximum<minimum): raise InvalidOperation()
     except (InvalidOperation,ValueError):return jsonify({"error":"Stock thresholds must be non-negative and maximum must be at least minimum."}),400
+    if maximum>0 and quantity>maximum:
+        return jsonify({"error":"Initial stock exceeds the maximum threshold. Register the item with zero stock, then use Stock Control with an authorised override."}),400
     for key,label in (("sku","SKU"),("asset_tag","asset tag"),("serial_number","serial number")):
         value=str(d.get(key) or "").strip()
         if value and InventoryItem.query.filter(InventoryItem.organization_id==user.organization_id,func.lower(getattr(InventoryItem,key))==value.lower()).first():
@@ -203,6 +205,10 @@ def inventory_update(item_id):
     if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user): return jsonify({"error":"This item is outside your team scope."}),403
     d=request.get_json(silent=True) or {}
     previous_quantity=Decimal(str(item.quantity or 0))
+    if "quantity" in d:
+        try: requested_quantity=Decimal(str(d["quantity"]))
+        except (InvalidOperation,ValueError): return jsonify({"error":"Invalid stock quantity."}),400
+        if requested_quantity!=previous_quantity:return jsonify({"error":"Use Stock Control to change stock balances. Item editing cannot bypass the movement ledger or maximum-stock checks."}),409
     fields={"name":180,"category":80,"description":8000,"sku":80,"asset_tag":100,"serial_number":120,
             "unit":32,"condition":24,"status":24,"storage_location":180,"notes":8000}
     for key,label in (("sku","SKU"),("asset_tag","asset tag"),("serial_number","serial number")):
