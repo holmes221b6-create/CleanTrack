@@ -1055,4 +1055,4 @@ def inventory_maintenance_update(record_id):
                 try:item.maintenance_due_at=datetime.strptime(d["next_due_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc)
                 except ValueError:return jsonify({"error":"Invalid next maintenance date."}),400
     db.session.commit()
-    return jsonify({"status:":row.status,"message":"Maintenance status updated."}),200
+    return jsonify({"status":row.status,"message":"Maintenance status updated."}),200
