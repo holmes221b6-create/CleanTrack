@@ -165,7 +165,10 @@ def inventory_create():
         maintenance_due_at=datetime.strptime(d["maintenance_due_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d.get("maintenance_due_at") else None,
         last_maintenance_at=datetime.strptime(d["last_maintenance_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d.get("last_maintenance_at") else None,
         created_by_id=user.id)
-    db.session.add(item);db.session.commit()
+    db.session.add(item);db.session.flush()
+    if quantity > 0:
+        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="opening_balance",quantity=quantity,balance_after=quantity,reference="Initial registration",notes="Opening stock recorded when item was created.",performed_by_id=user.id))
+    db.session.commit()
     return jsonify({"item":_inventory_dict(item),"message":"Inventory item saved."}),201
 
 @org_tools_bp.patch("/inventory/<int:item_id>")
@@ -175,6 +178,7 @@ def inventory_update(item_id):
     if not item:return jsonify({"error":"Inventory item not found."}),404
     if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user): return jsonify({"error":"This item is outside your team scope."}),403
     d=request.get_json(silent=True) or {}
+    previous_quantity=Decimal(str(item.quantity or 0))
     fields={"name":180,"category":80,"description":8000,"sku":80,"asset_tag":100,"serial_number":120,
             "unit":32,"condition":24,"status":24,"storage_location":180,"notes":8000}
     for key,limit in fields.items():
@@ -197,6 +201,8 @@ def inventory_update(item_id):
     if "team_id" in d:
         if d["team_id"] is not None and not Team.query.filter_by(id=d["team_id"],organization_id=user.organization_id).first():return jsonify({"error":"Invalid team."}),400
         item.team_id=d["team_id"]
+    if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
+        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="adjustment",quantity=abs(Decimal(str(item.quantity or 0))-previous_quantity),balance_after=item.quantity,reference="Item edit",notes="Stock balance changed through item maintenance form.",performed_by_id=user.id))
     db.session.commit();return jsonify({"item":_inventory_dict(item)}),200
 
 @org_tools_bp.get("/escalations")
@@ -465,6 +471,13 @@ def inventory_request_create():
     db.session.add(req);db.session.commit()
     admins=User.query.filter_by(organization_id=user.organization_id,role="Admin",account_status="active").all()
     for admin in admins:_notify(admin,"Inventory request received",f"{user.full_name or user.email} requested {qty} {name}.","inventory_request","InventoryRequest",req.id)
+    if team_ids:
+        supervisors=User.query.join(TeamMember,TeamMember.user_id==User.id).filter(TeamMember.team_id.in_(team_ids),User.organization_id==user.organization_id,User.role=="Supervisor",User.account_status=="active").all()
+        notified=set()
+        for supervisor in supervisors:
+            if supervisor.id not in notified and supervisor.id!=user.id:
+                _notify(supervisor,"Team inventory request",f"{user.full_name or user.email} requested {qty} {name}.","inventory_request","InventoryRequest",req.id)
+                notified.add(supervisor.id)
     db.session.commit()
     return jsonify({"id":req.id,"message":"Inventory request submitted."}),201
 
