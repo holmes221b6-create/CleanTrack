@@ -174,7 +174,7 @@ def inventory_create():
     if d.get("assigned_to_id") is not None:
         assignee=User.query.filter_by(id=d.get("assigned_to_id"),organization_id=user.organization_id).first()
         if not assignee:return jsonify({"error":"Selected assignee is outside this organisation."}),400
-        if user.role=="Supervisor" and assignee.id not in User.query.join(TeamMember,TeamMember.user_id==User.id).filter(TeamMember.team_id.in_(_team_ids(user)),User.id==assignee.id).with_entities(User.id).all():
+        if user.role=="Supervisor" and not TeamMember.query.filter(TeamMember.user_id==assignee.id,TeamMember.team_id.in_(_team_ids(user))).first():
             return jsonify({"error":"You can only assign inventory to members of your teams."}),403
     item=InventoryItem(organization_id=user.organization_id,name=name,category=str(d.get("category") or "General")[:80],
         description=str(d.get("description") or "")[:8000],sku=str(d.get("sku") or "")[:80],
