@@ -205,6 +205,7 @@ def inventory_update(item_id):
     if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user): return jsonify({"error":"This item is outside your team scope."}),403
     d=request.get_json(silent=True) or {}
     previous_quantity=Decimal(str(item.quantity or 0))
+    previous_location=str(item.storage_location or "Unassigned / central stock")
     if "quantity" in d:
         try: requested_quantity=Decimal(str(d["quantity"]))
         except (InvalidOperation,ValueError): return jsonify({"error":"Invalid stock quantity."}),400
@@ -245,8 +246,13 @@ def inventory_update(item_id):
         item.assigned_to_id=assignee_id
     if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="adjustment",quantity=abs(Decimal(str(item.quantity or 0))-previous_quantity),balance_after=item.quantity,reference="Item edit",notes="Stock balance changed through item maintenance form.",performed_by_id=user.id))
-    if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
-        try: _location_balance(user.id,user.organization_id,item.id,item.storage_location,Decimal(str(item.quantity or 0))-previous_quantity)
+    if "storage_location" in d and str(item.storage_location or "Unassigned / central stock") != previous_location:
+        old_balance=InventoryLocationStock.query.filter_by(organization_id=user.organization_id,item_id=item.id,location_name=previous_location).with_for_update().first()
+        if Decimal(str(old_balance.quantity or 0)) != Decimal(str(item.quantity or 0)):
+            db.session.rollback();return jsonify({"error":"This asset has stock distributed across multiple locations. Use Transfers to relocate stock instead of changing its primary storage location."}),409
+        try:
+            _location_balance(user.id,user.organization_id,item.id,previous_location,-Decimal(str(item.quantity or 0)))
+            _location_balance(user.id,user.organization_id,item.id,item.storage_location,Decimal(str(item.quantity or 0)))
         except ValueError as exc: db.session.rollback();return jsonify({"error":str(exc)}),409
     if Decimal(str(getattr(item,"maximum_quantity",0) or 0))>0 and Decimal(str(item.maximum_quantity))<Decimal(str(item.minimum_quantity or 0)):
         db.session.rollback();return jsonify({"error":"Maximum stock must be greater than or equal to minimum stock."}),400
@@ -568,8 +574,11 @@ def inventory_request_update(request_id):
         if delta>0:
             item=InventoryItem.query.filter_by(id=req.item_id,organization_id=user.organization_id).with_for_update().first()
             if not item or Decimal(str(item.quantity or 0))<delta:return jsonify({"error":"Insufficient stock to fulfil the remaining quantity."}),409
+            location=str(d.get("location") or item.storage_location or "Unassigned / central stock")
+            try: _location_balance(user.id,user.organization_id,item.id,location,-delta)
+            except ValueError as exc: db.session.rollback();return jsonify({"error":str(exc)}),409
             item.quantity=Decimal(str(item.quantity))-delta
-            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="consumption",quantity=delta,balance_after=item.quantity,reference=f"Request #{req.id}",notes="Incremental request fulfilment",performed_by_id=user.id))
+            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="consumption",quantity=delta,balance_after=item.quantity,reference=f"Request #{req.id}",notes="Incremental request fulfilment · "+location,performed_by_id=user.id))
         req.fulfilled_quantity=fulfilled
     req.status=status;req.reviewed_by_id=user.id;req.reviewed_at=datetime.now(timezone.utc)
     db.session.commit()
