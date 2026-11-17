@@ -210,3 +210,19 @@ class InventoryLocationStock(db.Model):
     location_name = db.Column(db.String(180), nullable=False, default="Unassigned / central stock")
     quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
     updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+class InventoryMaintenanceRecord(db.Model):
+    __tablename__ = "inventory_maintenance_records"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("inventory_items.id"), nullable=False, index=True)
+    maintenance_type = db.Column(db.String(40), nullable=False, default="preventive")
+    scheduled_at = db.Column(db.DateTime(timezone=True), index=True)
+    completed_at = db.Column(db.DateTime(timezone=True))
+    status = db.Column(db.String(24), nullable=False, default="scheduled", index=True)
+    provider = db.Column(db.String(180))
+    cost = db.Column(db.Numeric(14, 2), nullable=False, default=0)
+    notes = db.Column(db.Text)
+    created_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+
