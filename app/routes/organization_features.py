@@ -597,8 +597,10 @@ def inventory_purchase_create():
             qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
             if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
             item_id=line.get("item_id")
-            if item_id and not InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first():
-                return jsonify({"error":"A selected catalogue item is outside this organisation."}),400
+            if item_id:
+                linked=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
+                if not linked:return jsonify({"error":"A selected catalogue item is outside this organisation."}),400
+                if user.role=="Supervisor" and linked.team_id is not None and linked.team_id not in _team_ids(user) and linked.assigned_to_id!=user.id:return jsonify({"error":"A linked item is outside your team scope."}),403
             total=(qty*price)+tax; subtotal += qty*price; tax_total += tax
             parsed.append((line,desc,qty,price,tax,total,item_id))
     except (InvalidOperation,ValueError,TypeError):
@@ -646,8 +648,10 @@ def inventory_purchase_update(purchase_id):
                 qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
                 item_id=line.get("item_id")
                 if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
-                if item_id and not InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first():
-                    return jsonify({"error":"A linked item is outside this organisation."}),400
+                if item_id:
+                    linked=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
+                    if not linked:return jsonify({"error":"A linked item is outside this organisation."}),400
+                    if user.role=="Supervisor" and linked.team_id is not None and linked.team_id not in _team_ids(user) and linked.assigned_to_id!=user.id:return jsonify({"error":"A linked item is outside your team scope."}),403
                 total=qty*price+tax;subtotal+=qty*price;tax_total+=tax
                 parsed.append((line,desc,qty,price,tax,total,item_id))
         except (InvalidOperation,ValueError,TypeError):
@@ -670,6 +674,7 @@ def inventory_purchase_update(purchase_id):
         return jsonify({"purchase":_purchase_dict(purchase),"message":"Invoice details saved for review. Stock remains unchanged."}),200
     if action=="approve":
         if purchase.status!="draft":return jsonify({"error":"Only draft purchases can be approved."}),409
+        if purchase.extraction_status!="human_verified" or not InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).first():return jsonify({"error":"Verify supplier and invoice line details before approval."}),409
         purchase.status="approved";purchase.approved_by_id=user.id;purchase.approved_at=datetime.now(timezone.utc)
     elif action=="receive":
         if purchase.status not in {"approved","partially_received"}:return jsonify({"error":"Approve the purchase before receiving goods."}),409
