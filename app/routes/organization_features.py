@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 import hashlib
 from decimal import Decimal, InvalidOperation
 from flask import Blueprint, jsonify, request, send_file
-from sqlalchemy import or_, cast, String
+from sqlalchemy import or_, cast, String, func
 
 from app.extensions import db
 from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, InventoryLocationStock, EscalationRule, EscalationEvent
@@ -159,16 +159,20 @@ def inventory_create():
     name=str(d.get("name") or "").strip()
     if not name or len(name)>180:return jsonify({"error":"Item name is required (maximum 180 characters)."}),400
     try:
-        quantity=Decimal(str(d.get("quantity",1))); minimum=Decimal(str(d.get("minimum_quantity",0)))
-        if quantity<0 or minimum<0: raise InvalidOperation()
-    except (InvalidOperation,ValueError):return jsonify({"error":"Quantity values must be zero or greater."}),400
+        quantity=Decimal(str(d.get("quantity",1))); minimum=Decimal(str(d.get("minimum_quantity",0))); maximum=Decimal(str(d.get("maximum_quantity",0) or 0))
+        if quantity<0 or minimum<0 or maximum<0 or (maximum>0 and maximum<minimum): raise InvalidOperation()
+    except (InvalidOperation,ValueError):return jsonify({"error":"Stock thresholds must be non-negative and maximum must be at least minimum."}),400
+    for key,label in (("sku","SKU"),("asset_tag","asset tag"),("serial_number","serial number")):
+        value=str(d.get(key) or "").strip()
+        if value and InventoryItem.query.filter(InventoryItem.organization_id==user.organization_id,func.lower(getattr(InventoryItem,key))==value.lower()).first():
+            return jsonify({"error":f"That {label} is already registered in this organisation."}),409
     for key, model in (("team_id",Team),):
         if d.get(key) is not None and not model.query.filter_by(id=d[key],organization_id=user.organization_id).first():
             return jsonify({"error":"Selected team is outside your organization."}),400
     item=InventoryItem(organization_id=user.organization_id,name=name,category=str(d.get("category") or "General")[:80],
         description=str(d.get("description") or "")[:8000],sku=str(d.get("sku") or "")[:80],
         asset_tag=str(d.get("asset_tag") or "")[:100],serial_number=str(d.get("serial_number") or "")[:120],
-        quantity=quantity,minimum_quantity=minimum,maximum_quantity=Decimal(str(d.get("maximum_quantity",0) or 0)),unit=str(d.get("unit") or "units")[:32],
+        quantity=quantity,minimum_quantity=minimum,maximum_quantity=maximum,unit=str(d.get("unit") or "units")[:32],
         condition=str(d.get("condition") or "good")[:24],status=str(d.get("status") or "available")[:24],
         storage_location=str(d.get("storage_location") or "")[:180],team_id=d.get("team_id"),
         assigned_to_id=d.get("assigned_to_id"),purchase_date=datetime.strptime(d["purchase_date"],"%Y-%m-%d").date() if d.get("purchase_date") else None,
@@ -194,6 +198,10 @@ def inventory_update(item_id):
     previous_quantity=Decimal(str(item.quantity or 0))
     fields={"name":180,"category":80,"description":8000,"sku":80,"asset_tag":100,"serial_number":120,
             "unit":32,"condition":24,"status":24,"storage_location":180,"notes":8000}
+    for key,label in (("sku","SKU"),("asset_tag","asset tag"),("serial_number","serial number")):
+        value=str(d.get(key) or "").strip() if key in d else ""
+        if value and InventoryItem.query.filter(InventoryItem.organization_id==user.organization_id,InventoryItem.id!=item.id,func.lower(getattr(InventoryItem,key))==value.lower()).first():
+            return jsonify({"error":f"That {label} is already registered in this organisation."}),409
     for key,limit in fields.items():
         if key in d:setattr(item,key,str(d[key] or "")[:limit])
     for key in ("quantity","minimum_quantity","maximum_quantity"):
@@ -594,6 +602,8 @@ def inventory_suppliers_list():
 def inventory_supplier_create():
     user=get_current_user(); d=request.get_json(silent=True) or {}; name=str(d.get("name") or "").strip()
     if not name or len(name)>180:return jsonify({"error":"Supplier name is required."}),400
+    if InventorySupplier.query.filter(InventorySupplier.organization_id==user.organization_id,func.lower(InventorySupplier.name)==name.lower()).first():
+        return jsonify({"error":"This supplier is already registered in this organisation."}),409
     row=InventorySupplier(organization_id=user.organization_id,name=name,contact_name=str(d.get("contact_name") or "")[:120],
         email=str(d.get("email") or "")[:180],phone=str(d.get("phone") or "")[:60],
         tax_identifier=str(d.get("tax_reference") or "")[:80],address=str(d.get("address") or "")[:4000],
