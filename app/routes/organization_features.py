@@ -823,7 +823,19 @@ def _parse_invoice_rules(raw):
         if candidate and len(candidate) > 2 and not re.search(r"invoice|tax|gst|date|total|address|phone", candidate, re.I):
             supplier = candidate[:180]; break
     total = find(r"(?:grand\s*total|total\s*amount|amount\s*due)\s*[:₹$ ]+([0-9,]+\.\d{1,2})")
-    return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":total,"lines":[]}
+    candidates=[]
+    row_pattern=re.compile(r"^\s*(?:\d+\s+)?(.{3,70}?)\s+(\d+(?:\.\d{1,2})?)\s+(?:₹|Rs\.?|INR)?\s*([\d,]+\.\d{2})\s*$",re.I)
+    for line in clean.splitlines():
+        match=row_pattern.match(line.strip())
+        if not match: continue
+        desc=match.group(1).strip()
+        if re.search(r"subtotal|grand total|tax|gst|discount|round off|amount due|invoice",desc,re.I): continue
+        try:
+            quantity=Decimal(match.group(2)); price=Decimal(match.group(3).replace(",",""))
+        except InvalidOperation: continue
+        if quantity>0 and price>=0:
+            candidates.append({"description":desc[:180],"quantity":str(quantity),"unit_price":str(price)})
+    return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":total,"lines":candidates[:1]}
 
 
 @org_tools_bp.post("/inventory-purchases/invoice-upload")
@@ -846,9 +858,17 @@ def inventory_purchase_invoice_upload():
         invoice_filename=filename,invoice_content_type=mimetype,invoice_size=len(data),invoice_data=data,
         extracted_text=extracted_text or None,extraction_status="awaiting_review",
         notes="Invoice uploaded. Verify every extracted field and line item before approval.",created_by_id=user.id)
-    db.session.add(purchase);db.session.commit()
+    db.session.add(purchase);db.session.flush()
+    if parsed.get("lines"):
+        line=parsed["lines"][0]
+        linked=InventoryItem.query.filter(InventoryItem.organization_id==user.organization_id,InventoryItem.name.ilike(line["description"])).first()
+        db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,
+            item_id=linked.id if linked else None,item_name=line["description"],quantity_ordered=Decimal(line["quantity"]),
+            quantity_received=Decimal("0"),unit=linked.unit if linked else "units",unit_price=Decimal(line["unit_price"]),
+            tax_amount=Decimal("0"),discount_amount=Decimal("0"),line_total=Decimal(line["quantity"])*Decimal(line["unit_price"])))
+    db.session.commit()
     return jsonify({"purchase":_purchase_dict(purchase),
-        "message":"Invoice stored. Verify extracted values and enter the purchase line before approval.",
+        "message":"Invoice stored and locally parsed where possible. Verify every suggested value before approval.",
         "extraction":{"status":extraction_method,"fields":parsed,"text_available":bool(extracted_text)}}),201
 
 
