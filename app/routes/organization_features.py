@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import or_, cast, String
 
 from app.extensions import db
-from app.models.organization_features import TeamPolicy, InventoryItem, EscalationRule, EscalationEvent
+from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, EscalationRule, EscalationEvent
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -138,10 +138,10 @@ def inventory_list():
     elif user.role=="Staff":
         ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id)) if ids else q.filter(InventoryItem.assigned_to_id==user.id)
     rows=q.order_by(InventoryItem.name.asc()).limit(1000).all()
-    return jsonify({"items":[_inventory_dict(x) for x in rows],"can_manage":user.role=="Admin"}),200
+    return jsonify({"items":[_inventory_dict(x) for x in rows],"can_manage":user.role in {"Admin","Supervisor"}}),200
 
 @org_tools_bp.post("/inventory")
-@roles_required("Admin")
+@roles_required("Admin","Supervisor")
 def inventory_create():
     user=get_current_user(); d=request.get_json(silent=True) or {}
     name=str(d.get("name") or "").strip()
@@ -169,7 +169,7 @@ def inventory_create():
     return jsonify({"item":_inventory_dict(item),"message":"Inventory item saved."}),201
 
 @org_tools_bp.patch("/inventory/<int:item_id>")
-@roles_required("Admin")
+@roles_required("Admin","Supervisor")
 def inventory_update(item_id):
     user=get_current_user(); item=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
     if not item:return jsonify({"error":"Inventory item not found."}),404
@@ -405,3 +405,87 @@ def _evaluate_escalations(organization_id):
                 seen.add(recipient.id)
                 _notify(recipient,"MECHNAR operational alert",message,"escalation","EscalationEvent",event.id)
     db.session.commit()
+
+
+@org_tools_bp.get("/inventory/<int:item_id>/movements")
+@roles_required(*ALL_ROLES)
+def inventory_movements(item_id):
+    user=get_current_user(); item=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
+    if not item:return jsonify({"error":"Inventory item not found."}),404
+    if user.role=="Staff" and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"Not permitted."}),403
+    rows=InventoryMovement.query.filter_by(organization_id=user.organization_id,item_id=item.id).order_by(InventoryMovement.created_at.desc()).limit(250).all()
+    return jsonify({"movements":[{"id":x.id,"type":x.movement_type,"quantity":float(x.quantity),"balance_after":float(x.balance_after),"reference":x.reference or "","notes":x.notes or "","performed_by_id":x.performed_by_id,"created_at":x.created_at.isoformat()} for x in rows]}),200
+
+@org_tools_bp.post("/inventory/<int:item_id>/movements")
+@roles_required("Admin","Supervisor")
+def inventory_record_movement(item_id):
+    user=get_current_user(); item=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).with_for_update().first()
+    if not item:return jsonify({"error":"Inventory item not found."}),404
+    if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user):return jsonify({"error":"This item is outside your team scope."}),403
+    d=request.get_json(silent=True) or {}; kind=str(d.get("type") or "")
+    if kind not in {"receipt","consumption","adjustment","transfer_out","transfer_in"}:return jsonify({"error":"Choose a valid stock movement."}),400
+    try: qty=Decimal(str(d.get("quantity")))
+    except (InvalidOperation,ValueError):return jsonify({"error":"Enter a valid quantity."}),400
+    if qty<=0:return jsonify({"error":"Quantity must be greater than zero."}),400
+    current=Decimal(str(item.quantity or 0)); balance=current+qty if kind in {"receipt","transfer_in"} else current-qty
+    if kind=="adjustment":balance=qty
+    if balance<0:return jsonify({"error":"Insufficient stock for this movement."}),409
+    delta=abs(balance-current); item.quantity=balance
+    movement=InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type=kind,quantity=delta,balance_after=balance,reference=str(d.get("reference") or "")[:180],notes=str(d.get("notes") or "")[:4000],performed_by_id=user.id)
+    db.session.add(movement);db.session.commit()
+    return jsonify({"item":_inventory_dict(item),"message":"Stock movement recorded."}),201
+
+@org_tools_bp.get("/inventory-requests")
+@roles_required(*ALL_ROLES)
+def inventory_requests_list():
+    user=get_current_user(); q=InventoryRequest.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Staff":q=q.filter_by(requester_id=user.id)
+    elif user.role=="Supervisor":
+        ids=_team_ids(user);q=q.filter(or_(InventoryRequest.team_id.in_(ids),InventoryRequest.requester_id==user.id)) if ids else q.filter_by(requester_id=user.id)
+    rows=q.order_by(InventoryRequest.created_at.desc()).limit(500).all()
+    return jsonify({"requests":[{"id":x.id,"item_id":x.item_id,"item_name":x.item_name,"requester_id":x.requester_id,"team_id":x.team_id,"type":x.request_type,"quantity":float(x.quantity),"fulfilled_quantity":float(x.fulfilled_quantity or 0),"reason":x.reason or "","status":x.status,"created_at":x.created_at.isoformat()} for x in rows]}),200
+
+@org_tools_bp.post("/inventory-requests")
+@roles_required(*ALL_ROLES)
+def inventory_request_create():
+    user=get_current_user();d=request.get_json(silent=True) or {};name=str(d.get("item_name") or "").strip()
+    try:qty=Decimal(str(d.get("quantity")))
+    except (InvalidOperation,ValueError):return jsonify({"error":"Enter a valid requested quantity."}),400
+    if not name or qty<=0:return jsonify({"error":"Item and a positive quantity are required."}),400
+    item=None
+    if d.get("item_id"):
+        item=InventoryItem.query.filter_by(id=d["item_id"],organization_id=user.organization_id).first()
+        if not item:return jsonify({"error":"Inventory item not found."}),404
+        name=item.name
+    team_ids=_team_ids(user); team_id=d.get("team_id")
+    if user.role!="Admin":team_id=next(iter(team_ids),None)
+    req=InventoryRequest(organization_id=user.organization_id,item_id=item.id if item else None,requester_id=user.id,team_id=team_id,request_type=str(d.get("type") or "supply")[:24],item_name=name,quantity=qty,reason=str(d.get("reason") or "")[:4000])
+    db.session.add(req);db.session.commit()
+    admins=User.query.filter_by(organization_id=user.organization_id,role="Admin",account_status="active").all()
+    for admin in admins:_notify(admin,"Inventory request received",f"{user.full_name or user.email} requested {qty} {name}.","inventory_request","InventoryRequest",req.id)
+    db.session.commit()
+    return jsonify({"id":req.id,"message":"Inventory request submitted."}),201
+
+@org_tools_bp.patch("/inventory-requests/<int:request_id>")
+@roles_required("Admin","Supervisor")
+def inventory_request_update(request_id):
+    user=get_current_user();req=InventoryRequest.query.filter_by(id=request_id,organization_id=user.organization_id).first()
+    if not req:return jsonify({"error":"Request not found."}),404
+    if user.role=="Supervisor" and req.team_id not in _team_ids(user):return jsonify({"error":"This request is outside your team scope."}),403
+    d=request.get_json(silent=True) or {};status=str(d.get("status") or req.status)
+    if status not in {"approved","rejected","fulfilled","partially_fulfilled"}:return jsonify({"error":"Invalid request status."}),400
+    if status in {"fulfilled","partially_fulfilled"}:
+        try:fulfilled=Decimal(str(d.get("fulfilled_quantity",req.quantity)))
+        except (InvalidOperation,ValueError):return jsonify({"error":"Invalid fulfilled quantity."}),400
+        if fulfilled<0 or fulfilled>req.quantity:return jsonify({"error":"Fulfilled quantity is outside the requested amount."}),400
+        if req.item_id and fulfilled>0:
+            item=InventoryItem.query.filter_by(id=req.item_id,organization_id=user.organization_id).with_for_update().first()
+            if not item or Decimal(str(item.quantity or 0))<fulfilled:return jsonify({"error":"Insufficient stock to fulfil this request."}),409
+            item.quantity=Decimal(str(item.quantity))-fulfilled
+            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="consumption",quantity=fulfilled,balance_after=item.quantity,reference=f"Request #{req.id}",notes="Request fulfilment",performed_by_id=user.id))
+        req.fulfilled_quantity=fulfilled
+    req.status=status;req.reviewed_by_id=user.id;req.reviewed_at=datetime.now(timezone.utc)
+    db.session.commit()
+    recipient=User.query.filter_by(id=req.requester_id,organization_id=user.organization_id).first()
+    if recipient:_notify(recipient,"Inventory request updated",f"Request #{req.id} is now {status.replace('_',' ')}.","inventory_request","InventoryRequest",req.id);db.session.commit()
+    return jsonify({"message":"Inventory request updated.","status":req.status}),200
