@@ -85,3 +85,34 @@ class EscalationEvent(db.Model):
     resolved_at = db.Column(db.DateTime(timezone=True))
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
     __table_args__ = (db.UniqueConstraint("organization_id", "rule_id", "resource_type", "resource_id", name="uq_escalation_resource_rule"),)
+
+
+class InventoryMovement(db.Model):
+    __tablename__ = "inventory_movements"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("inventory_items.id"), nullable=False, index=True)
+    movement_type = db.Column(db.String(24), nullable=False)
+    quantity = db.Column(db.Numeric(12, 2), nullable=False)
+    balance_after = db.Column(db.Numeric(12, 2), nullable=False)
+    reference = db.Column(db.String(180))
+    notes = db.Column(db.Text)
+    performed_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, index=True)
+
+class InventoryRequest(db.Model):
+    __tablename__ = "inventory_requests"
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("inventory_items.id"), index=True)
+    requester_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    team_id = db.Column(db.Integer, db.ForeignKey("teams.id"), index=True)
+    request_type = db.Column(db.String(24), nullable=False, default="supply")
+    item_name = db.Column(db.String(180), nullable=False)
+    quantity = db.Column(db.Numeric(12, 2), nullable=False)
+    reason = db.Column(db.Text)
+    status = db.Column(db.String(24), nullable=False, default="pending", index=True)
+    reviewed_by_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    fulfilled_quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    reviewed_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
