@@ -1005,7 +1005,7 @@ def inventory_analytics():
     if user.role=="Supervisor": purchase_q=purchase_q.filter_by(created_by_id=user.id)
     elif user.role=="Staff": purchase_q=purchase_q.filter(InventoryPurchase.id<0)
     supplier_spend={}
-    for purchase in purchase_q.filter(InventoryPurchase.status!="cancelled").all():
+    for purchase in purchase_q.filter(InventoryPurchase.status.in_({"approved","partially_received","received"})).all():
         month=(purchase.invoice_date.strftime("%Y-%m") if purchase.invoice_date else purchase.created_at.strftime("%Y-%m"))
         bucket=monthly.setdefault(month,{"receipts":0.0,"consumption":0.0,"adjustments":0.0,"purchase_spend":0.0})
         amount=float(purchase.grand_total or 0);bucket["purchase_spend"]+=amount
