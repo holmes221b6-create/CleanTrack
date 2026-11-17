@@ -578,7 +578,7 @@ def _purchase_dict(p):
         "received_at":p.received_at.isoformat() if p.received_at else None,
         "lines":[{"id":x.id,"item_id":x.item_id,"description":x.item_name,"sku":x.sku or "",
             "quantity":float(x.quantity_ordered),"received_quantity":float(x.quantity_received or 0),"unit":x.unit,
-            "unit_price":float(x.unit_price or 0),"tax_amount":float(x.tax_amount or 0),"line_total":float(x.line_total or 0)} for x in lines]}
+            "unit_price":float(x.unit_price or 0),"tax_amount":float(x.tax_amount or 0),"discount_amount":float(x.discount_amount or 0),"line_total":float(x.line_total or 0)} for x in lines]}
 
 @org_tools_bp.get("/inventory-suppliers")
 @roles_required("Admin","Supervisor")
@@ -629,19 +629,19 @@ def inventory_purchase_create():
         supplier_name=supplier.name
     if invoice_number and InventoryPurchase.query.filter_by(organization_id=user.organization_id,invoice_number=invoice_number).first():
         return jsonify({"error":"This invoice number is already recorded in this organisation."}),409
-    parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0")
+    parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0"); discount_total=Decimal("0")
     try:
-        for line in raw_lines[:100]:
+        for line in raw_lines[:1]:
             desc=str(line.get("description") or "").strip()
-            qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
-            if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
+            qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0))); discount=Decimal(str(line.get("discount_amount",0)))
+            if not desc or qty<=0 or price<0 or tax<0 or discount<0 or discount>(qty*price):raise InvalidOperation()
             item_id=line.get("item_id")
             if item_id:
                 linked=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
                 if not linked:return jsonify({"error":"A selected catalogue item is outside this organisation."}),400
                 if user.role=="Supervisor" and linked.team_id is not None and linked.team_id not in _team_ids(user) and linked.assigned_to_id!=user.id:return jsonify({"error":"A linked item is outside your team scope."}),403
-            total=(qty*price)+tax; subtotal += qty*price; tax_total += tax
-            parsed.append((line,desc,qty,price,tax,total,item_id))
+            total=(qty*price)+tax-discount; subtotal += qty*price; tax_total += tax; discount_total += discount
+            parsed.append((line,desc,qty,price,tax,discount,total,item_id))
     except (InvalidOperation,ValueError,TypeError):
         return jsonify({"error":"Check every line: item name, positive quantity, non-negative price and tax are required."}),400
     if supplier is None:
@@ -654,13 +654,13 @@ def inventory_purchase_create():
     purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=supplier.id,
         invoice_number=invoice_number or None,invoice_date=invoice_date,
         purchase_order_number=str(d.get("order_reference") or "")[:100],status="draft",
-        currency=str(d.get("currency") or "INR")[:8],subtotal=subtotal,tax_total=tax_total,
-        grand_total=subtotal+tax_total,extraction_status="manual",notes=str(d.get("notes") or "")[:8000],created_by_id=user.id)
+        currency=str(d.get("currency") or "INR")[:8],subtotal=subtotal,tax_total=tax_total,discount_total=discount_total,
+        grand_total=subtotal+tax_total-discount_total,extraction_status="manual",notes=str(d.get("notes") or "")[:8000],created_by_id=user.id)
     db.session.add(purchase);db.session.flush()
-    for line,desc,qty,price,tax,total,item_id in parsed:
+    for line,desc,qty,price,tax,discount,total,item_id in parsed:
         db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
             item_name=desc,sku=str(line.get("sku") or "")[:80],quantity_ordered=qty,quantity_received=Decimal("0"),
-            unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=Decimal("0"),line_total=total))
+            unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=discount,line_total=total))
     db.session.commit()
     return jsonify({"purchase":_purchase_dict(purchase),"message":"Purchase draft recorded. Stock has not changed."}),201
 
@@ -686,19 +686,19 @@ def inventory_purchase_update(purchase_id):
             if not supplier:return jsonify({"error":"Supplier does not belong to this organisation."}),400
         raw_lines=d.get("lines")
         if not isinstance(raw_lines,list) or not raw_lines:return jsonify({"error":"Add at least one verified invoice line."}),400
-        parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0")
+        parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0"); discount_total=Decimal("0")
         try:
-            for line in raw_lines[:100]:
+            for line in raw_lines[:1]:
                 desc=str(line.get("description") or "").strip()
-                qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
+                qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0))); discount=Decimal(str(line.get("discount_amount",0)))
                 item_id=line.get("item_id")
-                if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
+                if not desc or qty<=0 or price<0 or tax<0 or discount<0 or discount>(qty*price):raise InvalidOperation()
                 if item_id:
                     linked=InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first()
                     if not linked:return jsonify({"error":"A linked item is outside this organisation."}),400
                     if user.role=="Supervisor" and linked.team_id is not None and linked.team_id not in _team_ids(user) and linked.assigned_to_id!=user.id:return jsonify({"error":"A linked item is outside your team scope."}),403
-                total=qty*price+tax;subtotal+=qty*price;tax_total+=tax
-                parsed.append((line,desc,qty,price,tax,total,item_id))
+                total=qty*price+tax-discount;subtotal+=qty*price;tax_total+=tax;discount_total+=discount
+                parsed.append((line,desc,qty,price,tax,discount,total,item_id))
         except (InvalidOperation,ValueError,TypeError):
             return jsonify({"error":"Check invoice line descriptions, quantities, prices and taxes."}),400
         InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).delete()
@@ -713,13 +713,13 @@ def inventory_purchase_update(purchase_id):
         except ValueError:return jsonify({"error":"Invalid invoice date."}),400
         purchase.purchase_order_number=str(d.get("order_reference") or "")[:100]
         purchase.currency=str(d.get("currency") or "INR")[:8]
-        purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.grand_total=subtotal+tax_total
+        purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.discount_total=discount_total;purchase.grand_total=subtotal+tax_total-discount_total
         purchase.notes=str(d.get("notes") or "")[:8000]
         purchase.extraction_status="human_verified"
-        for line,desc,qty,price,tax,total,item_id in parsed:
+        for line,desc,qty,price,tax,discount,total,item_id in parsed:
             db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
                 item_name=desc,sku=str(line.get("sku") or "")[:80],quantity_ordered=qty,quantity_received=Decimal("0"),
-                unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=Decimal("0"),line_total=total))
+                unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=discount,line_total=total))
         db.session.commit()
         return jsonify({"purchase":_purchase_dict(purchase),"message":"Invoice details saved for review. Stock remains unchanged."}),200
     if action=="approve":
