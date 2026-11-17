@@ -759,7 +759,7 @@ def inventory_purchase_update(purchase_id):
             item.quantity=projected
             db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="receipt",
                 quantity=delta,balance_after=item.quantity,reference=purchase.invoice_number or ("Purchase #"+str(purchase.id)),
-                notes="Goods received against purchase #"+str(purchase.id),performed_by_id=user.id))
+                notes=("Goods received against purchase #"+str(purchase.id)+" · "+str(d.get("location") or item.storage_location or "Unassigned / central stock") + ((" · MAX OVERRIDE: "+str(d.get("override_reason") or "")[:300]) if d.get("allow_over_maximum") else ""))[:4000],performed_by_id=user.id))
             line.quantity_received=target
         if not any_received:return jsonify({"error":"Enter at least one quantity greater than the amount already received."}),400
         all_lines=InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).all()
@@ -783,47 +783,6 @@ def inventory_purchase_invoice(purchase_id):
     from io import BytesIO
     return send_file(BytesIO(purchase.invoice_data),mimetype=purchase.invoice_content_type or "application/octet-stream",
         as_attachment=True,download_name=purchase.invoice_filename or "invoice")
-
-
-def _extract_invoice_text(data, mimetype):
-    text_content = ""
-    method = "manual_review"
-    if mimetype == "application/pdf":
-        try:
-            from pypdf import PdfReader
-            from io import BytesIO
-            reader = PdfReader(BytesIO(data))
-            text_content = "\\n".join((page.extract_text() or "") for page in reader.pages[:20])
-            if text_content.strip(): method = "pdf_text"
-        except Exception:
-            text_content = ""
-    elif mimetype.startswith("image/"):
-        try:
-            from PIL import Image
-            import pytesseract
-            from io import BytesIO
-            text_content = pytesseract.image_to_string(Image.open(BytesIO(data)))[:60000]
-            if text_content.strip(): method = "local_ocr"
-        except Exception:
-            text_content = ""
-    return text_content[:60000], method
-
-
-def _parse_invoice_rules(raw):
-    import re
-    clean = re.sub(r"[ \\t]+", " ", raw or "")
-    def find(pattern):
-        match = re.search(pattern, clean, re.I | re.M)
-        return match.group(1).strip() if match else ""
-    invoice = find(r"(?:invoice\\s*(?:no|number|#)?|bill\\s*no)\\s*[:#-]?\\s*([A-Z0-9/-]{3,40})")
-    date = find(r"(?:invoice\\s*date|date)\\s*[:#-]?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})")
-    supplier = ""
-    for line in clean.splitlines():
-        candidate = line.strip()
-        if candidate and len(candidate) > 2 and not re.search(r"invoice|tax|gst|date|total|address|phone", candidate, re.I):
-            supplier = candidate[:180]; break
-    totals = find(r"(?:grand\\s*total|total\\s*amount|amount\\s*due)\\s*[:₹$ ]+([0-9,]+\\.\\d{1,2})")
-    return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":totals,"lines":[]}
 
 
 def _extract_invoice_text(data, mimetype):
@@ -880,6 +839,8 @@ def inventory_purchase_invoice_upload():
     if not data or len(data)>8*1024*1024:return jsonify({"error":"Invoice must be between 1 byte and 8 MB."}),413
     extracted_text, extraction_method = _extract_invoice_text(data, mimetype)
     parsed = _parse_invoice_rules(extracted_text)
+    if parsed.get("invoice_number") and InventoryPurchase.query.filter_by(organization_id=user.organization_id,invoice_number=parsed["invoice_number"]).first():
+        return jsonify({"error":"This invoice number already exists in this organisation. The upload was not recorded."}),409
     purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=None,
         invoice_number=parsed.get("invoice_number") or None,status="draft",
         invoice_filename=filename,invoice_content_type=mimetype,invoice_size=len(data),invoice_data=data,
