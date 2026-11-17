@@ -169,6 +169,13 @@ def inventory_create():
     for key, model in (("team_id",Team),):
         if d.get(key) is not None and not model.query.filter_by(id=d[key],organization_id=user.organization_id).first():
             return jsonify({"error":"Selected team is outside your organization."}),400
+    if user.role=="Supervisor" and d.get("team_id") is not None and d.get("team_id") not in _team_ids(user):
+        return jsonify({"error":"You can only register inventory for teams you supervise."}),403
+    if d.get("assigned_to_id") is not None:
+        assignee=User.query.filter_by(id=d.get("assigned_to_id"),organization_id=user.organization_id).first()
+        if not assignee:return jsonify({"error":"Selected assignee is outside this organisation."}),400
+        if user.role=="Supervisor" and assignee.id not in User.query.join(TeamMember,TeamMember.user_id==User.id).filter(TeamMember.team_id.in_(_team_ids(user)),User.id==assignee.id).with_entities(User.id).all():
+            return jsonify({"error":"You can only assign inventory to members of your teams."}),403
     item=InventoryItem(organization_id=user.organization_id,name=name,category=str(d.get("category") or "General")[:80],
         description=str(d.get("description") or "")[:8000],sku=str(d.get("sku") or "")[:80],
         asset_tag=str(d.get("asset_tag") or "")[:100],serial_number=str(d.get("serial_number") or "")[:120],
@@ -221,7 +228,15 @@ def inventory_update(item_id):
             except (TypeError,ValueError):return jsonify({"error":f"Invalid {key} date."}),400
     if "team_id" in d:
         if d["team_id"] is not None and not Team.query.filter_by(id=d["team_id"],organization_id=user.organization_id).first():return jsonify({"error":"Invalid team."}),400
+        if user.role=="Supervisor" and d["team_id"] is not None and d["team_id"] not in _team_ids(user):return jsonify({"error":"You can only assign inventory to teams you supervise."}),403
         item.team_id=d["team_id"]
+    if "assigned_to_id" in d:
+        assignee_id=d.get("assigned_to_id")
+        if assignee_id is not None:
+            assignee=User.query.filter_by(id=assignee_id,organization_id=user.organization_id).first()
+            if not assignee:return jsonify({"error":"Selected assignee is outside this organisation."}),400
+            if user.role=="Supervisor" and not TeamMember.query.filter(TeamMember.user_id==assignee.id,TeamMember.team_id.in_(_team_ids(user))).first():return jsonify({"error":"You can only assign inventory to members of your teams."}),403
+        item.assigned_to_id=assignee_id
     if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="adjustment",quantity=abs(Decimal(str(item.quantity or 0))-previous_quantity),balance_after=item.quantity,reference="Item edit",notes="Stock balance changed through item maintenance form.",performed_by_id=user.id))
     if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
