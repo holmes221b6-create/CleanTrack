@@ -248,7 +248,8 @@ def inventory_update(item_id):
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="adjustment",quantity=abs(Decimal(str(item.quantity or 0))-previous_quantity),balance_after=item.quantity,reference="Item edit",notes="Stock balance changed through item maintenance form.",performed_by_id=user.id))
     if "storage_location" in d and str(item.storage_location or "Unassigned / central stock") != previous_location:
         old_balance=InventoryLocationStock.query.filter_by(organization_id=user.organization_id,item_id=item.id,location_name=previous_location).with_for_update().first()
-        if Decimal(str(old_balance.quantity or 0)) != Decimal(str(item.quantity or 0)):
+        old_location_quantity=Decimal(str(old_balance.quantity or 0)) if old_balance else Decimal("0")
+        if old_location_quantity != Decimal(str(item.quantity or 0)):
             db.session.rollback();return jsonify({"error":"This asset has stock distributed across multiple locations. Use Transfers to relocate stock instead of changing its primary storage location."}),409
         try:
             _location_balance(user.id,user.organization_id,item.id,previous_location,-Decimal(str(item.quantity or 0)))
