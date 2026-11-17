@@ -488,16 +488,21 @@ def inventory_request_update(request_id):
     if not req:return jsonify({"error":"Request not found."}),404
     if user.role=="Supervisor" and req.team_id not in _team_ids(user):return jsonify({"error":"This request is outside your team scope."}),403
     d=request.get_json(silent=True) or {};status=str(d.get("status") or req.status)
+    if req.status in {"fulfilled","rejected"}:return jsonify({"error":"This request is already closed."}),409
     if status not in {"approved","rejected","fulfilled","partially_fulfilled"}:return jsonify({"error":"Invalid request status."}),400
     if status in {"fulfilled","partially_fulfilled"}:
+        if not req.item_id:return jsonify({"error":"Link this request to a catalogue item before recording fulfilment, so stock can be deducted accurately."}),409
         try:fulfilled=Decimal(str(d.get("fulfilled_quantity",req.quantity)))
         except (InvalidOperation,ValueError):return jsonify({"error":"Invalid fulfilled quantity."}),400
-        if fulfilled<0 or fulfilled>req.quantity:return jsonify({"error":"Fulfilled quantity is outside the requested amount."}),400
-        if req.item_id and fulfilled>0:
+        previous=Decimal(str(req.fulfilled_quantity or 0))
+        if fulfilled<previous or fulfilled>Decimal(str(req.quantity)) or (status=="partially_fulfilled" and fulfilled<=0):
+            return jsonify({"error":"Fulfilled quantity must be greater than the amount already issued and no greater than requested."}),400
+        delta=fulfilled-previous
+        if delta>0:
             item=InventoryItem.query.filter_by(id=req.item_id,organization_id=user.organization_id).with_for_update().first()
-            if not item or Decimal(str(item.quantity or 0))<fulfilled:return jsonify({"error":"Insufficient stock to fulfil this request."}),409
-            item.quantity=Decimal(str(item.quantity))-fulfilled
-            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="consumption",quantity=fulfilled,balance_after=item.quantity,reference=f"Request #{req.id}",notes="Request fulfilment",performed_by_id=user.id))
+            if not item or Decimal(str(item.quantity or 0))<delta:return jsonify({"error":"Insufficient stock to fulfil the remaining quantity."}),409
+            item.quantity=Decimal(str(item.quantity))-delta
+            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="consumption",quantity=delta,balance_after=item.quantity,reference=f"Request #{req.id}",notes="Incremental request fulfilment",performed_by_id=user.id))
         req.fulfilled_quantity=fulfilled
     req.status=status;req.reviewed_by_id=user.id;req.reviewed_at=datetime.now(timezone.utc)
     db.session.commit()
