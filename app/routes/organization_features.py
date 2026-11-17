@@ -972,7 +972,19 @@ def inventory_analytics():
         if mv.movement_type in {"receipt","transfer_in"}: bucket["receipts"]+=amount
         elif mv.movement_type in {"consumption","transfer_out"}: bucket["consumption"]+=amount
         elif mv.movement_type=="adjustment": bucket["adjustments"]+=amount
-    return jsonify({"summary":{"items":len(items),"on_hand":sum(float(x.quantity or 0) for x in items),"low_stock":sum(1 for x in items if float(x.quantity or 0)<=float(x.minimum_quantity or 0)),"over_maximum":sum(1 for x in items if float(getattr(x,"maximum_quantity",0) or 0)>0 and float(x.quantity or 0)>float(x.maximum_quantity))},"monthly":[{"month":k,**v} for k,v in sorted(monthly.items())],"data_points":len(movements)}),200
+    purchase_q=InventoryPurchase.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor": purchase_q=purchase_q.filter_by(created_by_id=user.id)
+    elif user.role=="Staff": purchase_q=purchase_q.filter(InventoryPurchase.id<0)
+    supplier_spend={}
+    for purchase in purchase_q.filter(InventoryPurchase.status!="cancelled").all():
+        month=(purchase.invoice_date.strftime("%Y-%m") if purchase.invoice_date else purchase.created_at.strftime("%Y-%m"))
+        bucket=monthly.setdefault(month,{"receipts":0.0,"consumption":0.0,"adjustments":0.0,"purchase_spend":0.0})
+        amount=float(purchase.grand_total or 0);bucket["purchase_spend"]+=amount
+        supplier=InventorySupplier.query.filter_by(id=purchase.supplier_id,organization_id=user.organization_id).first() if purchase.supplier_id else None
+        name=supplier.name if supplier else "Unspecified supplier"
+        supplier_spend[name]=supplier_spend.get(name,0.0)+amount
+    for bucket in monthly.values(): bucket.setdefault("purchase_spend",0.0)
+    return jsonify({"summary":{"items":len(items),"on_hand":sum(float(x.quantity or 0) for x in items),"low_stock":sum(1 for x in items if float(x.quantity or 0)<=float(x.minimum_quantity or 0)),"over_maximum":sum(1 for x in items if float(getattr(x,"maximum_quantity",0) or 0)>0 and float(x.quantity or 0)>float(x.maximum_quantity))},"monthly":[{"month":k,**v} for k,v in sorted(monthly.items())],"supplier_spend":[{"supplier":k,"spend":round(v,2)} for k,v in sorted(supplier_spend.items(),key=lambda x:x[1],reverse=True)],"data_points":len(movements)}),200
 
 
 @org_tools_bp.get("/inventory-forecast")
