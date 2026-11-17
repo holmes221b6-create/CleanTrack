@@ -11,4 +11,7 @@ psycopg[binary]>=3.1,<4.0
 pytest>=8,<9
 APScheduler>=3.10,<4.0
 resend>=2.0.0,<3.0.0
-\npypdf>=5.0,<7.0\nPillow>=10.0,<13.0\npytesseract>=0.3.10,<0.4\n
+
+pypdf>=5.0,<7.0
+Pillow>=10.0,<13.0
+pytesseract>=0.3.10,<0.4
