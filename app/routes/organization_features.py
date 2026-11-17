@@ -450,15 +450,25 @@ def inventory_record_movement(item_id):
     current=Decimal(str(item.quantity or 0)); balance=current+qty if kind in {"receipt","transfer_in"} else current-qty
     if kind=="adjustment":balance=qty
     if balance<0:return jsonify({"error":"Insufficient stock for this movement."}),409
-    delta=abs(balance-current); item.quantity=balance
     location=str(d.get("location") or item.storage_location or "Unassigned / central stock")
+    if kind=="adjustment":
+        current_loc=InventoryLocationStock.query.filter_by(organization_id=user.organization_id,item_id=item.id,location_name=location).with_for_update().first()
+        prior=Decimal(str(current_loc.quantity or 0)) if current_loc else Decimal("0")
+        balance=current+(qty-prior)
+        if balance<0:return jsonify({"error":"The adjustment would make total stock negative."}),409
+    maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
+    if kind in {"receipt","transfer_in"} and maximum>0 and balance>maximum and not d.get("allow_over_maximum"):
+        return jsonify({"error":"This receipt exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(balance),"requires_override":True}),409
+    if kind in {"receipt","transfer_in"} and maximum>0 and balance>maximum and not str(d.get("override_reason") or "").strip():
+        return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
+    delta=abs(balance-current); item.quantity=balance
     try:
         if kind in {"receipt","transfer_in"}: _location_balance(user.id,user.organization_id,item.id,location,delta)
         elif kind in {"consumption","transfer_out"}: _location_balance(user.id,user.organization_id,item.id,location,-delta)
         elif kind=="adjustment":
             current_loc=InventoryLocationStock.query.filter_by(organization_id=user.organization_id,item_id=item.id,location_name=location).with_for_update().first()
             prior=Decimal(str(current_loc.quantity or 0)) if current_loc else Decimal("0")
-            _location_balance(user.id,user.organization_id,item.id,location,balance-prior)
+            _location_balance(user.id,user.organization_id,item.id,location,qty-prior)
     except ValueError as exc:
         db.session.rollback();return jsonify({"error":str(exc)}),409
     movement=InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type=kind,quantity=delta,balance_after=balance,reference=str(d.get("reference") or "")[:180],notes=str(d.get("notes") or "")[:4000],performed_by_id=user.id)
@@ -734,7 +744,14 @@ def inventory_purchase_update(purchase_id):
                         quantity=Decimal("0"),minimum_quantity=Decimal("0"),unit=line.unit,created_by_id=user.id)
                     db.session.add(item);db.session.flush()
                 line.item_id=item.id
-            item.quantity=Decimal(str(item.quantity or 0))+delta
+            current_total=Decimal(str(item.quantity or 0)); projected=current_total+delta
+            maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
+            if maximum>0 and projected>maximum and not d.get("allow_over_maximum"):
+                db.session.rollback();return jsonify({"error":"Receipt exceeds maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(projected),"requires_override":True}),409
+            if maximum>0 and projected>maximum and not str(d.get("override_reason") or "").strip():
+                db.session.rollback();return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
+            _location_balance(user.id,user.organization_id,item.id,str(d.get("location") or item.storage_location or "Unassigned / central stock"),delta)
+            item.quantity=projected
             db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="receipt",
                 quantity=delta,balance_after=item.quantity,reference=purchase.invoice_number or ("Purchase #"+str(purchase.id)),
                 notes="Goods received against purchase #"+str(purchase.id),performed_by_id=user.id))
