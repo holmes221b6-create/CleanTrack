@@ -530,15 +530,16 @@ def _purchase_scope(user):
 
 def _purchase_dict(p):
     lines = InventoryPurchaseLine.query.filter_by(purchase_id=p.id, organization_id=p.organization_id).order_by(InventoryPurchaseLine.id.asc()).all()
-    return {"id":p.id,"supplier_id":p.supplier_id,"supplier_name":p.supplier_name,
+    supplier = InventorySupplier.query.filter_by(id=p.supplier_id, organization_id=p.organization_id).first() if p.supplier_id else None
+    return {"id":p.id,"supplier_id":p.supplier_id,"supplier_name":supplier.name if supplier else "Supplier not set",
         "invoice_number":p.invoice_number or "","invoice_date":p.invoice_date.isoformat() if p.invoice_date else None,
-        "order_reference":p.order_reference or "","status":p.status,"currency":p.currency,
+        "order_reference":p.purchase_order_number or "","status":p.status,"currency":p.currency,
         "subtotal":float(p.subtotal or 0),"tax_total":float(p.tax_total or 0),"grand_total":float(p.grand_total or 0),
         "invoice_filename":p.invoice_filename,"extraction_status":p.extraction_status,"notes":p.notes or "",
-        "created_at":p.created_at.isoformat(),"approved_at":p.approved_at.isoformat() if p.approved_at else None,
+        "created_at":p.created_at.isoformat(),"approved_at":p.reviewed_at.isoformat() if p.reviewed_at else None,
         "received_at":p.received_at.isoformat() if p.received_at else None,
-        "lines":[{"id":x.id,"item_id":x.item_id,"description":x.description,"sku":x.sku or "",
-            "quantity":float(x.quantity),"received_quantity":float(x.received_quantity or 0),"unit":x.unit,
+        "lines":[{"id":x.id,"item_id":x.item_id,"description":x.item_name,"sku":x.sku or "",
+            "quantity":float(x.quantity_ordered),"received_quantity":float(x.quantity_received or 0),"unit":x.unit,
             "unit_price":float(x.unit_price or 0),"tax_amount":float(x.tax_amount or 0),"line_total":float(x.line_total or 0)} for x in lines]}
 
 @org_tools_bp.get("/inventory-suppliers")
@@ -547,7 +548,7 @@ def inventory_suppliers_list():
     user=get_current_user()
     rows=InventorySupplier.query.filter_by(organization_id=user.organization_id).order_by(InventorySupplier.name.asc()).all()
     return jsonify({"suppliers":[{"id":x.id,"name":x.name,"contact_name":x.contact_name or "",
-        "email":x.email or "","phone":x.phone or "","tax_reference":x.tax_reference or "",
+        "email":x.email or "","phone":x.phone or "","tax_reference":x.tax_identifier or "",
         "address":x.address or "","notes":x.notes or ""} for x in rows]}),200
 
 @org_tools_bp.post("/inventory-suppliers")
@@ -557,7 +558,7 @@ def inventory_supplier_create():
     if not name or len(name)>180:return jsonify({"error":"Supplier name is required."}),400
     row=InventorySupplier(organization_id=user.organization_id,name=name,contact_name=str(d.get("contact_name") or "")[:120],
         email=str(d.get("email") or "")[:180],phone=str(d.get("phone") or "")[:60],
-        tax_reference=str(d.get("tax_reference") or "")[:100],address=str(d.get("address") or "")[:4000],
+        tax_identifier=str(d.get("tax_reference") or "")[:80],address=str(d.get("address") or "")[:4000],
         notes=str(d.get("notes") or "")[:4000],created_by_id=user.id)
     db.session.add(row)
     try:db.session.commit()
@@ -605,17 +606,23 @@ def inventory_purchase_create():
             parsed.append((line,desc,qty,price,tax,total,item_id))
     except (InvalidOperation,ValueError,TypeError):
         return jsonify({"error":"Check every line: item name, positive quantity, non-negative price and tax are required."}),400
-    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=supplier.id if supplier else None,
-        supplier_name=supplier_name,invoice_number=invoice_number or None,
-        invoice_date=datetime.strptime(d["invoice_date"],"%Y-%m-%d").date() if d.get("invoice_date") else None,
-        order_reference=str(d.get("order_reference") or "")[:100],status="draft",
+    if supplier is None:
+        supplier=InventorySupplier.query.filter_by(organization_id=user.organization_id,name=supplier_name).first()
+    if supplier is None:
+        supplier=InventorySupplier(organization_id=user.organization_id,name=supplier_name,created_by_id=user.id)
+        db.session.add(supplier);db.session.flush()
+    try:invoice_date=datetime.strptime(d["invoice_date"],"%Y-%m-%d").date() if d.get("invoice_date") else None
+    except ValueError:return jsonify({"error":"Invalid invoice date."}),400
+    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=supplier.id,
+        invoice_number=invoice_number or None,invoice_date=invoice_date,
+        purchase_order_number=str(d.get("order_reference") or "")[:100],status="draft",
         currency=str(d.get("currency") or "INR")[:8],subtotal=subtotal,tax_total=tax_total,
         grand_total=subtotal+tax_total,extraction_status="manual",notes=str(d.get("notes") or "")[:8000],created_by_id=user.id)
     db.session.add(purchase);db.session.flush()
     for line,desc,qty,price,tax,total,item_id in parsed:
         db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
-            description=desc,sku=str(line.get("sku") or "")[:80],quantity=qty,unit=str(line.get("unit") or "units")[:32],
-            unit_price=price,tax_amount=tax,line_total=total))
+            item_name=desc,sku=str(line.get("sku") or "")[:80],quantity_ordered=qty,quantity_received=Decimal("0"),
+            unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=Decimal("0"),line_total=total))
     db.session.commit()
     return jsonify({"purchase":_purchase_dict(purchase),"message":"Purchase draft recorded. Stock has not changed."}),201
 
@@ -657,35 +664,40 @@ def inventory_purchase_update(purchase_id):
         except (InvalidOperation,ValueError,TypeError):
             return jsonify({"error":"Check invoice line descriptions, quantities, prices and taxes."}),400
         InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).delete()
-        purchase.supplier_id=supplier.id if supplier else None;purchase.supplier_name=supplier.name if supplier else supplier_name
+        if supplier is None:
+            supplier=InventorySupplier.query.filter_by(organization_id=user.organization_id,name=supplier_name).first()
+        if supplier is None:
+            supplier=InventorySupplier(organization_id=user.organization_id,name=supplier_name,created_by_id=user.id)
+            db.session.add(supplier);db.session.flush()
+        purchase.supplier_id=supplier.id
         purchase.invoice_number=invoice_number or None
         try:purchase.invoice_date=datetime.strptime(d["invoice_date"],"%Y-%m-%d").date() if d.get("invoice_date") else None
         except ValueError:return jsonify({"error":"Invalid invoice date."}),400
-        purchase.order_reference=str(d.get("order_reference") or "")[:100]
+        purchase.purchase_order_number=str(d.get("order_reference") or "")[:100]
         purchase.currency=str(d.get("currency") or "INR")[:8]
         purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.grand_total=subtotal+tax_total
         purchase.notes=str(d.get("notes") or "")[:8000]
         purchase.extraction_status="human_verified"
         for line,desc,qty,price,tax,total,item_id in parsed:
             db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
-                description=desc,sku=str(line.get("sku") or "")[:80],quantity=qty,unit=str(line.get("unit") or "units")[:32],
-                unit_price=price,tax_amount=tax,line_total=total))
+                item_name=desc,sku=str(line.get("sku") or "")[:80],quantity_ordered=qty,quantity_received=Decimal("0"),
+                unit=str(line.get("unit") or "units")[:32],unit_price=price,tax_amount=tax,discount_amount=Decimal("0"),line_total=total))
         db.session.commit()
         return jsonify({"purchase":_purchase_dict(purchase),"message":"Invoice details saved for review. Stock remains unchanged."}),200
     if action=="approve":
         if purchase.status!="draft":return jsonify({"error":"Only draft purchases can be approved."}),409
         if purchase.extraction_status!="human_verified" or not InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).first():return jsonify({"error":"Verify supplier and invoice line details before approval."}),409
-        purchase.status="approved";purchase.approved_by_id=user.id;purchase.approved_at=datetime.now(timezone.utc)
+        purchase.status="approved";purchase.reviewed_by_id=user.id;purchase.reviewed_at=datetime.now(timezone.utc)
     elif action=="receive":
         if purchase.status not in {"approved","partially_received"}:return jsonify({"error":"Approve the purchase before receiving goods."}),409
         lines=InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).with_for_update().all()
         received=d.get("received_quantities",{})
         any_received=False
         for line in lines:
-            try: target=Decimal(str(received.get(str(line.id),line.quantity)))
+            try: target=Decimal(str(received.get(str(line.id),line.quantity_ordered)))
             except (InvalidOperation,ValueError):return jsonify({"error":"Invalid received quantity."}),400
-            already=Decimal(str(line.received_quantity or 0))
-            if target<already or target>Decimal(str(line.quantity)):return jsonify({"error":"Received quantities must be between the quantity already received and the ordered quantity."}),400
+            already=Decimal(str(line.quantity_received or 0))
+            if target<already or target>Decimal(str(line.quantity_ordered)):return jsonify({"error":"Received quantities must be between the quantity already received and the ordered quantity."}),400
             delta=target-already
             if delta<=0:continue
             any_received=True
@@ -695,7 +707,7 @@ def inventory_purchase_update(purchase_id):
             else:
                 item=InventoryItem.query.filter_by(organization_id=user.organization_id,sku=line.sku).first() if line.sku else None
                 if not item:
-                    item=InventoryItem(organization_id=user.organization_id,name=line.description,category="General",sku=line.sku or None,
+                    item=InventoryItem(organization_id=user.organization_id,name=line.item_name,category="General",sku=line.sku or None,
                         quantity=Decimal("0"),minimum_quantity=Decimal("0"),unit=line.unit,created_by_id=user.id)
                     db.session.add(item);db.session.flush()
                 line.item_id=item.id
@@ -703,10 +715,10 @@ def inventory_purchase_update(purchase_id):
             db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="receipt",
                 quantity=delta,balance_after=item.quantity,reference=purchase.invoice_number or ("Purchase #"+str(purchase.id)),
                 notes="Goods received against purchase #"+str(purchase.id),performed_by_id=user.id))
-            line.received_quantity=target
+            line.quantity_received=target
         if not any_received:return jsonify({"error":"Enter at least one quantity greater than the amount already received."}),400
         all_lines=InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).all()
-        purchase.status="received" if all(Decimal(str(x.received_quantity or 0))>=Decimal(str(x.quantity)) for x in all_lines) else "partially_received"
+        purchase.status="received" if all(Decimal(str(x.quantity_received or 0))>=Decimal(str(x.quantity_ordered)) for x in all_lines) else "partially_received"
         purchase.received_by_id=user.id
         if purchase.status=="received":purchase.received_at=datetime.now(timezone.utc)
     elif action=="cancel":
@@ -724,7 +736,7 @@ def inventory_purchase_invoice(purchase_id):
     if user.role=="Supervisor" and purchase.created_by_id!=user.id:return jsonify({"error":"You cannot access this invoice."}),403
     if not purchase.invoice_data:return jsonify({"error":"No invoice file is attached."}),404
     from io import BytesIO
-    return send_file(BytesIO(purchase.invoice_data),mimetype=purchase.invoice_mimetype or "application/octet-stream",
+    return send_file(BytesIO(purchase.invoice_data),mimetype=purchase.invoice_content_type or "application/octet-stream",
         as_attachment=True,download_name=purchase.invoice_filename or "invoice")
 
 @org_tools_bp.post("/inventory-purchases/invoice-upload")
@@ -739,7 +751,7 @@ def inventory_purchase_invoice_upload():
     data=uploaded.read(8*1024*1024+1)
     if not data or len(data)>8*1024*1024:return jsonify({"error":"Invoice must be between 1 byte and 8 MB."}),413
     purchase=InventoryPurchase(organization_id=user.organization_id,supplier_name="Pending verification",
-        status="draft",invoice_filename=filename,invoice_mimetype=mimetype,invoice_data=data,
+        status="draft",invoice_filename=filename,invoice_content_type=mimetype,invoice_size=len(data),invoice_data=data,
         extraction_status="awaiting_review",notes="Invoice uploaded. Verify supplier, invoice details and line items before approval.",
         created_by_id=user.id)
     db.session.add(purchase);db.session.commit()
