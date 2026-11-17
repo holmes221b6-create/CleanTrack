@@ -198,3 +198,14 @@ class InventoryTransfer(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
     dispatched_at = db.Column(db.DateTime(timezone=True))
     received_at = db.Column(db.DateTime(timezone=True))
+
+
+class InventoryLocationStock(db.Model):
+    __tablename__ = "inventory_location_stocks"
+    __table_args__ = (db.UniqueConstraint("organization_id", "item_id", "location_name", name="uq_inventory_location_stock"),)
+    id = db.Column(db.Integer, primary_key=True)
+    organization_id = db.Column(db.Integer, db.ForeignKey("organizations.id"), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey("inventory_items.id"), nullable=False, index=True)
+    location_name = db.Column(db.String(180), nullable=False, default="Unassigned / central stock")
+    quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    updated_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
