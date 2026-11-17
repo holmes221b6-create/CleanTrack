@@ -751,7 +751,13 @@ def inventory_purchase_invoice_upload():
 @roles_required("Admin","Supervisor")
 def inventory_transfers_list():
     user=get_current_user()
-    rows=InventoryTransfer.query.filter_by(organization_id=user.organization_id).order_by(InventoryTransfer.created_at.desc()).limit(300).all()
+    q=InventoryTransfer.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        ids=_team_ids(user)
+        q=q.join(InventoryItem,InventoryTransfer.item_id==InventoryItem.id).filter(
+            or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))
+            if ids else or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
+    rows=q.order_by(InventoryTransfer.created_at.desc()).limit(300).all()
     return jsonify({"transfers":[{"id":x.id,"item_id":x.item_id,"from_location":x.from_location,"to_location":x.to_location,
         "quantity":float(x.quantity),"status":x.status,"notes":x.notes or "","created_at":x.created_at.isoformat()} for x in rows]}),200
 
@@ -761,6 +767,7 @@ def inventory_transfer_create():
     user=get_current_user(); d=request.get_json(silent=True) or {}
     item=InventoryItem.query.filter_by(id=d.get("item_id"),organization_id=user.organization_id).first()
     if not item:return jsonify({"error":"Choose an inventory item in this organisation."}),400
+    if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"This item is outside your team scope."}),403
     source=str(d.get("from_location") or "").strip(); target=str(d.get("to_location") or "").strip()
     try:qty=Decimal(str(d.get("quantity")))
     except (InvalidOperation,ValueError):return jsonify({"error":"Enter a valid transfer quantity."}),400
@@ -778,6 +785,7 @@ def inventory_transfer_update(transfer_id):
     d=request.get_json(silent=True) or {}; action=d.get("action")
     item=InventoryItem.query.filter_by(id=row.item_id,organization_id=user.organization_id).with_for_update().first()
     if not item:return jsonify({"error":"Inventory item not found."}),404
+    if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"This item is outside your team scope."}),403
     if action=="dispatch" and row.status=="pending":
         current=Decimal(str(item.quantity or 0)); qty=Decimal(str(row.quantity))
         if current<qty:return jsonify({"error":"Insufficient stock to dispatch this transfer."}),409
