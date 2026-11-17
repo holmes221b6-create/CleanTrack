@@ -470,7 +470,7 @@ def inventory_record_movement(item_id):
         balance=current+(qty-prior)
         if balance<0:return jsonify({"error":"The adjustment would make total stock negative."}),409
     maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
-    if kind in {"receipt","transfer_in"} and maximum>0 and balance>maximum and not d.get("allow_over_maximum"):
+    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and not d.get("allow_over_maximum"):
         return jsonify({"error":"This receipt exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(balance),"requires_override":True}),409
     if kind in {"receipt","transfer_in"} and maximum>0 and balance>maximum and not str(d.get("override_reason") or "").strip():
         return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
@@ -859,7 +859,7 @@ def inventory_purchase_invoice_upload():
     if mimetype not in allowed:return jsonify({"error":"Upload a PDF, JPG, PNG or WEBP invoice."}),415
     data=uploaded.read(8*1024*1024+1)
     if not data or len(data)>8*1024*1024:return jsonify({"error":"Invoice must be between 1 byte and 8 MB."}),413
-    signatures={"application/pdf":data.startswith(b"%PDF-"),"image/jpeg":data.startswith(b"\\xff\\xd8\\xff"),"image/png":data.startswith(b"\\x89PNG\\r\\n\\x1a\\n"),"image/webp":len(data)>12 and data[:4]==b"RIFF" and data[8:12]==b"WEBP"}
+    signatures={"application/pdf":data.startswith(b"%PDF-"),"image/jpeg":data.startswith(b"\xff\xd8\xff"),"image/png":data.startswith(b"\x89PNG\r\n\x1a\n"),"image/webp":len(data)>12 and data[:4]==b"RIFF" and data[8:12]==b"WEBP"}
     if not signatures.get(mimetype,False):return jsonify({"error":"The file contents do not match the selected invoice format."}),415
     extracted_text, extraction_method = _extract_invoice_text(data, mimetype)
     parsed = _parse_invoice_rules(extracted_text)
