@@ -723,7 +723,14 @@ def inventory_purchase_update(purchase_id):
         except ValueError:return jsonify({"error":"Invalid invoice date."}),400
         purchase.purchase_order_number=str(d.get("order_reference") or "")[:100]
         purchase.currency=str(d.get("currency") or "INR")[:8]
-        purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.discount_total=discount_total;purchase.grand_total=subtotal+tax_total-discount_total
+        calculated_total=subtotal+tax_total-discount_total
+        extracted_total=_parse_invoice_rules(purchase.extracted_text or "").get("grand_total_raw")
+        if extracted_total:
+            try: extracted_amount=Decimal(extracted_total.replace(",",""))
+            except InvalidOperation: extracted_amount=None
+            if extracted_amount is not None and abs(calculated_total-extracted_amount)>Decimal("0.02") and not d.get("confirm_total_mismatch"):
+                return jsonify({"error":f"Entered line total {calculated_total} does not match invoice total {extracted_amount}. Verify the values or explicitly confirm the mismatch.","requires_confirmation":True}),409
+        purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.discount_total=discount_total;purchase.grand_total=calculated_total
         purchase.notes=str(d.get("notes") or "")[:8000]
         purchase.extraction_status="human_verified"
         for line,desc,qty,price,tax,discount,total,item_id in parsed:
