@@ -35,6 +35,7 @@ class InventoryItem(db.Model):
     serial_number = db.Column(db.String(120))
     quantity = db.Column(db.Numeric(12, 2), nullable=False, default=1)
     minimum_quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
+    maximum_quantity = db.Column(db.Numeric(12, 2), nullable=False, default=0)
     unit = db.Column(db.String(32), nullable=False, default="units")
     condition = db.Column(db.String(24), nullable=False, default="good")
     status = db.Column(db.String(24), nullable=False, default="available", index=True)
