@@ -762,6 +762,48 @@ def inventory_purchase_invoice(purchase_id):
     return send_file(BytesIO(purchase.invoice_data),mimetype=purchase.invoice_content_type or "application/octet-stream",
         as_attachment=True,download_name=purchase.invoice_filename or "invoice")
 
+
+def _extract_invoice_text(data, mimetype):
+    text_content = ""
+    method = "manual_review"
+    if mimetype == "application/pdf":
+        try:
+            from pypdf import PdfReader
+            from io import BytesIO
+            reader = PdfReader(BytesIO(data))
+            text_content = "\\n".join((page.extract_text() or "") for page in reader.pages[:20])
+            if text_content.strip(): method = "pdf_text"
+        except Exception:
+            text_content = ""
+    elif mimetype.startswith("image/"):
+        try:
+            from PIL import Image
+            import pytesseract
+            from io import BytesIO
+            text_content = pytesseract.image_to_string(Image.open(BytesIO(data)))[:60000]
+            if text_content.strip(): method = "local_ocr"
+        except Exception:
+            text_content = ""
+    return text_content[:60000], method
+
+
+def _parse_invoice_rules(raw):
+    import re
+    clean = re.sub(r"[ \\t]+", " ", raw or "")
+    def find(pattern):
+        match = re.search(pattern, clean, re.I | re.M)
+        return match.group(1).strip() if match else ""
+    invoice = find(r"(?:invoice\\s*(?:no|number|#)?|bill\\s*no)\\s*[:#-]?\\s*([A-Z0-9/-]{3,40})")
+    date = find(r"(?:invoice\\s*date|date)\\s*[:#-]?\\s*(\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4})")
+    supplier = ""
+    for line in clean.splitlines():
+        candidate = line.strip()
+        if candidate and len(candidate) > 2 and not re.search(r"invoice|tax|gst|date|total|address|phone", candidate, re.I):
+            supplier = candidate[:180]; break
+    totals = find(r"(?:grand\\s*total|total\\s*amount|amount\\s*due)\\s*[:₹$ ]+([0-9,]+\\.\\d{1,2})")
+    return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":totals,"lines":[]}
+
+
 @org_tools_bp.post("/inventory-purchases/invoice-upload")
 @roles_required("Admin","Supervisor")
 def inventory_purchase_invoice_upload():
