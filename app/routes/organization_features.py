@@ -826,6 +826,47 @@ def _parse_invoice_rules(raw):
     return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":totals,"lines":[]}
 
 
+def _extract_invoice_text(data, mimetype):
+    text_content = ""
+    method = "manual_review"
+    if mimetype == "application/pdf":
+        try:
+            from pypdf import PdfReader
+            from io import BytesIO
+            reader = PdfReader(BytesIO(data))
+            text_content = "\n".join((page.extract_text() or "") for page in reader.pages[:20])
+            if text_content.strip(): method = "pdf_text"
+        except Exception:
+            text_content = ""
+    elif mimetype.startswith("image/"):
+        try:
+            from PIL import Image
+            import pytesseract
+            from io import BytesIO
+            text_content = pytesseract.image_to_string(Image.open(BytesIO(data)))[:60000]
+            if text_content.strip(): method = "local_ocr"
+        except Exception:
+            text_content = ""
+    return text_content[:60000], method
+
+
+def _parse_invoice_rules(raw):
+    import re
+    clean = re.sub(r"[ \t]+", " ", raw or "")
+    def find(pattern):
+        match = re.search(pattern, clean, re.I | re.M)
+        return match.group(1).strip() if match else ""
+    invoice = find(r"(?:invoice\s*(?:no|number|#)?|bill\s*no)\s*[:#-]?\s*([A-Z0-9/-]{3,40})")
+    date = find(r"(?:invoice\s*date|date)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
+    supplier = ""
+    for line in clean.splitlines():
+        candidate = line.strip()
+        if candidate and len(candidate) > 2 and not re.search(r"invoice|tax|gst|date|total|address|phone", candidate, re.I):
+            supplier = candidate[:180]; break
+    total = find(r"(?:grand\s*total|total\s*amount|amount\s*due)\s*[:₹$ ]+([0-9,]+\.\d{1,2})")
+    return {"supplier_name":supplier,"invoice_number":invoice,"invoice_date_raw":date,"grand_total_raw":total,"lines":[]}
+
+
 @org_tools_bp.post("/inventory-purchases/invoice-upload")
 @roles_required("Admin","Supervisor")
 def inventory_purchase_invoice_upload():
@@ -837,14 +878,18 @@ def inventory_purchase_invoice_upload():
     if mimetype not in allowed:return jsonify({"error":"Upload a PDF, JPG, PNG or WEBP invoice."}),415
     data=uploaded.read(8*1024*1024+1)
     if not data or len(data)>8*1024*1024:return jsonify({"error":"Invoice must be between 1 byte and 8 MB."}),413
-    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_name="Pending verification",
-        status="draft",invoice_filename=filename,invoice_content_type=mimetype,invoice_size=len(data),invoice_data=data,
-        extraction_status="awaiting_review",notes="Invoice uploaded. Verify supplier, invoice details and line items before approval.",
-        created_by_id=user.id)
+    extracted_text, extraction_method = _extract_invoice_text(data, mimetype)
+    parsed = _parse_invoice_rules(extracted_text)
+    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=None,
+        invoice_number=parsed.get("invoice_number") or None,status="draft",
+        invoice_filename=filename,invoice_content_type=mimetype,invoice_size=len(data),invoice_data=data,
+        extracted_text=extracted_text or None,extraction_status="awaiting_review",
+        notes="Invoice uploaded. Verify every extracted field and line item before approval.",created_by_id=user.id)
     db.session.add(purchase);db.session.commit()
     return jsonify({"purchase":_purchase_dict(purchase),
-        "message":"Invoice securely attached to a draft purchase. Enter or verify its extracted details before approval.",
-        "extraction":{"status":"not_configured","message":"Automated OCR/AI extraction requires an OCR/AI provider configuration. No invoice values have been guessed."}}),201
+        "message":"Invoice stored. Verify extracted values and enter the purchase line before approval.",
+        "extraction":{"status":extraction_method,"fields":parsed,"text_available":bool(extracted_text)}}),201
+
 
 @org_tools_bp.get("/inventory-transfers")
 @roles_required("Admin","Supervisor")
