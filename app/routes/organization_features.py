@@ -1,11 +1,11 @@
 from datetime import datetime, timezone, timedelta
 import hashlib
 from decimal import Decimal, InvalidOperation
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import or_, cast, String
 
 from app.extensions import db
-from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, EscalationRule, EscalationEvent
+from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, InventoryLocationStock, EscalationRule, EscalationEvent
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -43,7 +43,7 @@ def _policy_dict(p):
 def _inventory_dict(x):
     return {"id":x.id,"name":x.name,"category":x.category,"description":x.description or "",
             "sku":x.sku or "","asset_tag":x.asset_tag or "","serial_number":x.serial_number or "",
-            "quantity":float(x.quantity or 0),"minimum_quantity":float(x.minimum_quantity or 0),
+            "quantity":float(x.quantity or 0),"minimum_quantity":float(x.minimum_quantity or 0),"maximum_quantity":float(getattr(x,"maximum_quantity",0) or 0),
             "unit":x.unit,"condition":x.condition,"status":x.status,
             "storage_location":x.storage_location or "","location_id":x.location_id,"zone_id":x.zone_id,
             "team_id":x.team_id,"assigned_to_id":x.assigned_to_id,
@@ -128,6 +128,18 @@ def save_team_policy():
     db.session.commit()
     return jsonify({"policy":_policy_dict(policy),"message":"Policy published to the team." if status=="published" else "Draft saved."}),201
 
+def _location_balance(user_id, organization_id, item_id, location_name, delta):
+    name = str(location_name or "Unassigned / central stock").strip()[:180] or "Unassigned / central stock"
+    row = InventoryLocationStock.query.filter_by(organization_id=organization_id,item_id=item_id,location_name=name).with_for_update().first()
+    if row is None:
+        row = InventoryLocationStock(organization_id=organization_id,item_id=item_id,location_name=name,quantity=0)
+        db.session.add(row); db.session.flush()
+    next_value = Decimal(str(row.quantity or 0)) + Decimal(str(delta))
+    if next_value < 0: raise ValueError("Insufficient stock at the selected location.")
+    row.quantity = next_value
+    return row
+
+
 @org_tools_bp.get("/inventory")
 @roles_required(*ALL_ROLES)
 def inventory_list():
@@ -156,7 +168,7 @@ def inventory_create():
     item=InventoryItem(organization_id=user.organization_id,name=name,category=str(d.get("category") or "General")[:80],
         description=str(d.get("description") or "")[:8000],sku=str(d.get("sku") or "")[:80],
         asset_tag=str(d.get("asset_tag") or "")[:100],serial_number=str(d.get("serial_number") or "")[:120],
-        quantity=quantity,minimum_quantity=minimum,unit=str(d.get("unit") or "units")[:32],
+        quantity=quantity,minimum_quantity=minimum,maximum_quantity=Decimal(str(d.get("maximum_quantity",0) or 0)),unit=str(d.get("unit") or "units")[:32],
         condition=str(d.get("condition") or "good")[:24],status=str(d.get("status") or "available")[:24],
         storage_location=str(d.get("storage_location") or "")[:180],team_id=d.get("team_id"),
         assigned_to_id=d.get("assigned_to_id"),purchase_date=datetime.strptime(d["purchase_date"],"%Y-%m-%d").date() if d.get("purchase_date") else None,
@@ -167,6 +179,7 @@ def inventory_create():
         created_by_id=user.id)
     db.session.add(item);db.session.flush()
     if quantity > 0:
+        _location_balance(user.id,user.organization_id,item.id,item.storage_location,quantity)
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="opening_balance",quantity=quantity,balance_after=quantity,reference="Initial registration",notes="Opening stock recorded when item was created.",performed_by_id=user.id))
     db.session.commit()
     return jsonify({"item":_inventory_dict(item),"message":"Inventory item saved."}),201
@@ -183,7 +196,7 @@ def inventory_update(item_id):
             "unit":32,"condition":24,"status":24,"storage_location":180,"notes":8000}
     for key,limit in fields.items():
         if key in d:setattr(item,key,str(d[key] or "")[:limit])
-    for key in ("quantity","minimum_quantity"):
+    for key in ("quantity","minimum_quantity","maximum_quantity"):
         if key in d:
             try:
                 value=Decimal(str(d[key]))
@@ -438,6 +451,16 @@ def inventory_record_movement(item_id):
     if kind=="adjustment":balance=qty
     if balance<0:return jsonify({"error":"Insufficient stock for this movement."}),409
     delta=abs(balance-current); item.quantity=balance
+    location=str(d.get("location") or item.storage_location or "Unassigned / central stock")
+    try:
+        if kind in {"receipt","transfer_in"}: _location_balance(user.id,user.organization_id,item.id,location,delta)
+        elif kind in {"consumption","transfer_out"}: _location_balance(user.id,user.organization_id,item.id,location,-delta)
+        elif kind=="adjustment":
+            current_loc=InventoryLocationStock.query.filter_by(organization_id=user.organization_id,item_id=item.id,location_name=location).with_for_update().first()
+            prior=Decimal(str(current_loc.quantity or 0)) if current_loc else Decimal("0")
+            _location_balance(user.id,user.organization_id,item.id,location,balance-prior)
+    except ValueError as exc:
+        db.session.rollback();return jsonify({"error":str(exc)}),409
     movement=InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type=kind,quantity=delta,balance_after=balance,reference=str(d.get("reference") or "")[:180],notes=str(d.get("notes") or "")[:4000],performed_by_id=user.id)
     db.session.add(movement);db.session.commit()
     return jsonify({"item":_inventory_dict(item),"message":"Stock movement recorded."}),201
