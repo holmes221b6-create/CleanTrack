@@ -216,6 +216,11 @@ def inventory_update(item_id):
         item.team_id=d["team_id"]
     if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="adjustment",quantity=abs(Decimal(str(item.quantity or 0))-previous_quantity),balance_after=item.quantity,reference="Item edit",notes="Stock balance changed through item maintenance form.",performed_by_id=user.id))
+    if "quantity" in d and Decimal(str(item.quantity or 0)) != previous_quantity:
+        try: _location_balance(user.id,user.organization_id,item.id,item.storage_location,Decimal(str(item.quantity or 0))-previous_quantity)
+        except ValueError as exc: db.session.rollback();return jsonify({"error":str(exc)}),409
+    if Decimal(str(getattr(item,"maximum_quantity",0) or 0))>0 and Decimal(str(item.maximum_quantity))<Decimal(str(item.minimum_quantity or 0)):
+        db.session.rollback();return jsonify({"error":"Maximum stock must be greater than or equal to minimum stock."}),400
     db.session.commit();return jsonify({"item":_inventory_dict(item)}),200
 
 @org_tools_bp.get("/escalations")
@@ -883,10 +888,14 @@ def inventory_transfer_update(transfer_id):
     if action=="dispatch" and row.status=="pending":
         current=Decimal(str(item.quantity or 0)); qty=Decimal(str(row.quantity))
         if current<qty:return jsonify({"error":"Insufficient stock to dispatch this transfer."}),409
+        try: _location_balance(user.id,user.organization_id,item.id,row.from_location,-qty)
+        except ValueError as exc: db.session.rollback();return jsonify({"error":str(exc)}),409
         item.quantity=current-qty;row.status="in_transit";row.dispatched_by_id=user.id;row.dispatched_at=datetime.now(timezone.utc)
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_out",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
     elif action=="receive" and row.status=="in_transit":
-        qty=Decimal(str(row.quantity));item.quantity=Decimal(str(item.quantity or 0))+qty;row.status="received";row.received_by_id=user.id;row.received_at=datetime.now(timezone.utc)
+        qty=Decimal(str(row.quantity))
+        _location_balance(user.id,user.organization_id,item.id,row.to_location,qty)
+        item.quantity=Decimal(str(item.quantity or 0))+qty;row.status="received";row.received_by_id=user.id;row.received_at=datetime.now(timezone.utc)
         db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_in",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
     else:return jsonify({"error":"This transfer action is not valid for its current status."}),409
     db.session.commit()
