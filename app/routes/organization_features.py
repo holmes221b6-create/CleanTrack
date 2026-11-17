@@ -498,9 +498,9 @@ def inventory_record_movement(item_id):
         balance=current+(qty-prior)
         if balance<0:return jsonify({"error":"The adjustment would make total stock negative."}),409
     maximum=Decimal(str(getattr(item,"maximum_quantity",0) or 0))
-    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and not d.get("allow_over_maximum"):
+    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and (kind!="adjustment" or balance>current) and not d.get("allow_over_maximum"):
         return jsonify({"error":"This movement exceeds the maximum stock threshold.","maximum_quantity":float(maximum),"projected_quantity":float(balance),"requires_override":True}),409
-    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and not str(d.get("override_reason") or "").strip():
+    if kind in {"receipt","transfer_in","adjustment"} and maximum>0 and balance>maximum and (kind!="adjustment" or balance>current) and not str(d.get("override_reason") or "").strip():
         return jsonify({"error":"Enter a reason to override the maximum stock threshold."}),400
     delta=abs(balance-current); item.quantity=balance
     try:
