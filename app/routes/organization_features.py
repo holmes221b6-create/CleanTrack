@@ -832,3 +832,60 @@ def inventory_transfer_update(transfer_id):
     else:return jsonify({"error":"This transfer action is not valid for its current status."}),409
     db.session.commit()
     return jsonify({"message":"Transfer updated.","status":row.status}),200
+
+
+@org_tools_bp.get("/inventory-locations")
+@roles_required(*ALL_ROLES)
+def inventory_location_balances():
+    user=get_current_user()
+    q=InventoryLocationStock.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        ids=_team_ids(user)
+        q=q.join(InventoryItem,InventoryItem.id==InventoryLocationStock.item_id).filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))) if ids else q.join(InventoryItem).filter(or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
+    elif user.role=="Staff":
+        ids=_team_ids(user)
+        q=q.join(InventoryItem).filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id)) if ids else q.join(InventoryItem).filter(InventoryItem.assigned_to_id==user.id)
+    rows=q.order_by(InventoryLocationStock.location_name.asc()).all()
+    return jsonify({"locations":[{"id":x.id,"item_id":x.item_id,"location":x.location_name,"quantity":float(x.quantity or 0)} for x in rows]}),200
+
+
+@org_tools_bp.get("/inventory-analytics")
+@roles_required(*ALL_ROLES)
+def inventory_analytics():
+    user=get_current_user()
+    q=InventoryItem.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))) if ids else q.filter(or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
+    elif user.role=="Staff":
+        ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id)) if ids else q.filter(InventoryItem.assigned_to_id==user.id)
+    items=q.all(); ids=[x.id for x in items]
+    movements=InventoryMovement.query.filter(InventoryMovement.organization_id==user.organization_id,InventoryMovement.item_id.in_(ids or [-1])).order_by(InventoryMovement.created_at.desc()).limit(3000).all()
+    monthly={}
+    for mv in movements:
+        key=mv.created_at.strftime("%Y-%m")
+        bucket=monthly.setdefault(key,{"receipts":0.0,"consumption":0.0,"adjustments":0.0})
+        amount=float(mv.quantity or 0)
+        if mv.movement_type in {"receipt","transfer_in"}: bucket["receipts"]+=amount
+        elif mv.movement_type in {"consumption","transfer_out"}: bucket["consumption"]+=amount
+        elif mv.movement_type=="adjustment": bucket["adjustments"]+=amount
+    return jsonify({"summary":{"items":len(items),"on_hand":sum(float(x.quantity or 0) for x in items),"low_stock":sum(1 for x in items if float(x.quantity or 0)<=float(x.minimum_quantity or 0)),"over_maximum":sum(1 for x in items if float(getattr(x,"maximum_quantity",0) or 0)>0 and float(x.quantity or 0)>float(x.maximum_quantity))},"monthly":[{"month":k,**v} for k,v in sorted(monthly.items())],"data_points":len(movements)}),200
+
+
+@org_tools_bp.get("/inventory-forecast")
+@roles_required("Admin","Supervisor")
+def inventory_forecast():
+    user=get_current_user(); days=request.args.get("days",type=int) or 30
+    if days not in {7,14,30,60,90}: return jsonify({"error":"Choose a 7, 14, 30, 60 or 90 day forecast horizon."}),400
+    q=InventoryItem.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        ids=_team_ids(user); q=q.filter(or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))) if ids else q.filter(or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
+    results=[]; since=datetime.now(timezone.utc)-timedelta(days=90)
+    for item in q.all():
+        rows=InventoryMovement.query.filter_by(organization_id=user.organization_id,item_id=item.id,movement_type="consumption").filter(InventoryMovement.created_at>=since).all()
+        if len(rows)<3: continue
+        first=min(x.created_at for x in rows); active_days=max(1,min(90,(datetime.now(timezone.utc)-first).days+1))
+        if active_days<14: continue
+        daily=sum(float(x.quantity or 0) for x in rows)/active_days
+        expected=daily*days; on_hand=float(item.quantity or 0)
+        results.append({"item_id":item.id,"item_name":item.name,"unit":item.unit,"on_hand":on_hand,"average_daily_consumption":round(daily,3),"forecast_consumption":round(expected,2),"projected_balance":round(on_hand-expected,2),"suggested_replenishment":round(max(0,expected+float(item.minimum_quantity or 0)-on_hand),2),"observations":len(rows),"history_days":active_days,"confidence":"indicative"})
+    return jsonify({"days":days,"method":"Trailing observed consumption average; no external AI or invented data.","minimum_observations":3,"forecasts":results}),200
