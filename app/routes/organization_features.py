@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import or_, cast, String, func
 
 from app.extensions import db
-from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, InventoryLocationStock, EscalationRule, EscalationEvent
+from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, InventoryLocationStock, InventoryMaintenanceRecord, EscalationRule, EscalationEvent
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -993,3 +993,66 @@ def inventory_forecast():
         expected=daily*days; on_hand=float(item.quantity or 0)
         results.append({"item_id":item.id,"item_name":item.name,"unit":item.unit,"on_hand":on_hand,"average_daily_consumption":round(daily,3),"forecast_consumption":round(expected,2),"projected_balance":round(on_hand-expected,2),"suggested_replenishment":round(max(0,expected+float(item.minimum_quantity or 0)-on_hand),2),"observations":len(rows),"history_days":active_days,"confidence":"indicative"})
     return jsonify({"days":days,"method":"Trailing observed consumption average; no external AI or invented data.","minimum_observations":3,"forecasts":results}),200
+
+
+@org_tools_bp.get("/inventory-maintenance")
+@roles_required("Admin","Supervisor")
+def inventory_maintenance_list():
+    user=get_current_user()
+    q=InventoryMaintenanceRecord.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        ids=_team_ids(user)
+        q=q.join(InventoryItem,InventoryItem.id==InventoryMaintenanceRecord.item_id).filter(
+            or_(InventoryItem.team_id.in_(ids),InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None))
+            if ids else or_(InventoryItem.assigned_to_id==user.id,InventoryItem.team_id.is_(None)))
+    rows=q.order_by(InventoryMaintenanceRecord.scheduled_at.desc(),InventoryMaintenanceRecord.created_at.desc()).limit(500).all()
+    return jsonify({"records":[{"id":x.id,"item_id":x.item_id,"type":x.maintenance_type,"scheduled_at":x.scheduled_at.isoformat() if x.scheduled_at else None,"completed_at":x.completed_at.isoformat() if x.completed_at else None,"status":x.status,"provider":x.provider or "","cost":float(x.cost or 0),"notes":x.notes or ""} for x in rows]}),200
+
+
+@org_tools_bp.post("/inventory-maintenance")
+@roles_required("Admin","Supervisor")
+def inventory_maintenance_create():
+    user=get_current_user(); d=request.get_json(silent=True) or {}
+    item=InventoryItem.query.filter_by(id=d.get("item_id"),organization_id=user.organization_id).first()
+    if not item:return jsonify({"error":"Choose an inventory item in this organisation."}),400
+    if user.role=="Supervisor" and item.team_id is not None and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"This item is outside your team scope."}),403
+    status=str(d.get("status") or "scheduled")
+    if status not in {"scheduled","completed","cancelled"}:return jsonify({"error":"Invalid maintenance status."}),400
+    try:
+        scheduled=datetime.strptime(d["scheduled_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc) if d.get("scheduled_at") else None
+        cost=Decimal(str(d.get("cost") or 0))
+        if cost<0:raise InvalidOperation()
+    except (ValueError,InvalidOperation):return jsonify({"error":"Enter a valid date and non-negative cost."}),400
+    completed=datetime.now(timezone.utc) if status=="completed" else None
+    row=InventoryMaintenanceRecord(organization_id=user.organization_id,item_id=item.id,
+        maintenance_type=str(d.get("type") or "preventive")[:40],scheduled_at=scheduled,
+        completed_at=completed,status=status,provider=str(d.get("provider") or "")[:180],
+        cost=cost,notes=str(d.get("notes") or "")[:4000],created_by_id=user.id)
+    if status=="completed":
+        item.last_maintenance_at=completed
+        if d.get("next_due_at"):
+            try:item.maintenance_due_at=datetime.strptime(d["next_due_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:return jsonify({"error":"Invalid next maintenance date."}),400
+    db.session.add(row);db.session.commit()
+    return jsonify({"id":row.id,"status":row.status,"message":"Maintenance record saved."}),201
+
+
+@org_tools_bp.patch("/inventory-maintenance/<int:record_id>")
+@roles_required("Admin","Supervisor")
+def inventory_maintenance_update(record_id):
+    user=get_current_user(); row=InventoryMaintenanceRecord.query.filter_by(id=record_id,organization_id=user.organization_id).first()
+    if not row:return jsonify({"error":"Maintenance record not found."}),404
+    item=InventoryItem.query.filter_by(id=row.item_id,organization_id=user.organization_id).first()
+    if user.role=="Supervisor" and item and item.team_id is not None and item.team_id not in _team_ids(user) and item.assigned_to_id!=user.id:return jsonify({"error":"This asset is outside your team scope."}),403
+    d=request.get_json(silent=True) or {}; status=str(d.get("status") or row.status)
+    if row.status!="scheduled" or status not in {"completed","cancelled"}:return jsonify({"error":"Only scheduled maintenance can be completed or cancelled."}),409
+    row.status=status
+    if status=="completed":
+        row.completed_at=datetime.now(timezone.utc)
+        if item:
+            item.last_maintenance_at=row.completed_at
+            if d.get("next_due_at"):
+                try:item.maintenance_due_at=datetime.strptime(d["next_due_at"],"%Y-%m-%d").replace(tzinfo=timezone.utc)
+                except ValueError:return jsonify({"error":"Invalid next maintenance date."}),400
+    db.session.commit()
+    return jsonify({"status:":row.status,"message":"Maintenance status updated."}),200
