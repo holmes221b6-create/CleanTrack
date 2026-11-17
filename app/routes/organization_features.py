@@ -619,6 +619,50 @@ def inventory_purchase_update(purchase_id):
     if not purchase:return jsonify({"error":"Purchase not found."}),404
     if user.role=="Supervisor" and purchase.created_by_id!=user.id:return jsonify({"error":"You can only manage purchases you created."}),403
     d=request.get_json(silent=True) or {}; action=d.get("action")
+    if action=="verify_details":
+        if purchase.status!="draft":return jsonify({"error":"Only draft purchases can be edited."}),409
+        supplier_name=str(d.get("supplier_name") or "").strip()
+        invoice_number=str(d.get("invoice_number") or "").strip()
+        if not supplier_name:return jsonify({"error":"Supplier name is required."}),400
+        if invoice_number:
+            duplicate=InventoryPurchase.query.filter(InventoryPurchase.organization_id==user.organization_id,
+                InventoryPurchase.invoice_number==invoice_number,InventoryPurchase.id!=purchase.id).first()
+            if duplicate:return jsonify({"error":"This invoice number is already recorded in this organisation."}),409
+        supplier=None
+        if d.get("supplier_id"):
+            supplier=InventorySupplier.query.filter_by(id=d["supplier_id"],organization_id=user.organization_id).first()
+            if not supplier:return jsonify({"error":"Supplier does not belong to this organisation."}),400
+        raw_lines=d.get("lines")
+        if not isinstance(raw_lines,list) or not raw_lines:return jsonify({"error":"Add at least one verified invoice line."}),400
+        parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0")
+        try:
+            for line in raw_lines[:100]:
+                desc=str(line.get("description") or "").strip()
+                qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
+                item_id=line.get("item_id")
+                if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
+                if item_id and not InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first():
+                    return jsonify({"error":"A linked item is outside this organisation."}),400
+                total=qty*price+tax;subtotal+=qty*price;tax_total+=tax
+                parsed.append((line,desc,qty,price,tax,total,item_id))
+        except (InvalidOperation,ValueError,TypeError):
+            return jsonify({"error":"Check invoice line descriptions, quantities, prices and taxes."}),400
+        InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).delete()
+        purchase.supplier_id=supplier.id if supplier else None;purchase.supplier_name=supplier.name if supplier else supplier_name
+        purchase.invoice_number=invoice_number or None
+        try:purchase.invoice_date=datetime.strptime(d["invoice_date"],"%Y-%m-%d").date() if d.get("invoice_date") else None
+        except ValueError:return jsonify({"error":"Invalid invoice date."}),400
+        purchase.order_reference=str(d.get("order_reference") or "")[:100]
+        purchase.currency=str(d.get("currency") or "INR")[:8]
+        purchase.subtotal=subtotal;purchase.tax_total=tax_total;purchase.grand_total=subtotal+tax_total
+        purchase.notes=str(d.get("notes") or "")[:8000]
+        purchase.extraction_status="human_verified"
+        for line,desc,qty,price,tax,total,item_id in parsed:
+            db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
+                description=desc,sku=str(line.get("sku") or "")[:80],quantity=qty,unit=str(line.get("unit") or "units")[:32],
+                unit_price=price,tax_amount=tax,line_total=total))
+        db.session.commit()
+        return jsonify({"purchase":_purchase_dict(purchase),"message":"Invoice details saved for review. Stock remains unchanged."}),200
     if action=="approve":
         if purchase.status!="draft":return jsonify({"error":"Only draft purchases can be approved."}),409
         purchase.status="approved";purchase.approved_by_id=user.id;purchase.approved_at=datetime.now(timezone.utc)
