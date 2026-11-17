@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request
 from sqlalchemy import or_, cast, String
 
 from app.extensions import db
-from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, EscalationRule, EscalationEvent
+from app.models.organization_features import TeamPolicy, InventoryItem, InventoryMovement, InventoryRequest, InventorySupplier, InventoryPurchase, InventoryPurchaseLine, InventoryTransfer, EscalationRule, EscalationEvent
 from app.models.team import Team
 from app.models.team_member import TeamMember
 from app.models.user import User
@@ -504,3 +504,234 @@ def inventory_request_update(request_id):
     recipient=User.query.filter_by(id=req.requester_id,organization_id=user.organization_id).first()
     if recipient:_notify(recipient,"Inventory request updated",f"Request #{req.id} is now {status.replace('_',' ')}.","inventory_request","InventoryRequest",req.id);db.session.commit()
     return jsonify({"message":"Inventory request updated.","status":req.status}),200
+
+
+# Procurement and receiving. A purchase never changes on-hand stock until a receiving
+# action is confirmed; all writes are scoped to the authenticated organisation.
+def _purchase_scope(user):
+    q = InventoryPurchase.query.filter_by(organization_id=user.organization_id)
+    if user.role == "Supervisor":
+        ids = _team_ids(user)
+        q = q.filter(InventoryPurchase.created_by_id == user.id) if not ids else q.filter(
+            or_(InventoryPurchase.created_by_id == user.id,
+                InventoryPurchase.created_by_id.in_(
+                    db.session.query(InventoryPurchase.created_by_id).filter(
+                        InventoryPurchase.organization_id == user.organization_id
+                    )
+                )))
+    elif user.role == "Staff":
+        q = q.filter(InventoryPurchase.id < 0)
+    return q
+
+def _purchase_dict(p):
+    lines = InventoryPurchaseLine.query.filter_by(purchase_id=p.id, organization_id=p.organization_id).order_by(InventoryPurchaseLine.id.asc()).all()
+    return {"id":p.id,"supplier_id":p.supplier_id,"supplier_name":p.supplier_name,
+        "invoice_number":p.invoice_number or "","invoice_date":p.invoice_date.isoformat() if p.invoice_date else None,
+        "order_reference":p.order_reference or "","status":p.status,"currency":p.currency,
+        "subtotal":float(p.subtotal or 0),"tax_total":float(p.tax_total or 0),"grand_total":float(p.grand_total or 0),
+        "invoice_filename":p.invoice_filename,"extraction_status":p.extraction_status,"notes":p.notes or "",
+        "created_at":p.created_at.isoformat(),"approved_at":p.approved_at.isoformat() if p.approved_at else None,
+        "received_at":p.received_at.isoformat() if p.received_at else None,
+        "lines":[{"id":x.id,"item_id":x.item_id,"description":x.description,"sku":x.sku or "",
+            "quantity":float(x.quantity),"received_quantity":float(x.received_quantity or 0),"unit":x.unit,
+            "unit_price":float(x.unit_price or 0),"tax_amount":float(x.tax_amount or 0),"line_total":float(x.line_total or 0)} for x in lines]}
+
+@org_tools_bp.get("/inventory-suppliers")
+@roles_required("Admin","Supervisor")
+def inventory_suppliers_list():
+    user=get_current_user()
+    rows=InventorySupplier.query.filter_by(organization_id=user.organization_id).order_by(InventorySupplier.name.asc()).all()
+    return jsonify({"suppliers":[{"id":x.id,"name":x.name,"contact_name":x.contact_name or "",
+        "email":x.email or "","phone":x.phone or "","tax_reference":x.tax_reference or "",
+        "address":x.address or "","notes":x.notes or ""} for x in rows]}),200
+
+@org_tools_bp.post("/inventory-suppliers")
+@roles_required("Admin","Supervisor")
+def inventory_supplier_create():
+    user=get_current_user(); d=request.get_json(silent=True) or {}; name=str(d.get("name") or "").strip()
+    if not name or len(name)>180:return jsonify({"error":"Supplier name is required."}),400
+    row=InventorySupplier(organization_id=user.organization_id,name=name,contact_name=str(d.get("contact_name") or "")[:120],
+        email=str(d.get("email") or "")[:180],phone=str(d.get("phone") or "")[:60],
+        tax_reference=str(d.get("tax_reference") or "")[:100],address=str(d.get("address") or "")[:4000],
+        notes=str(d.get("notes") or "")[:4000],created_by_id=user.id)
+    db.session.add(row)
+    try:db.session.commit()
+    except Exception:
+        db.session.rollback();return jsonify({"error":"A supplier with that name may already exist in this organisation."}),409
+    return jsonify({"id":row.id,"name":row.name}),201
+
+@org_tools_bp.get("/inventory-purchases")
+@roles_required("Admin","Supervisor")
+def inventory_purchases_list():
+    user=get_current_user(); q=InventoryPurchase.query.filter_by(organization_id=user.organization_id)
+    if user.role=="Supervisor":
+        # Supervisors see purchases they created; Admin retains organisation-wide oversight.
+        q=q.filter_by(created_by_id=user.id)
+    rows=q.order_by(InventoryPurchase.created_at.desc()).limit(500).all()
+    return jsonify({"purchases":[_purchase_dict(x) for x in rows]}),200
+
+@org_tools_bp.post("/inventory-purchases")
+@roles_required("Admin","Supervisor")
+def inventory_purchase_create():
+    user=get_current_user(); d=request.get_json(silent=True) or {}
+    supplier_name=str(d.get("supplier_name") or "").strip()
+    invoice_number=str(d.get("invoice_number") or "").strip()
+    raw_lines=d.get("lines") if isinstance(d.get("lines"),list) else []
+    if not supplier_name or not raw_lines:return jsonify({"error":"Supplier and at least one purchase line are required."}),400
+    supplier=None
+    if d.get("supplier_id"):
+        supplier=InventorySupplier.query.filter_by(id=d["supplier_id"],organization_id=user.organization_id).first()
+        if not supplier:return jsonify({"error":"Supplier does not belong to this organisation."}),400
+        supplier_name=supplier.name
+    if invoice_number and InventoryPurchase.query.filter_by(organization_id=user.organization_id,invoice_number=invoice_number).first():
+        return jsonify({"error":"This invoice number is already recorded in this organisation."}),409
+    parsed=[]; subtotal=Decimal("0"); tax_total=Decimal("0")
+    try:
+        for line in raw_lines[:100]:
+            desc=str(line.get("description") or "").strip()
+            qty=Decimal(str(line.get("quantity"))); price=Decimal(str(line.get("unit_price",0))); tax=Decimal(str(line.get("tax_amount",0)))
+            if not desc or qty<=0 or price<0 or tax<0:raise InvalidOperation()
+            item_id=line.get("item_id")
+            if item_id and not InventoryItem.query.filter_by(id=item_id,organization_id=user.organization_id).first():
+                return jsonify({"error":"A selected catalogue item is outside this organisation."}),400
+            total=(qty*price)+tax; subtotal += qty*price; tax_total += tax
+            parsed.append((line,desc,qty,price,tax,total,item_id))
+    except (InvalidOperation,ValueError,TypeError):
+        return jsonify({"error":"Check every line: item name, positive quantity, non-negative price and tax are required."}),400
+    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_id=supplier.id if supplier else None,
+        supplier_name=supplier_name,invoice_number=invoice_number or None,
+        invoice_date=datetime.strptime(d["invoice_date"],"%Y-%m-%d").date() if d.get("invoice_date") else None,
+        order_reference=str(d.get("order_reference") or "")[:100],status="draft",
+        currency=str(d.get("currency") or "INR")[:8],subtotal=subtotal,tax_total=tax_total,
+        grand_total=subtotal+tax_total,extraction_status="manual",notes=str(d.get("notes") or "")[:8000],created_by_id=user.id)
+    db.session.add(purchase);db.session.flush()
+    for line,desc,qty,price,tax,total,item_id in parsed:
+        db.session.add(InventoryPurchaseLine(organization_id=user.organization_id,purchase_id=purchase.id,item_id=item_id,
+            description=desc,sku=str(line.get("sku") or "")[:80],quantity=qty,unit=str(line.get("unit") or "units")[:32],
+            unit_price=price,tax_amount=tax,line_total=total))
+    db.session.commit()
+    return jsonify({"purchase":_purchase_dict(purchase),"message":"Purchase draft recorded. Stock has not changed."}),201
+
+@org_tools_bp.patch("/inventory-purchases/<int:purchase_id>")
+@roles_required("Admin","Supervisor")
+def inventory_purchase_update(purchase_id):
+    user=get_current_user(); purchase=InventoryPurchase.query.filter_by(id=purchase_id,organization_id=user.organization_id).first()
+    if not purchase:return jsonify({"error":"Purchase not found."}),404
+    if user.role=="Supervisor" and purchase.created_by_id!=user.id:return jsonify({"error":"You can only manage purchases you created."}),403
+    d=request.get_json(silent=True) or {}; action=d.get("action")
+    if action=="approve":
+        if purchase.status!="draft":return jsonify({"error":"Only draft purchases can be approved."}),409
+        purchase.status="approved";purchase.approved_by_id=user.id;purchase.approved_at=datetime.now(timezone.utc)
+    elif action=="receive":
+        if purchase.status not in {"approved","partially_received"}:return jsonify({"error":"Approve the purchase before receiving goods."}),409
+        lines=InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).with_for_update().all()
+        received=d.get("received_quantities",{})
+        any_received=False
+        for line in lines:
+            try: target=Decimal(str(received.get(str(line.id),line.quantity)))
+            except (InvalidOperation,ValueError):return jsonify({"error":"Invalid received quantity."}),400
+            already=Decimal(str(line.received_quantity or 0))
+            if target<already or target>Decimal(str(line.quantity)):return jsonify({"error":"Received quantities must be between the quantity already received and the ordered quantity."}),400
+            delta=target-already
+            if delta<=0:continue
+            any_received=True
+            if line.item_id:
+                item=InventoryItem.query.filter_by(id=line.item_id,organization_id=user.organization_id).with_for_update().first()
+                if not item:return jsonify({"error":"Linked inventory item no longer exists."}),409
+            else:
+                item=InventoryItem.query.filter_by(organization_id=user.organization_id,sku=line.sku).first() if line.sku else None
+                if not item:
+                    item=InventoryItem(organization_id=user.organization_id,name=line.description,category="General",sku=line.sku or None,
+                        quantity=Decimal("0"),minimum_quantity=Decimal("0"),unit=line.unit,created_by_id=user.id)
+                    db.session.add(item);db.session.flush()
+                line.item_id=item.id
+            item.quantity=Decimal(str(item.quantity or 0))+delta
+            db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="receipt",
+                quantity=delta,balance_after=item.quantity,reference=purchase.invoice_number or ("Purchase #"+str(purchase.id)),
+                notes="Goods received against purchase #"+str(purchase.id),performed_by_id=user.id))
+            line.received_quantity=target
+        if not any_received:return jsonify({"error":"Enter at least one quantity greater than the amount already received."}),400
+        all_lines=InventoryPurchaseLine.query.filter_by(purchase_id=purchase.id,organization_id=user.organization_id).all()
+        purchase.status="received" if all(Decimal(str(x.received_quantity or 0))>=Decimal(str(x.quantity)) for x in all_lines) else "partially_received"
+        purchase.received_by_id=user.id
+        if purchase.status=="received":purchase.received_at=datetime.now(timezone.utc)
+    elif action=="cancel":
+        if purchase.status in {"received","partially_received"}:return jsonify({"error":"A purchase with received stock cannot be cancelled; use a return/adjustment workflow."}),409
+        purchase.status="cancelled"
+    else:return jsonify({"error":"Choose approve, receive or cancel."}),400
+    db.session.commit()
+    return jsonify({"purchase":_purchase_dict(purchase),"message":"Purchase updated."}),200
+
+@org_tools_bp.get("/inventory-purchases/<int:purchase_id>/invoice")
+@roles_required("Admin","Supervisor")
+def inventory_purchase_invoice(purchase_id):
+    user=get_current_user(); purchase=InventoryPurchase.query.filter_by(id=purchase_id,organization_id=user.organization_id).first()
+    if not purchase:return jsonify({"error":"Invoice not found."}),404
+    if user.role=="Supervisor" and purchase.created_by_id!=user.id:return jsonify({"error":"You cannot access this invoice."}),403
+    if not purchase.invoice_data:return jsonify({"error":"No invoice file is attached."}),404
+    from io import BytesIO
+    return send_file(BytesIO(purchase.invoice_data),mimetype=purchase.invoice_mimetype or "application/octet-stream",
+        as_attachment=True,download_name=purchase.invoice_filename or "invoice")
+
+@org_tools_bp.post("/inventory-purchases/invoice-upload")
+@roles_required("Admin","Supervisor")
+def inventory_purchase_invoice_upload():
+    user=get_current_user(); uploaded=request.files.get("invoice")
+    if not uploaded:return jsonify({"error":"Choose an invoice file."}),400
+    filename=str(uploaded.filename or "invoice").replace("\\","/").split("/")[-1][:255]
+    mimetype=(uploaded.mimetype or "").lower()
+    allowed={"application/pdf","image/jpeg","image/png","image/webp"}
+    if mimetype not in allowed:return jsonify({"error":"Upload a PDF, JPG, PNG or WEBP invoice."}),415
+    data=uploaded.read(8*1024*1024+1)
+    if not data or len(data)>8*1024*1024:return jsonify({"error":"Invoice must be between 1 byte and 8 MB."}),413
+    purchase=InventoryPurchase(organization_id=user.organization_id,supplier_name="Pending verification",
+        status="draft",invoice_filename=filename,invoice_mimetype=mimetype,invoice_data=data,
+        extraction_status="awaiting_review",notes="Invoice uploaded. Verify supplier, invoice details and line items before approval.",
+        created_by_id=user.id)
+    db.session.add(purchase);db.session.commit()
+    return jsonify({"purchase":_purchase_dict(purchase),
+        "message":"Invoice securely attached to a draft purchase. Enter or verify its extracted details before approval.",
+        "extraction":{"status":"not_configured","message":"Automated OCR/AI extraction requires an OCR/AI provider configuration. No invoice values have been guessed."}}),201
+
+@org_tools_bp.get("/inventory-transfers")
+@roles_required("Admin","Supervisor")
+def inventory_transfers_list():
+    user=get_current_user()
+    rows=InventoryTransfer.query.filter_by(organization_id=user.organization_id).order_by(InventoryTransfer.created_at.desc()).limit(300).all()
+    return jsonify({"transfers":[{"id":x.id,"item_id":x.item_id,"from_location":x.from_location,"to_location":x.to_location,
+        "quantity":float(x.quantity),"status":x.status,"notes":x.notes or "","created_at":x.created_at.isoformat()} for x in rows]}),200
+
+@org_tools_bp.post("/inventory-transfers")
+@roles_required("Admin","Supervisor")
+def inventory_transfer_create():
+    user=get_current_user(); d=request.get_json(silent=True) or {}
+    item=InventoryItem.query.filter_by(id=d.get("item_id"),organization_id=user.organization_id).first()
+    if not item:return jsonify({"error":"Choose an inventory item in this organisation."}),400
+    source=str(d.get("from_location") or "").strip(); target=str(d.get("to_location") or "").strip()
+    try:qty=Decimal(str(d.get("quantity")))
+    except (InvalidOperation,ValueError):return jsonify({"error":"Enter a valid transfer quantity."}),400
+    if not source or not target or source==target or qty<=0:return jsonify({"error":"Choose different source and destination locations and a positive quantity."}),400
+    row=InventoryTransfer(organization_id=user.organization_id,item_id=item.id,from_location=source,to_location=target,
+        quantity=qty,requested_by_id=user.id,notes=str(d.get("notes") or "")[:4000])
+    db.session.add(row);db.session.commit()
+    return jsonify({"id":row.id,"status":row.status,"message":"Transfer request created. Stock has not moved yet."}),201
+
+@org_tools_bp.patch("/inventory-transfers/<int:transfer_id>")
+@roles_required("Admin","Supervisor")
+def inventory_transfer_update(transfer_id):
+    user=get_current_user(); row=InventoryTransfer.query.filter_by(id=transfer_id,organization_id=user.organization_id).first()
+    if not row:return jsonify({"error":"Transfer not found."}),404
+    d=request.get_json(silent=True) or {}; action=d.get("action")
+    item=InventoryItem.query.filter_by(id=row.item_id,organization_id=user.organization_id).with_for_update().first()
+    if not item:return jsonify({"error":"Inventory item not found."}),404
+    if action=="dispatch" and row.status=="pending":
+        current=Decimal(str(item.quantity or 0)); qty=Decimal(str(row.quantity))
+        if current<qty:return jsonify({"error":"Insufficient stock to dispatch this transfer."}),409
+        item.quantity=current-qty;row.status="in_transit";row.dispatched_by_id=user.id;row.dispatched_at=datetime.now(timezone.utc)
+        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_out",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
+    elif action=="receive" and row.status=="in_transit":
+        qty=Decimal(str(row.quantity));item.quantity=Decimal(str(item.quantity or 0))+qty;row.status="received";row.received_by_id=user.id;row.received_at=datetime.now(timezone.utc)
+        db.session.add(InventoryMovement(organization_id=user.organization_id,item_id=item.id,movement_type="transfer_in",quantity=qty,balance_after=item.quantity,reference="Transfer #"+str(row.id),notes=row.from_location+" → "+row.to_location,performed_by_id=user.id))
+    else:return jsonify({"error":"This transfer action is not valid for its current status."}),409
+    db.session.commit()
+    return jsonify({"message":"Transfer updated.","status":row.status}),200
