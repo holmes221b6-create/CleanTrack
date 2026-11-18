@@ -659,8 +659,8 @@ def supervisor_preview_report():
     except PermissionError as exc: return jsonify({"error":str(exc)}),403
     except ValueError as exc: return jsonify({"error":str(exc)}),400
     return jsonify({k:v for k,v in report.items() if k!="rows"} | {
-        "headers":report["headers"],"rows":[[_clean(v) for v in row] for row in report["rows"][:100]],
-        "preview_truncated":report["row_count"]>100}),200
+        "headers":report["headers"],"rows":[[_clean(v) for v in row] for row in report["rows"]],
+        "preview_truncated":False}),200
 
 
 @reports_bp.post("/supervisor/generate")
