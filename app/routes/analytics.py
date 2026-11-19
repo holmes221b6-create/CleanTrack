@@ -2281,8 +2281,7 @@ def performance_analysis_workspace():
         tid,lid=dims(op)
         if selected_location and lid != selected_location: continue
         if selected_type and str(op.task_type or "General").casefold() != selected_type.casefold(): continue
-        if selected_team and tid != selected_team: continue
-        if not is_admin and tid != own_team_id: continue
+        if is_admin and selected_team and tid != selected_team: continue
         filtered_operations.append(op)
         if tid in by_team: by_team[tid].append(op)
         if lid:
@@ -2322,9 +2321,8 @@ def performance_analysis_workspace():
         loc=location_by_id.get(lid)
         if loc:
             item=stats(rows)
-            scoped_rows = rows if is_admin else [o for o in rows if dims(o)[0] == own_team_id]
-            if scoped_rows:
-                item = stats(scoped_rows)
+            if rows:
+                item = stats(rows)
                 location_rows.append({"location_id":lid,"location_name":loc.name,**item})
     location_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["location_name"].casefold()))
     for idx,row in enumerate(location_rows,1): row["rank"]=idx if row["score"] is not None else None
