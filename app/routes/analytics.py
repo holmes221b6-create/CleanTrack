@@ -2187,3 +2187,183 @@ def save_analytics_prediction_snapshot():
     db.session.commit()
     return jsonify({"saved": True, "id": row.id}), 201
 
+
+
+@analytics_bp.get("/performance-analysis")
+@roles_required("Admin", "Supervisor")
+def performance_analysis_workspace():
+    """Organisation performance with team-level cross-team visibility and private own-team detail."""
+    viewer = get_current_user()
+    parsed, _unused, error = _parse_period()
+    if error:
+        return jsonify({"error": error[0]}), error[1]
+    start_day, end_day, start_at, end_exclusive = parsed
+    teams = Team.query.filter_by(organization_id=viewer.organization_id).order_by(func.lower(Team.name)).all()
+    locations = Location.query.filter_by(organization_id=viewer.organization_id).order_by(func.lower(Location.name)).all()
+    zones = Zone.query.filter_by(organization_id=viewer.organization_id).all()
+    team_ids = {t.id for t in teams}
+    location_by_id = {x.id:x for x in locations}
+    zone_by_id = {x.id:x for x in zones}
+    memberships = TeamMember.query.join(Team, TeamMember.team_id == Team.id).join(
+        User, User.id == TeamMember.user_id
+    ).filter(Team.organization_id == viewer.organization_id, User.organization_id == viewer.organization_id).all()
+    members_by_team = {}
+    for membership in memberships:
+        members_by_team.setdefault(membership.team_id, []).append(membership.user)
+    is_admin = viewer.role == "Admin"
+    own_team_ids = set()
+    if not is_admin:
+        own_team_ids = {m.team_id for m in memberships if m.user_id == viewer.id and m.team.status == "active"}
+        if len(own_team_ids) != 1:
+            return jsonify({"error":"Your account must belong to exactly one active team."}), 409
+    own_team_id = next(iter(own_team_ids), None)
+    selected_team = request.args.get("team_id", type=int)
+    if selected_team and selected_team not in team_ids:
+        return jsonify({"error":"The selected team is outside this organisation."}), 403
+    if not is_admin and selected_team and selected_team != own_team_id:
+        return jsonify({"error":"You can filter detailed team data only to your own team."}), 403
+
+    operations = Operation.query.filter(
+        Operation.organization_id == viewer.organization_id,
+        Operation.created_at >= start_at, Operation.created_at < end_exclusive
+    ).order_by(Operation.created_at.asc(), Operation.id.asc()).all()
+    now = datetime.now(timezone.utc)
+    done = {"completed","complete","approved","verified","done","closed"}
+    cancelled = {"cancelled","canceled","archived"}
+
+    def dims(op):
+        z = zone_by_id.get(op.zone_id)
+        loc_id = op.location_id if op.location_id in location_by_id else (z.location_id if z else None)
+        tid = op.team_id if op.team_id in team_ids else None
+        if tid is None and z:
+            candidate = z.team_id or (location_by_id.get(loc_id).team_id if location_by_id.get(loc_id) else None)
+            if candidate in team_ids: tid = candidate
+        if tid is None and loc_id and location_by_id[loc_id].team_id in team_ids:
+            tid = location_by_id[loc_id].team_id
+        return tid, loc_id
+
+    def stats(rows):
+        total=len(rows); completed=sum(str(o.status or "").lower() in done for o in rows)
+        active=[o for o in rows if str(o.status or "").lower() not in cancelled]
+        overdue=sum(
+            str(o.status or "").lower() not in done and
+            (bool(o.overdue) or (o.due_at is not None and (_to_utc(o.due_at) or now) < now))
+            for o in active
+        )
+        due_done=[o for o in rows if str(o.status or "").lower() in done and o.due_at]
+        ontime=sum((_to_utc(o.reviewed_at or o.submitted_at or o.updated_at or o.created_at) or now) <= (_to_utc(o.due_at) or now) for o in due_done)
+        reviewed=[o for o in rows if o.reviewed_at]
+        approved=sum(str(o.status or "").lower() in done for o in reviewed)
+        rejected=sum(str(o.status or "").lower()=="rejected" for o in rows)
+        completion=round(completed*100/total,1) if total else None
+        punctuality=round(ontime*100/len(due_done),1) if due_done else None
+        approval=round(approved*100/len(reviewed),1) if reviewed else None
+        overdue_rate=round(overdue*100/total,1) if total else None
+        weights=[(completion,.45),(punctuality,.25),(approval,.15),((100-overdue_rate) if overdue_rate is not None else None,.15)]
+        valid=[(v,w) for v,w in weights if v is not None]
+        score=round(sum(v*w for v,w in valid)/sum(w for _,w in valid),1) if total>=3 and valid else None
+        avg_hours=None
+        durations=[((_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)-_to_utc(o.created_at)).total_seconds()/3600) for o in rows if str(o.status or "").lower() in done and o.created_at and (o.reviewed_at or o.submitted_at or o.updated_at) and (_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)>=_to_utc(o.created_at))]
+        if durations: avg_hours=round(sum(durations)/len(durations),1)
+        effort=sum(max(1,int(o.estimated_minutes or 60))*{"low":.8,"normal":1.0,"high":1.2,"urgent":1.5}.get(str(o.priority or "normal").lower(),1.0) for o in rows)
+        return {"total_operations":total,"completed":completed,"pending":sum(str(o.status or "").lower() not in done|cancelled for o in rows),"overdue":overdue,"cancelled":sum(str(o.status or "").lower() in cancelled for o in rows),"rejected":rejected,"completion_rate":completion,"on_time_rate":punctuality,"approval_rate":approval,"overdue_rate":overdue_rate,"average_completion_hours":avg_hours,"weighted_workload":round(effort,1),"score":score,"insufficient_data":score is None}
+
+    by_team={t.id:[] for t in teams}
+    by_location={}
+    by_type={}
+    own_member_ops={}
+    for op in operations:
+        tid,lid=dims(op)
+        if tid in by_team: by_team[tid].append(op)
+        if lid:
+            by_location.setdefault(lid,[]).append(op)
+        typ=(op.task_type or "General").strip() or "General"
+        by_type.setdefault(typ,[]).append(op)
+        if not is_admin and tid==own_team_id and op.assigned_to_id:
+            own_member_ops.setdefault(op.assigned_to_id,[]).append(op)
+
+    team_rows=[]
+    for t in teams:
+        rows=by_team[t.id]; item=stats(rows)
+        supervisors=[u.full_name for u in members_by_team.get(t.id,[]) if u.role=="Supervisor" and u.account_status=="active"]
+        team_rows.append({"team_id":t.id,"team_name":t.name,"supervisor":", ".join(supervisors) or "Unassigned", "member_count":sum(u.role=="Staff" and u.account_status=="active" for u in members_by_team.get(t.id,[])),**item})
+    team_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),-x["completed"],x["team_name"].casefold()))
+    for idx,row in enumerate(team_rows,1): row["rank"]=idx if row["score"] is not None else None
+    visible_teams=team_rows if is_admin else [{k:v for k,v in row.items() if k not in {"member_count"}} for row in team_rows]
+    if selected_team:
+        selected_team_id=selected_team
+    else:
+        selected_team_id=own_team_id if not is_admin else None
+    own_team=next((r for r in team_rows if r["team_id"]==selected_team_id),None)
+
+    individual_rows=[]
+    if is_admin or own_team_id:
+        scope_team=selected_team_id if is_admin else own_team_id
+        if scope_team:
+            for member in members_by_team.get(scope_team,[]):
+                if member.role!="Staff" or member.account_status!="active": continue
+                item=stats(own_member_ops.get(member.id,[]) if not is_admin else [o for o in by_team[scope_team] if o.assigned_to_id==member.id])
+                individual_rows.append({"user_id":member.id,"name":member.full_name,**item})
+            individual_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["name"].casefold()))
+            for idx,row in enumerate(individual_rows,1): row["rank"]=idx if row["score"] is not None else None
+
+    location_rows=[]
+    for lid,rows in by_location.items():
+        loc=location_by_id.get(lid)
+        if loc:
+            item=stats(rows)
+            if is_admin or (not is_admin and any(dims(o)[0]==own_team_id for o in rows)):
+                location_rows.append({"location_id":lid,"location_name":loc.name,**item})
+    location_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["location_name"].casefold()))
+    for idx,row in enumerate(location_rows,1): row["rank"]=idx if row["score"] is not None else None
+    type_rows=[{"operation_type":name,**stats(rows)} for name,rows in by_type.items()]
+    type_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["operation_type"].casefold()))
+    for idx,row in enumerate(type_rows,1): row["rank"]=idx if row["score"] is not None else None
+
+    # Monthly history is computed from actual dated operations in the requested period.
+    history={}
+    for op in operations:
+        tid,_=dims(op)
+        if not is_admin and tid!=own_team_id: continue
+        key=op.created_at.strftime("%Y-%m") if op.created_at else None
+        if key: history.setdefault(key,[]).append(op)
+    history_rows=[{"period":key,**stats(rows)} for key,rows in sorted(history.items())]
+
+    improvements=[]
+    if own_team:
+        if own_team["completion_rate"] is not None and own_team["completion_rate"]<85:
+            improvements.append({"priority":"high","title":"Raise operation completion","evidence":f"Current completion rate is {own_team['completion_rate']}%.","action":"Review pending work daily, remove blockers and rebalance assignments."})
+        if own_team["on_time_rate"] is not None and own_team["on_time_rate"]<85:
+            improvements.append({"priority":"high","title":"Improve on-time completion","evidence":f"On-time completion is {own_team['on_time_rate']}%.","action":"Review due dates, workload and overdue operations at the start of each shift."})
+        if own_team["approval_rate"] is not None and own_team["approval_rate"]<90:
+            improvements.append({"priority":"medium","title":"Reduce review rejections","evidence":f"Approval rate is {own_team['approval_rate']}%.","action":"Clarify completion criteria and verify evidence before submission."})
+        if own_team["overdue_rate"] is not None and own_team["overdue_rate"]>10:
+            improvements.append({"priority":"high","title":"Reduce overdue workload","evidence":f"{own_team['overdue_rate']}% of operations are overdue.","action":"Prioritise aged work and escalate blocked operations early."})
+        if not improvements:
+            improvements.append({"priority":"info","title":"Maintain current performance","evidence":"No threshold-based performance weakness was detected in this period.","action":"Continue monitoring the same measures and compare against the next period."})
+
+    try:
+        from app.models.announcement import Announcement
+        admin_notices=[]
+        if own_team_id:
+            admin_notices=[{"id":a.id,"title":a.title,"message":a.message,"severity":a.severity,"published_at":a.published_at.isoformat() if a.published_at else None}
+                for a in Announcement.query.filter_by(organization_id=viewer.organization_id,team_id=own_team_id,published=True)
+                .join(User,Announcement.created_by_id==User.id).filter(User.role=="Admin").order_by(Announcement.published_at.desc()).limit(30).all()]
+        else: admin_notices=[]
+    except Exception:
+        admin_notices=[]
+
+    return jsonify({
+        "period":{"start_date":start_day.isoformat(),"end_date":end_day.isoformat()},
+        "scope":{"role":viewer.role,"own_team_id":own_team_id,"selected_team_id":selected_team_id},
+        "overview":own_team if not is_admin else stats(operations),
+        "teams":visible_teams,
+        "individuals":individual_rows,
+        "locations":location_rows,
+        "operation_types":type_rows,
+        "history":history_rows,
+        "admin_improvements":admin_notices,
+        "automated_improvements":improvements,
+        "attendance":{"available":False,"message":"Attendance rankings are unavailable because this organisation has no connected attendance records."},
+        "methodology":"Team and category rankings use actual operations in the selected creation-date period. Composite score: completion 45%, on-time completion 25%, approval 15%, overdue avoidance 15%, using only available components. A minimum of three operations is required for a score. Workload weighting uses estimated minutes and priority. Other teams are aggregate-only for Supervisors; individual staff details are limited to the Supervisor's own team."
+    }),200
