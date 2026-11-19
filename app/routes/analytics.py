@@ -2247,30 +2247,36 @@ def performance_analysis_workspace():
         return tid, loc_id
 
     def stats(rows):
-        total=len(rows); completed=sum(str(o.status or "").lower() in done for o in rows)
+        total=len(rows)
+        completed_rows=[o for o in rows if str(o.status or "").lower() in done]
         active=[o for o in rows if str(o.status or "").lower() not in cancelled]
-        overdue=sum(
-            str(o.status or "").lower() not in done and
-            (bool(o.overdue) or (o.due_at is not None and (_to_utc(o.due_at) or now) < now))
-            for o in active
-        )
-        due_done=[o for o in rows if str(o.status or "").lower() in done and o.due_at]
-        ontime=sum((_to_utc(o.reviewed_at or o.submitted_at or o.updated_at or o.created_at) or now) <= (_to_utc(o.due_at) or now) for o in due_done)
+        overdue_rows=[o for o in active if str(o.status or "").lower() not in done and
+            (bool(o.overdue) or (o.due_at is not None and (_to_utc(o.due_at) or now) < now))]
+        due_done=[o for o in completed_rows if o.due_at]
+        ontime_rows=[o for o in due_done if (_to_utc(o.reviewed_at or o.submitted_at or o.updated_at or o.created_at) or now) <= (_to_utc(o.due_at) or now)]
         reviewed=[o for o in rows if o.reviewed_at]
-        approved=sum(str(o.status or "").lower() in done for o in reviewed)
+        approved_rows=[o for o in reviewed if str(o.status or "").lower() in done]
         rejected=sum(str(o.status or "").lower()=="rejected" for o in rows)
-        completion=round(completed*100/total,1) if total else None
-        punctuality=round(ontime*100/len(due_done),1) if due_done else None
-        approval=round(approved*100/len(reviewed),1) if reviewed else None
-        overdue_rate=round(overdue*100/total,1) if total else None
+        def effort(o):
+            priority_weight={"low":0.8,"normal":1.0,"high":1.2,"urgent":1.5}.get(str(o.priority or "normal").lower(),1.0)
+            return max(1,int(o.estimated_minutes or 60))*priority_weight
+        total_weight=sum(effort(o) for o in rows)
+        completed_weight=sum(effort(o) for o in completed_rows)
+        due_weight=sum(effort(o) for o in due_done)
+        ontime_weight=sum(effort(o) for o in ontime_rows)
+        reviewed_weight=sum(effort(o) for o in reviewed)
+        approved_weight=sum(effort(o) for o in approved_rows)
+        overdue_weight=sum(effort(o) for o in overdue_rows)
+        completion=round(completed_weight*100/total_weight,1) if total_weight else None
+        punctuality=round(ontime_weight*100/due_weight,1) if due_weight else None
+        approval=round(approved_weight*100/reviewed_weight,1) if reviewed_weight else None
+        overdue_rate=round(overdue_weight*100/total_weight,1) if total_weight else None
         weights=[(completion,.45),(punctuality,.25),(approval,.15),((100-overdue_rate) if overdue_rate is not None else None,.15)]
         valid=[(v,w) for v,w in weights if v is not None]
         score=round(sum(v*w for v,w in valid)/sum(w for _,w in valid),1) if total>=3 and valid else None
-        avg_hours=None
-        durations=[((_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)-_to_utc(o.created_at)).total_seconds()/3600) for o in rows if str(o.status or "").lower() in done and o.created_at and (o.reviewed_at or o.submitted_at or o.updated_at) and (_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)>=_to_utc(o.created_at))]
-        if durations: avg_hours=round(sum(durations)/len(durations),1)
-        effort=sum(max(1,int(o.estimated_minutes or 60))*{"low":.8,"normal":1.0,"high":1.2,"urgent":1.5}.get(str(o.priority or "normal").lower(),1.0) for o in rows)
-        return {"total_operations":total,"completed":completed,"pending":sum(str(o.status or "").lower() not in done|cancelled for o in rows),"overdue":overdue,"cancelled":sum(str(o.status or "").lower() in cancelled for o in rows),"rejected":rejected,"completion_rate":completion,"on_time_rate":punctuality,"approval_rate":approval,"overdue_rate":overdue_rate,"average_completion_hours":avg_hours,"weighted_workload":round(effort,1),"score":score,"insufficient_data":score is None}
+        durations=[((_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)-_to_utc(o.created_at)).total_seconds()/3600) for o in completed_rows if o.created_at and (o.reviewed_at or o.submitted_at or o.updated_at) and (_to_utc(o.reviewed_at or o.submitted_at or o.updated_at)>=_to_utc(o.created_at))]
+        avg_hours=round(sum(durations)/len(durations),1) if durations else None
+        return {"total_operations":total,"completed":len(completed_rows),"pending":sum(str(o.status or "").lower() not in done|cancelled for o in rows),"overdue":len(overdue_rows),"cancelled":sum(str(o.status or "").lower() in cancelled for o in rows),"rejected":rejected,"completion_rate":completion,"on_time_rate":punctuality,"approval_rate":approval,"overdue_rate":overdue_rate,"average_completion_hours":avg_hours,"weighted_workload":round(total_weight,1),"score":score,"insufficient_data":score is None}
 
     by_team={t.id:[] for t in teams}
     filtered_operations=[]
@@ -2390,5 +2396,5 @@ def performance_analysis_workspace():
         "admin_improvements":admin_notices,
         "automated_improvements":improvements,
         "attendance":{"available":False,"message":"Attendance rankings are unavailable because this organisation has no connected attendance records."},
-        "methodology":"Team and category rankings use actual operations in the selected creation-date period. Composite score: completion 45%, on-time completion 25%, approval 15%, overdue avoidance 15%, using only available components. A minimum of three operations is required for a score. Workload weighting uses estimated minutes and priority. Other teams are aggregate-only for Supervisors; individual staff details are limited to the Supervisor's own team."
+        "methodology":"Team and category rankings use actual operations in the selected creation-date period. Composite score: completion 45%, on-time completion 25%, approval 15%, overdue avoidance 15%, using only available components. Rates are weighted by estimated minutes and priority (Low 0.8, Normal 1.0, High 1.2, Urgent 1.5). A minimum of three operations is required for a score. Other teams are aggregate-only for Supervisors; individual staff details are limited to the Supervisor's own team."
     }),200
