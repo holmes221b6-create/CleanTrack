@@ -1076,10 +1076,59 @@ def supervisor_team_performance():
             "overdue_rate": stats["overdue_rate"], "weighted_effort": stats["weighted_effort"],
             "trend": stats["trend"], "insufficient_data": stats["score"] is None,
         })
-    current_member = next((row for row in result_members if row["id"] == user.id), None)
+    # Team-level metrics cover every authorised operation in this team scope,
+    # including operations not currently assigned to an individual staff member.
+    now = datetime.now(timezone.utc)
+    done_rows = [op for op in operations if str(op.status or "").lower() in DONE_STATUSES]
+    cancelled_rows = [op for op in operations if str(op.status or "").lower() in CANCELLED_STATUSES]
+    pending_rows = [op for op in operations if op not in done_rows and op not in cancelled_rows]
+    overdue_rows = []
+    total_weight = completed_weight = due_completed_weight = on_time_weight = overdue_weight = 0.0
+    for op in operations:
+        priority_weight = {"low": 0.8, "normal": 1.0, "high": 1.2, "urgent": 1.5}.get((op.priority or "normal").lower(), 1.0)
+        weight = max(1, int(op.estimated_minutes or 60)) * priority_weight
+        total_weight += weight
+        done = op in done_rows
+        due = _dt_utc(op.due_at)
+        completed_at = _dt_utc(op.reviewed_at or op.submitted_at or op.updated_at or op.created_at) if done else None
+        if done:
+            completed_weight += weight
+            if due is not None:
+                due_completed_weight += weight
+                if completed_at and completed_at <= due:
+                    on_time_weight += weight
+        elif op not in cancelled_rows and (bool(op.overdue) or (due is not None and due < now)):
+            overdue_rows.append(op)
+            overdue_weight += weight
+    completion_rate = completed_weight / total_weight * 100 if total_weight else None
+    on_time_rate = on_time_weight / due_completed_weight * 100 if due_completed_weight else None
+    overdue_rate = overdue_weight / total_weight * 100 if total_weight else None
+    score_parts = [(completion_rate, 0.5), (on_time_rate, 0.3), (100 - overdue_rate if overdue_rate is not None else None, 0.2)]
+    valid_parts = [(value, weight) for value, weight in score_parts if value is not None]
+    team_score = round(sum(value * weight for value, weight in valid_parts) / sum(weight for _, weight in valid_parts), 1) if len(operations) >= 3 and valid_parts else None
+    weekly_team = {}
+    for op in operations:
+        if not op.created_at:
+            continue
+        week_date = _dt_utc(op.created_at).date()
+        week_start = week_date - timedelta(days=week_date.weekday())
+        key = week_start.isoformat()
+        bucket = weekly_team.setdefault(key, {"week_start": key, "created": 0, "completed": 0})
+        bucket["created"] += 1
+        bucket["completed"] += int(str(op.status or "").lower() in DONE_STATUSES)
+    team_overview = {
+        "total_operations": len(operations), "completed": len(done_rows), "pending": len(pending_rows),
+        "overdue": len(overdue_rows), "cancelled": len(cancelled_rows),
+        "completion_rate": round(completion_rate, 1) if completion_rate is not None else None,
+        "on_time_rate": round(on_time_rate, 1) if on_time_rate is not None else None,
+        "overdue_rate": round(overdue_rate, 1) if overdue_rate is not None else None,
+        "score": team_score, "weighted_effort": round(total_weight, 1),
+    }
     return jsonify({
         "period": {"start_date": start_day.isoformat(), "end_date": end_day.isoformat()},
-        "team": {"id": team.id, "name": team.name}, "current_member": current_member,
+        "team": {"id": team.id, "name": team.name}, "team_overview": team_overview,
+        "weekly_trend": [weekly_team[key] for key in sorted(weekly_team)],
+        "current_member": current_member,
         "members": result_members,
         "operation_types": sorted({op.task_type for op in operations if op.task_type}),
         "priorities": ["Low", "Normal", "High", "Urgent"],
