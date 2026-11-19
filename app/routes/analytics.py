@@ -2227,6 +2227,10 @@ def performance_analysis_workspace():
         Operation.organization_id == viewer.organization_id,
         Operation.created_at >= start_at, Operation.created_at < end_exclusive
     ).order_by(Operation.created_at.asc(), Operation.id.asc()).all()
+    selected_location = request.args.get("location_id", type=int)
+    selected_type = (request.args.get("operation_type") or "").strip()
+    if selected_location and selected_location not in location_by_id:
+        return jsonify({"error":"The selected location is outside this organisation."}), 403
     now = datetime.now(timezone.utc)
     done = {"completed","complete","approved","verified","done","closed"}
     cancelled = {"cancelled","canceled","archived"}
@@ -2274,6 +2278,10 @@ def performance_analysis_workspace():
     own_member_ops={}
     for op in operations:
         tid,lid=dims(op)
+        if selected_location and lid != selected_location: continue
+        if selected_type and str(op.task_type or "General").casefold() != selected_type.casefold(): continue
+        if selected_team and tid != selected_team: continue
+        if not is_admin and tid != own_team_id: continue
         if tid in by_team: by_team[tid].append(op)
         if lid:
             by_location.setdefault(lid,[]).append(op)
@@ -2321,6 +2329,16 @@ def performance_analysis_workspace():
     type_rows=[{"operation_type":name,**stats(rows)} for name,rows in by_type.items()]
     type_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["operation_type"].casefold()))
     for idx,row in enumerate(type_rows,1): row["rank"]=idx if row["score"] is not None else None
+    org_users={u.id:u for u in User.query.filter_by(organization_id=viewer.organization_id).all()}
+    by_role={}
+    for op in operations:
+        assignee=org_users.get(op.assigned_to_id)
+        if assignee:
+            role_label=assignee.role or "Unassigned"
+            by_role.setdefault(role_label,[]).append(op)
+    role_rows=[{"role":label,**stats(rows)} for label,rows in by_role.items()]
+    role_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["role"].casefold()))
+    for idx,row in enumerate(role_rows,1): row["rank"]=idx if row["score"] is not None else None
 
     # Monthly history is computed from actual dated operations in the requested period.
     history={}
@@ -2366,7 +2384,9 @@ def performance_analysis_workspace():
         "individuals":individual_rows,
         "locations":location_rows,
         "operation_types":type_rows,
+        "roles":role_rows,
         "history":history_rows,
+        "filters":{"locations":[{"id":x.id,"name":x.name} for x in locations],"operation_types":sorted({(o.task_type or "General") for o in operations})},
         "admin_improvements":admin_notices,
         "automated_improvements":improvements,
         "attendance":{"available":False,"message":"Attendance rankings are unavailable because this organisation has no connected attendance records."},
