@@ -2312,7 +2312,9 @@ def performance_analysis_workspace():
         loc=location_by_id.get(lid)
         if loc:
             item=stats(rows)
-            if is_admin or (not is_admin and any(dims(o)[0]==own_team_id for o in rows)):
+            scoped_rows = rows if is_admin else [o for o in rows if dims(o)[0] == own_team_id]
+            if scoped_rows:
+                item = stats(scoped_rows)
                 location_rows.append({"location_id":lid,"location_name":loc.name,**item})
     location_rows.sort(key=lambda x:(x["score"] is None,-(x["score"] or 0),x["location_name"].casefold()))
     for idx,row in enumerate(location_rows,1): row["rank"]=idx if row["score"] is not None else None
@@ -2347,8 +2349,11 @@ def performance_analysis_workspace():
         admin_notices=[]
         if own_team_id:
             admin_notices=[{"id":a.id,"title":a.title,"message":a.message,"severity":a.severity,"published_at":a.published_at.isoformat() if a.published_at else None}
-                for a in Announcement.query.filter_by(organization_id=viewer.organization_id,team_id=own_team_id,published=True)
-                .join(User,Announcement.created_by_id==User.id).filter(User.role=="Admin").order_by(Announcement.published_at.desc()).limit(30).all()]
+                for a in Announcement.query.filter(
+                    Announcement.organization_id==viewer.organization_id,
+                    Announcement.published.is_(True),
+                    db.or_(Announcement.team_id==own_team_id, Announcement.team_id.is_(None)),
+                ).join(User,Announcement.created_by_id==User.id).filter(User.role=="Admin").order_by(Announcement.published_at.desc()).limit(30).all()]
         else: admin_notices=[]
     except Exception:
         admin_notices=[]
