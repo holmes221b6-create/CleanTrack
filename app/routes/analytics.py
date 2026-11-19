@@ -2376,6 +2376,7 @@ def performance_analysis_workspace():
                 for a in Announcement.query.filter(
                     Announcement.organization_id==viewer.organization_id,
                     Announcement.published.is_(True),
+                    Announcement.audience_scope.in_(["supervisors","team"]),
                     or_(Announcement.team_id==own_team_id, Announcement.team_id.is_(None)),
                 ).join(User,Announcement.created_by_id==User.id).filter(User.role=="Admin").order_by(Announcement.published_at.desc()).limit(30).all()]
         else: admin_notices=[]
