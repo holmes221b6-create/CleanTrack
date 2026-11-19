@@ -2273,6 +2273,7 @@ def performance_analysis_workspace():
         return {"total_operations":total,"completed":completed,"pending":sum(str(o.status or "").lower() not in done|cancelled for o in rows),"overdue":overdue,"cancelled":sum(str(o.status or "").lower() in cancelled for o in rows),"rejected":rejected,"completion_rate":completion,"on_time_rate":punctuality,"approval_rate":approval,"overdue_rate":overdue_rate,"average_completion_hours":avg_hours,"weighted_workload":round(effort,1),"score":score,"insufficient_data":score is None}
 
     by_team={t.id:[] for t in teams}
+    filtered_operations=[]
     by_location={}
     by_type={}
     own_member_ops={}
@@ -2282,6 +2283,7 @@ def performance_analysis_workspace():
         if selected_type and str(op.task_type or "General").casefold() != selected_type.casefold(): continue
         if selected_team and tid != selected_team: continue
         if not is_admin and tid != own_team_id: continue
+        filtered_operations.append(op)
         if tid in by_team: by_team[tid].append(op)
         if lid:
             by_location.setdefault(lid,[]).append(op)
@@ -2331,7 +2333,7 @@ def performance_analysis_workspace():
     for idx,row in enumerate(type_rows,1): row["rank"]=idx if row["score"] is not None else None
     org_users={u.id:u for u in User.query.filter_by(organization_id=viewer.organization_id).all()}
     by_role={}
-    for op in operations:
+    for op in filtered_operations:
         assignee=org_users.get(op.assigned_to_id)
         if assignee:
             role_label=assignee.role or "Unassigned"
@@ -2342,7 +2344,7 @@ def performance_analysis_workspace():
 
     # Monthly history is computed from actual dated operations in the requested period.
     history={}
-    for op in operations:
+    for op in filtered_operations:
         tid,_=dims(op)
         if not is_admin and tid!=own_team_id: continue
         key=op.created_at.strftime("%Y-%m") if op.created_at else None
