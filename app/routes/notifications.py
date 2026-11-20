@@ -26,8 +26,7 @@ def _sync_organisation_activity(user):
     if not user.organization_id:
         return
     audit_rows = AuditLog.query.filter(
-        AuditLog.organization_id == user.organization_id,
-        AuditLog.resource_type != "Announcement",
+        AuditLog.organization_id == user.organization_id
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(50).all()
     if not audit_rows:
         return
@@ -50,9 +49,16 @@ def _sync_organisation_activity(user):
     } if actor_ids else {}
 
     for event in audit_rows:
-        # Announcement delivery already creates a purpose-built notification
-        # for every audience member, including the publisher.
-        if event.resource_type == "Announcement" or str(event.id) in existing:
+        # Audience members and the publisher already receive a purpose-built
+        # announcement notification. Other organisation members still receive
+        # the corresponding organisation-activity event.
+        if (
+            str(event.id) in existing
+            or (
+                event.resource_type == "Announcement"
+                and str(event.resource_id) in already_notified_announcements
+            )
+        ):
             continue
         actor_name = actors.get(event.actor_id, "Organisation system")
         action_text = _activity_label(event.action)
