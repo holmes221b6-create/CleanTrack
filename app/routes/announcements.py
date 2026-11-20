@@ -228,6 +228,19 @@ def _send_notice(recipient, item, notification_type):
     ))
 
 
+def _notification_recipients(item):
+    """Return the full announcement audience plus its active publisher."""
+    recipients = {person.id: person for person in _audience_users(item)}
+    creator = User.query.filter_by(
+        id=item.created_by_id,
+        organization_id=item.organization_id,
+        account_status="active",
+    ).first()
+    if creator:
+        recipients[creator.id] = creator
+    return list(recipients.values())
+
+
 def _publish(item, actor=None):
     needs_fresh_receipts = not bool(item.published_at)
     item.status = "published"
@@ -236,16 +249,15 @@ def _publish(item, actor=None):
     item.scheduled_at = None
     if needs_fresh_receipts:
         _reset_current_audience_receipts(item)
-    users = _audience_users(item)
+    users = _notification_recipients(item)
     for recipient in users:
-        if recipient.id != item.created_by_id:
-            _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
+        _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
     if item.escalate_to_admin and item.announcement_type == "alert":
         admin_ids = {row.id for row in User.query.filter_by(
             organization_id=item.organization_id, role="Admin", account_status="active"
         ).all()}
         for recipient in User.query.filter(User.id.in_(admin_ids)).all():
-            if recipient.id != item.created_by_id and recipient not in users:
+            if recipient.id not in {person.id for person in users}:
                 _send_notice(recipient, item, "escalated_alert")
         item.escalated_at = _now() if item.severity in {"high", "critical"} else item.escalated_at
     _ensure_receipts(item)
@@ -667,13 +679,13 @@ def create_announcement():
         _audit(user, "announcement.created", item, {"title": item.title, "status": item.status, "audience_scope": item.audience_scope, "severity": item.severity})
         if item.status == "published":
             _ensure_receipts(item)
-            for recipient in _audience_users(item):
-                if recipient.id != user.id:
-                    _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
+            for recipient in _notification_recipients(item):
+                _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
             if item.escalate_to_admin and item.announcement_type == "alert" and item.severity in {"high", "critical"}:
                 item.escalated_at = _now()
+                notified_ids = {person.id for person in _notification_recipients(item)}
                 for admin in User.query.filter_by(organization_id=user.organization_id, role="Admin", account_status="active").all():
-                    if admin.id != user.id:
+                    if admin.id not in notified_ids:
                         _send_notice(admin, item, "escalated_alert")
                 _audit(user, "announcement.alert_escalated", item, {"severity": item.severity, "reason": "serious severity"})
         db.session.commit()
@@ -731,9 +743,8 @@ def update_announcement(announcement_id):
             # Ensure newly-targeted members receive their own persisted receipt.
             _ensure_receipts(item)
             if just_published or (was_published and materially_changed):
-                for recipient in _audience_users(item):
-                    if recipient.id != user.id:
-                        _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
+                for recipient in _notification_recipients(item):
+                    _send_notice(recipient, item, "operational_alert" if item.announcement_type == "alert" else "announcement")
         after = {
             "title": item.title, "message": item.message, "status": item.status,
             "announcement_type": item.announcement_type, "severity": item.severity,
