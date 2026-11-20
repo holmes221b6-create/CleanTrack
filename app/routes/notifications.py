@@ -22,32 +22,34 @@ def _activity_label(action):
 
 
 def _sync_organisation_activity(user):
-    """Materialise recent organisation audit events as per-user notifications."""
+    """Fan out only explicitly organisation-wide announcements.
+
+    Assignment, deadline, review and other personal workflow notifications are
+    created for their intended recipient by the owning workflow. Audit-log
+    entries are not automatically broadcast to every organisation member.
+    """
     if not user.organization_id:
         return
+
+    global_actions = {
+        "announcement.created",
+        "announcement.published",
+        "announcement.updated",
+        "announcement.archived",
+        "announcement.alert_escalated",
+        "announcement.staff_urgent_alert_created",
+    }
     audit_rows = AuditLog.query.filter(
-        AuditLog.organization_id == user.organization_id
-    ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(50).all()
+        AuditLog.organization_id == user.organization_id,
+        AuditLog.resource_type == "Announcement",
+        AuditLog.action.in_(global_actions),
+    ).order_by(
+        AuditLog.created_at.desc(), AuditLog.id.desc()
+    ).limit(50).all()
     if not audit_rows:
         return
 
     audit_ids = [str(row.id) for row in audit_rows]
-    if not audit_ids:
-        return
-
-    announcement_ids = {
-        str(row.resource_id) for row in audit_rows
-        if row.resource_type == "Announcement" and row.resource_id
-    }
-    already_notified_announcements = {
-        row.resource_id for row in Notification.query.filter(
-            Notification.recipient_id == user.id,
-            Notification.organization_id == user.organization_id,
-            Notification.resource_type == "Announcement",
-            Notification.resource_id.in_(announcement_ids),
-        ).all()
-    } if announcement_ids else set()
-
     existing = {
         row.resource_id for row in Notification.query.filter(
             Notification.recipient_id == user.id,
@@ -57,6 +59,19 @@ def _sync_organisation_activity(user):
             Notification.resource_id.in_(audit_ids),
         ).all()
     }
+
+    announcement_ids = {
+        str(row.resource_id) for row in audit_rows if row.resource_id
+    }
+    already_notified_announcements = {
+        str(row.resource_id) for row in Notification.query.filter(
+            Notification.recipient_id == user.id,
+            Notification.organization_id == user.organization_id,
+            Notification.resource_type == "Announcement",
+            Notification.resource_id.in_(announcement_ids),
+        ).all()
+    } if announcement_ids else set()
+
     actor_ids = {row.actor_id for row in audit_rows if row.actor_id}
     actors = {
         actor.id: actor.full_name
@@ -64,31 +79,19 @@ def _sync_organisation_activity(user):
     } if actor_ids else {}
 
     for event in audit_rows:
-        # Audience members and the publisher already receive a purpose-built
-        # announcement notification. Other organisation members still receive
-        # the corresponding organisation-activity event.
-        if (
-            str(event.id) in existing
-            or (
-                event.resource_type == "Announcement"
-                and str(event.resource_id) in already_notified_announcements
-            )
-        ):
+        if str(event.id) in existing or str(event.resource_id) in already_notified_announcements:
             continue
         actor_name = actors.get(event.actor_id, "Organisation system")
         action_text = _activity_label(event.action)
-        resource = (event.resource_type or "organisation record").replace("_", " ").lower()
         details = event.details if isinstance(event.details, dict) else {}
         subject = details.get("title") or details.get("name") or details.get("label")
         message = f"{actor_name} {action_text}"
         if subject:
             message += f": {str(subject)[:180]}"
-        elif event.resource_type:
-            message += f" ({resource})"
         db.session.add(Notification(
             recipient_id=user.id,
             organization_id=user.organization_id,
-            title="Organisation activity",
+            title="Organisation announcement",
             message=message[:1000],
             notification_type="organisation_activity",
             resource_type="AuditLog",
