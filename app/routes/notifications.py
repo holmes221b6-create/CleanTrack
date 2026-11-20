@@ -93,11 +93,18 @@ def list_notifications():
         db.session.rollback()
         # Existing personal/system notifications remain available if activity
         # feed synchronisation encounters a transient issue.
-    rows = Notification.query.filter_by(recipient_id=user.id).order_by(
+    # The header bell is an organisation activity feed: never mix in records
+    # belonging to another organisation or notifications without this tenant.
+    rows = Notification.query.filter_by(
+        recipient_id=user.id,
+        organization_id=user.organization_id,
+    ).order_by(
         Notification.created_at.desc(), Notification.id.desc()
     ).limit(50).all()
     unread_count = Notification.query.filter_by(
-        recipient_id=user.id, is_read=False
+        recipient_id=user.id,
+        organization_id=user.organization_id,
+        is_read=False,
     ).count()
     return jsonify({
         "notifications": [row.to_dict() for row in rows],
