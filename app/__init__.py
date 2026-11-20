@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from sqlalchemy import inspect, text
 
 from config import Config
@@ -370,6 +370,59 @@ def create_app(config_class=Config):
             # failed unrelated API request.
             db.session.rollback()
         return None
+
+    @app.before_request
+    def _mark_activity_request_start():
+        g.activity_request_started_at = datetime.now(timezone.utc)
+
+    @app.after_request
+    def _record_mutating_organisation_activity(response):
+        # Record successful state-changing API actions even where an individual
+        # route has not yet implemented a domain-specific audit event.
+        if (
+            not request.path.startswith("/api/")
+            or request.method not in {"POST", "PUT", "PATCH", "DELETE"}
+            or response.status_code < 200
+            or response.status_code >= 400
+            or request.path.startswith(("/api/notifications", "/api/health", "/api/auth"))
+        ):
+            return response
+        try:
+            user = get_current_user()
+            if user is None or not user.organization_id:
+                return response
+            started = getattr(g, "activity_request_started_at", datetime.now(timezone.utc))
+            # Prefer a route's detailed audit record when one was already written
+            # during this request, avoiding duplicate feed entries.
+            existing = AuditLog.query.filter(
+                AuditLog.organization_id == user.organization_id,
+                AuditLog.actor_id == user.id,
+                AuditLog.created_at >= started,
+                AuditLog.resource_type != "API",
+            ).first()
+            if existing:
+                return response
+            endpoint = (request.endpoint or "unknown").replace(".", "_")
+            action = f"activity.{endpoint}.{request.method.lower()}"[:100]
+            db.session.add(AuditLog(
+                actor_id=user.id,
+                organization_id=user.organization_id,
+                action=action,
+                resource_type="API",
+                resource_id=None,
+                details={
+                    "endpoint": request.endpoint or "unknown",
+                    "method": request.method,
+                    "path": request.path[:300],
+                },
+                ip_address=(request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or "")[:45] or None,
+                user_agent=(request.user_agent.string or "")[:300] or None,
+            ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("Could not record organisation activity.")
+        return response
 
     # Purge expired audit entries at startup; the recurring job also purges
     # them during normal service operation, and audit reads purge defensively.
