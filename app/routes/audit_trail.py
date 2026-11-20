@@ -33,72 +33,14 @@ def _scoped_query(user):
     query = AuditLog.query.outerjoin(User, User.id == AuditLog.actor_id)
     query = query.filter(AuditLog.created_at >= audit_cutoff())
 
+    # The organisation activity feed is shared by all active members of the
+    # same tenant. Tenant isolation is enforced here; role-based filtering
+    # must not hide colleagues' organisation activity from Supervisors/Staff.
     if user.organization_id is not None:
-        query = query.filter(AuditLog.organization_id == user.organization_id)
-    else:
-        query = query.filter(AuditLog.actor_id == user.id)
+        return query.filter(AuditLog.organization_id == user.organization_id)
 
-    role = (user.role or "").lower()
-    if role == "admin":
-        return query
-
-    if role == "supervisor":
-        team_ids = [
-            row[0] for row in db.session.query(TeamMember.team_id)
-            .join(Team, Team.id == TeamMember.team_id)
-            .filter(
-                TeamMember.user_id == user.id,
-                Team.organization_id == user.organization_id,
-            ).all()
-        ]
-        assigned_operation_ids = db.session.query(cast(Operation.id, String)).filter(
-            Operation.organization_id == user.organization_id,
-            or_(
-                Operation.assigned_to_id == user.id,
-                Operation.team_id.in_(team_ids) if team_ids else false()
-            )
-        )
-        return query.filter(
-            or_(
-                AuditLog.actor_id == user.id,
-                (
-                    (AuditLog.resource_type == "Operation") &
-                    AuditLog.resource_id.in_(assigned_operation_ids)
-                ),
-                (
-                    (AuditLog.resource_type == "Team") &
-                    AuditLog.resource_id.in_([str(team_id) for team_id in team_ids])
-                )
-            ),
-            or_(
-                AuditLog.action.ilike("operation.%"),
-                AuditLog.action.ilike("team.%"),
-                AuditLog.action.ilike("security.%"),
-                AuditLog.action.ilike("account.%")
-            )
-        )
-
-    # Staff see their own actions and the audit events for operations
-    # assigned to them, but never administrative or other users' activity.
-    own_operation_ids = db.session.query(cast(Operation.id, String)).filter(
-        Operation.organization_id == user.organization_id,
-        Operation.assigned_to_id == user.id
-    )
-    return query.filter(
-        or_(
-            AuditLog.actor_id == user.id,
-            (
-                (AuditLog.resource_type == "Operation") &
-                AuditLog.resource_id.in_(own_operation_ids)
-            )
-        ),
-        or_(
-            AuditLog.action.ilike("operation.%"),
-            AuditLog.action.ilike("security.%"),
-            AuditLog.action.ilike("account.%")
-        )
-    )
-
+    # Accounts without an organisation can only inspect their own audit events.
+    return query.filter(AuditLog.actor_id == user.id)
 
 def _outcome(entry):
     details = entry.details if isinstance(entry.details, dict) else {}
