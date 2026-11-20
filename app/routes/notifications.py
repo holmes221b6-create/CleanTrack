@@ -25,13 +25,14 @@ def _sync_organisation_activity(user):
     """Materialise recent organisation audit events as per-user notifications."""
     if not user.organization_id:
         return
-    audit_rows = AuditLog.query.filter_by(
-        organization_id=user.organization_id
+    audit_rows = AuditLog.query.filter(
+        AuditLog.organization_id == user.organization_id,
+        AuditLog.resource_type != "Announcement",
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(50).all()
     if not audit_rows:
         return
 
-    audit_ids = [str(row.id) for row in audit_rows if row.resource_type != "Announcement"]
+    audit_ids = [str(row.id) for row in audit_rows]
     if not audit_ids:
         return
     existing = {
@@ -71,6 +72,7 @@ def _sync_organisation_activity(user):
             notification_type="organisation_activity",
             resource_type="AuditLog",
             resource_id=str(event.id),
+            created_at=event.created_at,
         ))
     db.session.commit()
 
