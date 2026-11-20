@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
 from app.extensions import db
 from app.models.notification import Notification
@@ -34,9 +34,24 @@ def _sync_organisation_activity(user):
     audit_ids = [str(row.id) for row in audit_rows]
     if not audit_ids:
         return
+
+    announcement_ids = {
+        str(row.resource_id) for row in audit_rows
+        if row.resource_type == "Announcement" and row.resource_id
+    }
+    already_notified_announcements = {
+        row.resource_id for row in Notification.query.filter(
+            Notification.recipient_id == user.id,
+            Notification.organization_id == user.organization_id,
+            Notification.resource_type == "Announcement",
+            Notification.resource_id.in_(announcement_ids),
+        ).all()
+    } if announcement_ids else set()
+
     existing = {
         row.resource_id for row in Notification.query.filter(
             Notification.recipient_id == user.id,
+            Notification.organization_id == user.organization_id,
             Notification.notification_type == "organisation_activity",
             Notification.resource_type == "AuditLog",
             Notification.resource_id.in_(audit_ids),
@@ -91,7 +106,8 @@ def list_notifications():
         _sync_organisation_activity(user)
     except Exception:
         db.session.rollback()
-        # Existing personal/system notifications remain available if activity
+        current_app.logger.exception("Organisation activity could not be synchronised into notifications.")
+        # Existing organisation notifications remain available if activity
         # feed synchronisation encounters a transient issue.
     # The header bell is an organisation activity feed: never mix in records
     # belonging to another organisation or notifications without this tenant.
@@ -117,7 +133,7 @@ def list_notifications():
 def mark_notification_read(notification_id):
     user = get_current_user()
     row = db.session.get(Notification, notification_id)
-    if row is None or row.recipient_id != user.id:
+    if row is None or row.recipient_id != user.id or row.organization_id != user.organization_id:
         return jsonify({"error": "Notification not found."}), 404
     if not row.is_read:
         row.is_read = True
@@ -134,7 +150,11 @@ def mark_notification_read(notification_id):
 @roles_required("Admin", "Supervisor", "Staff")
 def mark_all_notifications_read():
     user = get_current_user()
-    Notification.query.filter_by(recipient_id=user.id, is_read=False).update({
+    Notification.query.filter_by(
+        recipient_id=user.id,
+        organization_id=user.organization_id,
+        is_read=False,
+    ).update({
         "is_read": True,
         "read_at": db.func.now(),
     }, synchronize_session=False)
