@@ -943,11 +943,14 @@ def get_locations():
             conn.close()
             return jsonify([])
         rows = rows_to_list(conn.execute("""
-            SELECT *
-            FROM locations
-            WHERE organization_id=?
-            ORDER BY name
-        """, (org_id,)).fetchall())
+            SELECT l.*,
+                   CASE WHEN l.id = (
+                       SELECT u.location_id FROM users u WHERE u.id=?
+                   ) THEN 1 ELSE 0 END AS supervisor_authorized
+            FROM locations l
+            WHERE l.organization_id=?
+            ORDER BY l.name
+        """, (uid, org_id)).fetchall())
 
     # Supervisors can see the organisation's site directory, but location
     # administration remains Admin-only. Zone access is separately scoped.
