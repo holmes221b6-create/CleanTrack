@@ -189,12 +189,35 @@ def _validate_boundary(value):
 
 
 @zones_bp.route("", methods=["GET", "POST"])
-@roles_required("Admin")
+@roles_required("Admin", "Supervisor")
 def zones_collection():
     admin = get_current_user()
 
     if request.method == "GET":
         query = Zone.query.filter_by(organization_id=admin.organization_id)
+        if admin.role == "Supervisor":
+            team_ids = {
+                row[0] for row in db.session.query(TeamMember.team_id)
+                .join(Team, TeamMember.team_id == Team.id)
+                .filter(TeamMember.user_id == admin.id, Team.organization_id == admin.organization_id).all()
+            }
+            assigned_zone_ids = {
+                row[0] for row in db.session.query(Operation.zone_id).filter(
+                    Operation.organization_id == admin.organization_id,
+                    Operation.zone_id.isnot(None),
+                    or_(Operation.assigned_supervisor_id == admin.id, Operation.assigned_to_id == admin.id),
+                ).distinct().all()
+            }
+            scope = [Zone.supervisor_id == admin.id]
+            if team_ids:
+                scope.append(Zone.team_id.in_(team_ids))
+                team_locations = db.session.query(Location.id).filter(
+                    Location.organization_id == admin.organization_id, Location.team_id.in_(team_ids)
+                )
+                scope.append(Zone.location_id.in_(team_locations))
+            if assigned_zone_ids:
+                scope.append(Zone.id.in_(assigned_zone_ids))
+            query = query.filter(or_(*scope))
         location_id = request.args.get("location_id")
         status = request.args.get("status")
         if location_id:
@@ -209,6 +232,9 @@ def zones_collection():
             query = query.filter_by(status=status)
         zones = query.order_by(Zone.name.asc(), Zone.id.asc()).all()
         return jsonify({"zones": [_zone_payload(zone, include_people=True) for zone in zones]}), 200
+
+    if admin.role != "Admin":
+        return jsonify({"error": "Only an Admin can create organisation zones."}), 403
 
     data = request.get_json(silent=True) or {}
     name = data.get("name", "")
