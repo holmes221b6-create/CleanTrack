@@ -765,12 +765,14 @@ def delete_location_floor_plan(location_id):
 
 
 @locations_bp.get("/<int:location_id>/history")
-@roles_required("Admin")
+@roles_required("Admin", "Supervisor")
 def location_history(location_id):
     admin = get_current_user()
     location = _location_or_none(location_id, admin)
     if location is None:
         return jsonify({"error": "Location not found in your organization."}), 404
+    if admin.role == "Supervisor" and not _can_access_location_floor_plan(admin, location):
+        return jsonify({"error": "This site's activity is outside your authorised scope."}), 404
     rows = AuditLog.query.filter_by(
         organization_id=admin.organization_id,
         resource_type="Location",
