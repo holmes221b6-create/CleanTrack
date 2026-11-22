@@ -351,7 +351,21 @@ def login():
     user = row_to_dict(conn.execute(
         "SELECT * FROM users WHERE lower(email)=?", (email,)
     ).fetchone())
-    if not user or not bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
+    from werkzeug.security import check_password_hash
+
+    stored_hash = user["password_hash"] if user else ""
+    password_valid = False
+
+    if user:
+        if stored_hash.startswith("scrypt:"):
+            password_valid = check_password_hash(stored_hash, password)
+        else:
+            try:
+                password_valid = bcrypt.checkpw(password.encode(), stored_hash.encode())
+            except (ValueError, TypeError):
+                password_valid = False
+
+    if not password_valid:
         conn.close()
         return jsonify(error="Invalid credentials"), 401
 
@@ -955,16 +969,30 @@ def get_locations():
     # Supervisors can see the organisation's site directory, but location
     # administration remains Admin-only. Zone access is separately scoped.
     elif role == "supervisor":
-        org_id = _current_user_organization(conn, uid)
+        # Resolve the organisation from the supervisor account, falling back
+        # to the organisation owning the supervisor's assigned location.
+        # This supports older supervisor accounts whose organization_id was
+        # not populated when they were created.
+        supervisor = conn.execute("""
+            SELECT u.organization_id, u.location_id, l.organization_id AS location_organization_id
+            FROM users u
+            LEFT JOIN locations l ON l.id=u.location_id
+            WHERE u.id=?
+        """, (uid,)).fetchone()
+        org_id = (
+            supervisor["organization_id"] or supervisor["location_organization_id"]
+            if supervisor else None
+        )
         if not org_id:
             conn.close()
             return jsonify([])
         rows = rows_to_list(conn.execute("""
-            SELECT *
-            FROM locations
-            WHERE organization_id=?
-            ORDER BY name
-        """, (org_id,)).fetchall())
+            SELECT l.*,
+                   CASE WHEN l.id = ? THEN 1 ELSE 0 END AS supervisor_authorized
+            FROM locations l
+            WHERE l.organization_id=?
+            ORDER BY l.name
+        """, (supervisor["location_id"], org_id)).fetchall())
 
     # Staff can only see their own location
     else:
