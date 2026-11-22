@@ -28,6 +28,21 @@ def _zone_or_none(zone_id, user):
     return Zone.query.filter_by(id=zone_id, organization_id=user.organization_id).first()
 
 
+def _supervisor_zone_scope(user, zone):
+    if user.role != "Supervisor":
+        return user.role == "Admin"
+    if zone.supervisor_id == user.id:
+        return True
+    effective_team_id = zone.team_id or (zone.location.team_id if zone.location else None)
+    if not effective_team_id:
+        return False
+    return TeamMember.query.join(Team, TeamMember.team_id == Team.id).filter(
+        TeamMember.user_id == user.id,
+        TeamMember.team_id == effective_team_id,
+        Team.organization_id == user.organization_id,
+    ).first() is not None
+
+
 def _json_safe(value):
     if isinstance(value, datetime):
         return value.isoformat()
@@ -337,17 +352,23 @@ def zones_collection():
 
 
 @zones_bp.route("/<int:zone_id>", methods=["GET", "PATCH"])
-@roles_required("Admin")
+@roles_required("Admin", "Supervisor")
 def zone_detail(zone_id):
     admin = get_current_user()
     zone = _zone_or_none(zone_id, admin)
     if zone is None:
         return jsonify({"error": "Zone not found in your organization."}), 404
+    if admin.role == "Supervisor" and not _supervisor_zone_scope(admin, zone):
+        return jsonify({"error": "This zone is outside your authorised management scope."}), 404
     if request.method == "GET":
         return jsonify({"zone": _zone_payload(zone, include_people=True, include_operations=True)}), 200
 
     data = request.get_json(silent=True) or {}
-    allowed = {"name", "description", "location_id", "team_id", "supervisor_id", "status", "floor_label", "boundary", "qr_enabled", "qr_expires_at", "regenerate_qr"}
+    allowed = (
+        {"name", "description", "status", "floor_label", "boundary"}
+        if admin.role == "Supervisor"
+        else {"name", "description", "location_id", "team_id", "supervisor_id", "status", "floor_label", "boundary", "qr_enabled", "qr_expires_at", "regenerate_qr"}
+    )
     unknown = set(data) - allowed
     if unknown:
         return jsonify({"error": "Unsupported field(s): " + ", ".join(sorted(unknown))}), 400
