@@ -88,16 +88,48 @@ def _notify_admins(admin, location, title, message):
 
 
 @locations_bp.route("", methods=["GET", "POST"])
-@roles_required("Admin")
+@roles_required("Admin", "Supervisor")
 def locations_collection():
-    admin = get_current_user()
+    user = get_current_user()
 
     if request.method == "GET":
         rows = Location.query.filter_by(
-            organization_id=admin.organization_id
+            organization_id=user.organization_id
         ).order_by(Location.name.asc()).all()
-        return jsonify({"locations": [_payload(row) for row in rows]}), 200
+        payloads = []
+        team_ids = set()
+        if user.role == "Supervisor":
+            team_ids = {
+                row[0] for row in db.session.query(TeamMember.team_id)
+                .join(Team, TeamMember.team_id == Team.id)
+                .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id).all()
+            }
+        for row in rows:
+            data = _payload(row)
+            if user.role == "Supervisor":
+                scoped_zones = Zone.query.filter_by(
+                    organization_id=user.organization_id, location_id=row.id
+                ).all()
+                zone_ids = [zone.id for zone in scoped_zones]
+                authorised = bool(
+                    (row.team_id and row.team_id in team_ids)
+                    or any(zone.supervisor_id == user.id or (zone.team_id or row.team_id) in team_ids for zone in scoped_zones)
+                )
+                operation_scope = [Operation.location_id == row.id]
+                if zone_ids:
+                    operation_scope.append(Operation.zone_id.in_(zone_ids))
+                authorised = authorised or Operation.query.filter(
+                    Operation.organization_id == user.organization_id,
+                    or_(*operation_scope),
+                    or_(Operation.assigned_supervisor_id == user.id, Operation.assigned_to_id == user.id),
+                ).first() is not None
+                data["supervisor_authorized"] = authorised
+            payloads.append(data)
+        return jsonify({"locations": payloads}), 200
 
+    if user.role != "Admin":
+        return jsonify({"error": "Only an Admin can create or modify organisation locations."}), 403
+    admin = user
     data = request.get_json(silent=True) or {}
     name = data.get("name", "")
     address = data.get("address", "")
