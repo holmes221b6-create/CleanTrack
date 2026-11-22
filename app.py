@@ -949,24 +949,19 @@ def get_locations():
             ORDER BY name
         """, (org_id,)).fetchall())
 
-    # Supervisor can only see their own location
+    # Supervisors can see the organisation's site directory, but location
+    # administration remains Admin-only. Zone access is separately scoped.
     elif role == "supervisor":
-        supervisor = conn.execute("""
-            SELECT location_id
-            FROM users
-            WHERE id=?
-        """, (uid,)).fetchone()
-
-        if not supervisor or not supervisor["location_id"]:
+        org_id = _current_user_organization(conn, uid)
+        if not org_id:
             conn.close()
             return jsonify([])
-
         rows = rows_to_list(conn.execute("""
             SELECT *
             FROM locations
-            WHERE id=?
+            WHERE organization_id=?
             ORDER BY name
-        """, (supervisor["location_id"],)).fetchall())
+        """, (org_id,)).fetchall())
 
     # Staff can only see their own location
     else:
@@ -1026,7 +1021,7 @@ def create_location():
 #update-locations**************************************************************
 @app.route("/api/locations/<lid>", methods=["PUT"])
 @jwt_required()
-@require_roles("admin", "supervisor")
+@require_roles("admin")
 def update_location(lid):
     uid = get_jwt_identity()
     role = get_jwt().get("role")
