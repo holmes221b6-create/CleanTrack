@@ -248,9 +248,6 @@ def zones_collection():
         zones = query.order_by(Zone.name.asc(), Zone.id.asc()).all()
         return jsonify({"zones": [_zone_payload(zone, include_people=True) for zone in zones]}), 200
 
-    if admin.role != "Admin":
-        return jsonify({"error": "Only an Admin can create organisation zones."}), 403
-
     data = request.get_json(silent=True) or {}
     name = data.get("name", "")
     description = data.get("description", "")
@@ -283,6 +280,20 @@ def zones_collection():
     ).first()
     if location is None or location.status != "active":
         return jsonify({"error": "Choose an active location in your organization."}), 400
+
+    if admin.role == "Supervisor":
+        if not location.team_id or not TeamMember.query.join(Team, TeamMember.team_id == Team.id).filter(
+            TeamMember.user_id == admin.id,
+            TeamMember.team_id == location.team_id,
+            Team.organization_id == admin.organization_id,
+        ).first():
+            return jsonify({"error": "You can create zones only at locations assigned to one of your teams. Ask an Admin to assign this location to your team first."}), 403
+        if team_id not in (None, "", location.team_id):
+            return jsonify({"error": "Supervisors cannot change a location's team assignment."}), 403
+        if supervisor_id not in (None, "", admin.id):
+            return jsonify({"error": "Supervisors cannot assign zones to another Supervisor."}), 403
+        team_id = location.team_id
+        supervisor_id = admin.id
 
     team = None
     if team_id not in (None, ""):
