@@ -578,12 +578,12 @@ def zone_detail(zone_id):
 
 
 @zones_bp.get("/<int:zone_id>/history")
-@roles_required("Admin")
+@roles_required("Admin", "Supervisor")
 def zone_history(zone_id):
     admin = get_current_user()
     zone = _zone_or_none(zone_id, admin)
-    if zone is None:
-        return jsonify({"error": "Zone not found in your organization."}), 404
+    if zone is None or (admin.role == "Supervisor" and not _supervisor_zone_scope(admin, zone)):
+        return jsonify({"error": "Zone not found in your authorised scope."}), 404
     rows = AuditLog.query.filter_by(
         organization_id=admin.organization_id,
         resource_type="Zone",
