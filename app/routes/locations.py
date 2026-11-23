@@ -1,4 +1,6 @@
 from io import BytesIO
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from flask import Blueprint, jsonify, request, send_file
 from sqlalchemy import func, or_
@@ -536,12 +538,12 @@ def location_detail(location_id):
             return jsonify({"error": "Location could not be deleted. Its linked records may prevent deletion; archive it to preserve history."}), 500
 
     data = request.get_json(silent=True) or {}
-    allowed = {"name", "address", "description", "team_id", "latitude", "longitude", "status"}
+    allowed = {"name", "address", "description", "team_id", "latitude", "longitude", "status", "qr_enabled", "qr_expires_at", "regenerate_qr"}
     unknown = set(data) - allowed
     if unknown:
         return jsonify({"error": "Unsupported field(s): " + ", ".join(sorted(unknown))}), 400
 
-    before = {key: getattr(location, key) for key in allowed}
+    before = {key: getattr(location, key) for key in allowed if key != "regenerate_qr"}
     if "name" in data:
         value = data["name"]
         if not isinstance(value, str) or not value.strip() or len(value.strip()) > 150:
@@ -599,6 +601,32 @@ def location_detail(location_id):
             return jsonify({"error": "Longitude must be between -180 and 180."}), 400
         location.latitude, location.longitude = lat, lon
 
+    if "qr_enabled" in data:
+        if not isinstance(data["qr_enabled"], bool):
+            return jsonify({"error": "qr_enabled must be true or false."}), 400
+        location.qr_enabled = data["qr_enabled"]
+
+    if "qr_expires_at" in data:
+        raw_expiry = data["qr_expires_at"]
+        if raw_expiry in (None, ""):
+            location.qr_expires_at = None
+        elif not isinstance(raw_expiry, str):
+            return jsonify({"error": "QR expiry must be a valid ISO date/time or blank."}), 400
+        else:
+            try:
+                expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                location.qr_expires_at = expiry.astimezone(timezone.utc)
+            except ValueError:
+                return jsonify({"error": "QR expiry must be a valid ISO date/time or blank."}), 400
+
+    if data.get("regenerate_qr") is True:
+        before["qr_token"] = location.qr_token
+        location.qr_token = uuid4().hex
+    elif "regenerate_qr" in data and not isinstance(data["regenerate_qr"], bool):
+        return jsonify({"error": "regenerate_qr must be true or false."}), 400
+
     if "status" in data:
         status = data["status"]
         if status not in {"active", "inactive", "archived"}:
@@ -615,7 +643,7 @@ def location_detail(location_id):
         location.status = status
 
     changed = {key: {"before": before[key], "after": getattr(location, key)}
-               for key in allowed if before[key] != getattr(location, key)}
+               for key in before if before[key] != getattr(location, key)}
     if not changed:
         return jsonify({"message": "No location changes were needed.", "location": _payload(location)}), 200
     try:
@@ -822,3 +850,69 @@ def report_location_issue(location_id):
         return jsonify({"error": "The site problem report could not be sent. Please try again."}), 500
 
     return jsonify({"message": "Your site problem report was sent to the organisation Admin."}), 201
+
+
+@locations_bp.get("/resolve/<string:qr_token>")
+@roles_required("Admin", "Supervisor", "Staff")
+def resolve_location_qr(qr_token):
+    user = get_current_user()
+    location = Location.query.filter_by(
+        qr_token=qr_token,
+        organization_id=user.organization_id,
+    ).first()
+    if location is None:
+        return jsonify({"code_status": "invalid", "error": "This location QR is invalid or does not belong to your organization."}), 404
+    if not location.qr_enabled:
+        return jsonify({"code_status": "disabled", "message": "This location QR has been disabled by Admin."}), 410
+    if location.qr_expires_at is not None:
+        expiry = location.qr_expires_at.replace(tzinfo=timezone.utc) if location.qr_expires_at.tzinfo is None else location.qr_expires_at
+        if expiry <= datetime.now(timezone.utc):
+            return jsonify({"code_status": "expired", "message": "This location QR has expired. Ask Admin for a current code."}), 410
+    if location.status != "active":
+        return jsonify({"code_status": "inactive", "message": "This location is not active."}), 410
+
+    team_ids = {
+        row[0] for row in db.session.query(TeamMember.team_id)
+        .join(Team, TeamMember.team_id == Team.id)
+        .filter(TeamMember.user_id == user.id, Team.organization_id == user.organization_id).all()
+    }
+    zone_ids = [row[0] for row in db.session.query(Zone.id).filter_by(
+        organization_id=user.organization_id, location_id=location.id
+    ).all()]
+    operation_scope = [
+        Operation.location_id == location.id,
+        Operation.zone_id.in_(zone_ids) if zone_ids else Operation.id == -1,
+    ]
+    assigned_operations = Operation.query.filter(
+        Operation.organization_id == user.organization_id,
+        or_(*operation_scope),
+        or_(Operation.assigned_to_id == user.id, Operation.assigned_supervisor_id == user.id),
+    ).count()
+    team_match = bool(location.team_id and location.team_id in team_ids)
+    is_assigned = user.role == "Admin" or team_match or assigned_operations > 0
+    if not is_assigned:
+        return jsonify({"code_status": "not_assigned", "message": "This location belongs to your organisation, but it is not assigned to your team or account."}), 403
+
+    zone_rows = Zone.query.filter_by(
+        organization_id=user.organization_id, location_id=location.id
+    ).order_by(Zone.name.asc()).all()
+    visible_zones = [
+        zone.to_dict() for zone in zone_rows
+        if user.role == "Admin" or zone.supervisor_id == user.id
+        or bool((zone.team_id or location.team_id) and (zone.team_id or location.team_id) in team_ids)
+    ]
+    navigation_url = None
+    if location.latitude is not None and location.longitude is not None:
+        navigation_url = "https://www.google.com/maps/dir/?api=1&destination=" + str(location.latitude) + "," + str(location.longitude)
+    return jsonify({
+        "code_status": "active",
+        "location": {
+            "id": location.id, "name": location.name, "address": location.address,
+            "description": location.description, "latitude": location.latitude,
+            "longitude": location.longitude, "team_id": location.team_id,
+            "team_name": location.team.name if location.team else None,
+            "status": location.status,
+        },
+        "zones": visible_zones,
+        "navigation_url": navigation_url,
+    }), 200
