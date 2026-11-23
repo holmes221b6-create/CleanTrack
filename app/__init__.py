@@ -117,6 +117,27 @@ def create_app(config_class=Config):
                     connection.execute(text("ALTER TABLE teams ADD COLUMN capacity INTEGER"))
                 if "whatsapp_group_url" not in team_columns:
                     connection.execute(text("ALTER TABLE teams ADD COLUMN whatsapp_group_url VARCHAR(500)"))
+            if "locations" in tables:
+                location_columns = {item["name"] for item in inspect(connection).get_columns("locations")}
+                location_additions = {
+                    "qr_token": "VARCHAR(64)",
+                    "qr_enabled": "BOOLEAN NOT NULL DEFAULT TRUE",
+                    "qr_expires_at": "TIMESTAMP WITH TIME ZONE",
+                }
+                for column, sql_type in location_additions.items():
+                    if column not in location_columns:
+                        connection.execute(text(f"ALTER TABLE locations ADD COLUMN {column} {sql_type}"))
+                location_rows = connection.execute(text(
+                    "SELECT id FROM locations WHERE qr_token IS NULL OR qr_token = ''"
+                )).fetchall()
+                for row in location_rows:
+                    connection.execute(
+                        text("UPDATE locations SET qr_token = :token WHERE id = :location_id"),
+                        {"token": uuid4().hex, "location_id": row[0]},
+                    )
+                connection.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_locations_qr_token ON locations (qr_token)"
+                ))
             if "zones" in tables:
                 zone_columns = {item["name"] for item in inspect(connection).get_columns("zones")}
                 zone_additions = {
