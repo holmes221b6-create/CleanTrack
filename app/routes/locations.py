@@ -642,7 +642,7 @@ def location_detail(location_id):
                 }), 409
         location.status = status
 
-    changed = {key: {"before": before[key], "after": getattr(location, key)}
+    changed = {key: {"before": before[key].isoformat() if isinstance(before[key], datetime) else before[key], "after": getattr(location, key).isoformat() if isinstance(getattr(location, key), datetime) else getattr(location, key)}
                for key in before if before[key] != getattr(location, key)}
     if not changed:
         return jsonify({"message": "No location changes were needed.", "location": _payload(location)}), 200
@@ -837,19 +837,22 @@ def report_location_issue(location_id):
         "reported_by_role": user.role,
     }
     try:
-        _audit(user, location, "location.issue_reported", details)
+        audit_action = "location.access_requested" if access_request else "location.issue_reported"
+        _audit(user, location, audit_action, details)
+        notification_title = "Site access requested" if access_request else "Site problem reported"
+        notification_verb = "requested team access to" if access_request else "reported a problem at"
         _notify_admins(
             user,
             location,
-            "Site problem reported",
-            f'{user.full_name} reported "{subject.strip()}" at "{location.name}" ({category.strip()}).',
+            notification_title,
+            f'{user.full_name} {notification_verb} "{location.name}": {subject.strip()} ({category.strip()}).',
         )
         db.session.commit()
     except Exception:
         db.session.rollback()
         return jsonify({"error": "The site problem report could not be sent. Please try again."}), 500
 
-    return jsonify({"message": "Your site problem report was sent to the organisation Admin."}), 201
+    return jsonify({"message": "Your team access request was sent to the organisation Admin." if access_request else "Your site problem report was sent to the organisation Admin."}), 201
 
 
 @locations_bp.get("/resolve/<string:qr_token>")
