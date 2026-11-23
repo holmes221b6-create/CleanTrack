@@ -1,5 +1,6 @@
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from app.extensions import db
 
@@ -33,6 +34,10 @@ class Location(db.Model):
         index=True,
     )
 
+    qr_token = db.Column(db.String(64), nullable=False, unique=True, default=lambda: uuid4().hex)
+    qr_enabled = db.Column(db.Boolean, nullable=False, default=True)
+    qr_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
     status = db.Column(db.String(20), nullable=False, default="active")
 
     created_at = db.Column(
@@ -60,6 +65,9 @@ class Location(db.Model):
             "longitude": self.longitude,
             "organization_id": self.organization_id,
             "team_id": self.team_id,
+            "qr_token": self.qr_token,
+            "qr_enabled": bool(self.qr_enabled),
+            "qr_expires_at": self.qr_expires_at.isoformat() if self.qr_expires_at else None,
             "status": self.status,
             "created_at": (
                 self.created_at.isoformat()
