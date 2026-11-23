@@ -779,3 +779,44 @@ def location_history(location_id):
         resource_id=str(location.id),
     ).order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(100).all()
     return jsonify({"history": [row.to_dict() for row in rows]}), 200
+
+@locations_bp.post("/<int:location_id>/issues")
+@roles_required("Admin", "Supervisor")
+def report_location_issue(location_id):
+    user = get_current_user()
+    location = _location_or_none(location_id, user)
+    if location is None:
+        return jsonify({"error": "Location not found in your organization."}), 404
+
+    data = request.get_json(silent=True) or {}
+    category = data.get("category")
+    subject = data.get("subject")
+    description = data.get("description")
+    if not isinstance(category, str) or not category.strip() or len(category.strip()) > 100:
+        return jsonify({"error": "Choose a valid problem category."}), 400
+    if not isinstance(subject, str) or not subject.strip() or len(subject.strip()) > 160:
+        return jsonify({"error": "A subject of 160 characters or fewer is required."}), 400
+    if not isinstance(description, str) or not description.strip() or len(description.strip()) > 5000:
+        return jsonify({"error": "Problem details are required and must be 5,000 characters or fewer."}), 400
+
+    details = {
+        "category": category.strip(),
+        "subject": subject.strip(),
+        "description": description.strip(),
+        "reported_by": user.full_name,
+        "reported_by_role": user.role,
+    }
+    try:
+        _audit(user, location, "location.issue_reported", details)
+        _notify_admins(
+            user,
+            location,
+            "Site problem reported",
+            f'{user.full_name} reported "{subject.strip()}" at "{location.name}" ({category.strip()}).',
+        )
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({"error": "The site problem report could not be sent. Please try again."}), 500
+
+    return jsonify({"message": "Your site problem report was sent to the organisation Admin."}), 201
