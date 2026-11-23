@@ -787,11 +787,11 @@ def report_location_issue(location_id):
     location = _location_or_none(location_id, user)
     if location is None:
         return jsonify({"error": "Location not found in your organization."}), 404
-    if user.role == "Supervisor" and not _can_access_location_floor_plan(user, location):
-        return jsonify({"error": "This site's issue reporting is outside your authorised scope."}), 404
-
     data = request.get_json(silent=True) or {}
     category = data.get("category")
+    access_request = isinstance(category, str) and category.strip().lower() == "team access request"
+    if user.role == "Supervisor" and not access_request and not _can_access_location_floor_plan(user, location):
+        return jsonify({"error": "This site's issue reporting is outside your authorised scope."}), 404
     subject = data.get("subject")
     description = data.get("description")
     if not isinstance(category, str) or not category.strip() or len(category.strip()) > 100:
