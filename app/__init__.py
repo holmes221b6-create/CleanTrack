@@ -373,23 +373,40 @@ def create_app(config_class=Config):
             db.session.rollback()
             app.logger.exception("Could not finalize due member terminations.")
 
+    # The background scheduler handles these checks. Keep a throttled
+    # per-organisation request-path safety net instead of repeating three
+    # database scans on every API call.
+    import threading
+    import time
+    _due_check_lock = threading.Lock()
+    _due_check_last_run = {}
+    _due_check_interval = 45.0
+
     @app.before_request
     def _process_due_announcements_and_escalations():
-        # Run due communication checks during ordinary authenticated activity.
-        # This avoids requiring the announcements screen itself to stay open.
         if not request.path.startswith("/api/") or request.path.startswith("/api/health"):
             return None
         try:
             user = get_current_user()
-            if user is not None and user.organization_id:
-                _process_due_schedules(user.organization_id)
-                _process_escalations(user.organization_id)
-                _evaluate_escalations(user.organization_id)
+            if user is None or not user.organization_id:
+                return None
+            org_id = user.organization_id
+            now = time.monotonic()
+            with _due_check_lock:
+                if now - _due_check_last_run.get(org_id, 0.0) < _due_check_interval:
+                    return None
+                _due_check_last_run[org_id] = now
+            try:
+                _process_due_schedules(org_id)
+                _process_escalations(org_id)
+                _evaluate_escalations(org_id)
+            except Exception:
+                with _due_check_lock:
+                    _due_check_last_run.pop(org_id, None)
+                raise
         except Exception:
-            # Anonymous/login requests and expired sessions should continue to
-            # their normal handler. Do not turn a missed scheduler check into a
-            # failed unrelated API request.
             db.session.rollback()
+            app.logger.exception("Deferred communication checks failed; the API request will continue.")
         return None
 
     @app.before_request
