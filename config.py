@@ -20,7 +20,18 @@ class Config:
 
     SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SQLALCHEMY_ENGINE_OPTIONS = ({"pool_pre_ping": True, "pool_recycle": 300} if _database_url().startswith("postgresql+") else {})
+    SQLALCHEMY_ENGINE_OPTIONS = (
+        {
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+            "pool_timeout": 20,
+            # Bound connection establishment so a stalled PostgreSQL
+            # connection fails clearly instead of hanging app startup.
+            "connect_args": {"connect_timeout": 15},
+        }
+        if _database_url().startswith("postgresql+")
+        else {}
+    )
 
     JWT_SECRET_KEY = os.getenv(
         "JWT_SECRET_KEY",
