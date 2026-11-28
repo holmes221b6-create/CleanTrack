@@ -192,11 +192,25 @@ def create_app(config_class=Config):
                 for column, sql_type in additive_columns.items():
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE organizations ADD COLUMN {column} {sql_type}"))
-                connection.execute(text("""
-                    UPDATE organizations
-                    SET role_labels = CAST('{"Admin":"Admin","Supervisor":"Supervisor","Staff":"Staff"}' AS JSON)
-                    WHERE role_labels IS NULL
-                """))
+                default_role_labels = '{"Admin":"Admin","Supervisor":"Supervisor","Staff":"Staff"}'
+                if connection.dialect.name == "postgresql":
+                    connection.execute(
+                        text("""
+                            UPDATE organizations
+                            SET role_labels = CAST(:role_labels AS JSON)
+                            WHERE role_labels IS NULL
+                        """),
+                        {"role_labels": default_role_labels},
+                    )
+                else:
+                    connection.execute(
+                        text("""
+                            UPDATE organizations
+                            SET role_labels = :role_labels
+                            WHERE role_labels IS NULL
+                        """),
+                        {"role_labels": default_role_labels},
+                    )
             if "team_policies" in tables:
                 policy_columns = {item["name"] for item in inspect(connection).get_columns("team_policies")}
                 if "policy_type" not in policy_columns:
