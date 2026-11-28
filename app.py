@@ -3240,6 +3240,96 @@ def mark_all_read():
 
     return jsonify(message="Alerts marked read")
 
+
+# Supervisor team insights. Scope is derived from the authenticated supervisor's
+# own team memberships; clients cannot supply or widen a team/location filter.
+@app.route("/api/supervisor/insights", methods=["GET"])
+@require_roles("supervisor")
+def supervisor_team_insights():
+    uid = get_jwt_identity()
+    try:
+        days = max(7, min(int(request.args.get("days", 30)), 90))
+    except (TypeError, ValueError):
+        days = 30
+    conn = get_db()
+    supervisor = row_to_dict(conn.execute(
+        "SELECT id, organization_id FROM users WHERE id=? AND role='supervisor'", (uid,)
+    ).fetchone())
+    if not supervisor or not supervisor.get("organization_id"):
+        conn.close()
+        return jsonify(error="Supervisor organization is not configured."), 403
+    team_rows = conn.execute("""
+        SELECT t.id, t.name FROM team_members tm
+        JOIN teams t ON t.id=tm.team_id
+        WHERE tm.user_id=? AND t.organization_id=? AND t.status='active'
+        ORDER BY t.name COLLATE NOCASE
+    """, (uid, supervisor["organization_id"])).fetchall()
+    team_ids = [str(row["id"]) for row in team_rows]
+    team_names = [str(row["name"]) for row in team_rows]
+    if not team_ids:
+        conn.close()
+        return jsonify(teams=[], staff=[], trend=[], zones=[],
+            summary={"staff_count":0,"total_tasks":0,"completed":0,"missed":0,"compliance_pct":None,"avg_duration":None},
+            message="No active team is assigned to this supervisor yet.")
+    marks = ",".join("?" for _ in team_ids)
+    staff_rows = rows_to_list(conn.execute(f"""
+        SELECT u.id,u.name FROM users u
+        JOIN team_members tm ON tm.user_id=u.id
+        WHERE tm.team_id IN ({marks}) AND u.organization_id=?
+          AND u.role IN ('staff','employee') AND u.membership_status='approved' AND u.is_active=1
+        GROUP BY u.id,u.name ORDER BY u.name COLLATE NOCASE
+    """, tuple(team_ids)+(supervisor["organization_id"],)).fetchall())
+    staff_ids = [str(row["id"]) for row in staff_rows]
+    if not staff_ids:
+        conn.close()
+        return jsonify(teams=team_names,staff=[],trend=[],zones=[],
+            summary={"staff_count":0,"total_tasks":0,"completed":0,"missed":0,"compliance_pct":None,"avg_duration":None},
+            message="No active staff are assigned to this supervisor's team yet.")
+    smarks=",".join("?" for _ in staff_ids)
+    offset="-"+str(days-1)+" days"
+    totals=row_to_dict(conn.execute(f"""
+        SELECT COUNT(*) total_tasks,
+          SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
+          SUM(CASE WHEN status='missed' THEN 1 ELSE 0 END) missed,
+          AVG(CASE WHEN status='completed' THEN duration_minutes END) avg_duration
+        FROM tasks WHERE assigned_to IN ({smarks}) AND DATE(scheduled_at)>=DATE('now',?)
+    """,tuple(staff_ids)+(offset,)).fetchone()) or {}
+    total=int(totals.get("total_tasks") or 0); completed=int(totals.get("completed") or 0); missed=int(totals.get("missed") or 0)
+    summary={"staff_count":len(staff_ids),"total_tasks":total,"completed":completed,"missed":missed,
+      "compliance_pct":round(completed*100/total,1) if total else None,
+      "avg_duration":round(float(totals["avg_duration"]),1) if totals.get("avg_duration") is not None else None}
+    trend=rows_to_list(conn.execute(f"""
+        SELECT DATE(scheduled_at) period,COUNT(*) total,
+          SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) completed,
+          SUM(CASE WHEN status='missed' THEN 1 ELSE 0 END) missed,
+          ROUND(100.0*SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0),1) compliance_pct
+        FROM tasks WHERE assigned_to IN ({smarks}) AND DATE(scheduled_at)>=DATE('now',?)
+        GROUP BY DATE(scheduled_at) ORDER BY period
+    """,tuple(staff_ids)+(offset,)).fetchall())
+    staff=rows_to_list(conn.execute(f"""
+        SELECT u.id,u.name,COUNT(t.id) total_tasks,
+          SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) completed,
+          SUM(CASE WHEN t.status='missed' THEN 1 ELSE 0 END) missed,
+          ROUND(100.0*SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END)/NULLIF(COUNT(t.id),0),1) compliance_pct,
+          AVG(CASE WHEN t.status='completed' THEN t.duration_minutes END) avg_duration
+        FROM users u LEFT JOIN tasks t ON t.assigned_to=u.id AND DATE(t.scheduled_at)>=DATE('now',?)
+        WHERE u.id IN ({smarks}) GROUP BY u.id,u.name
+        ORDER BY compliance_pct DESC,completed DESC,u.name COLLATE NOCASE
+    """,(offset,)+tuple(staff_ids)).fetchall())
+    zones=rows_to_list(conn.execute(f"""
+        SELECT z.id,z.name,z.floor,l.name location_name,COUNT(t.id) total_tasks,
+          SUM(CASE WHEN t.status='missed' THEN 1 ELSE 0 END) missed_count,
+          SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) completed_count,
+          ROUND(100.0*SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END)/NULLIF(COUNT(t.id),0),1) compliance_pct
+        FROM zones z JOIN locations l ON l.id=z.location_id
+        LEFT JOIN tasks t ON t.zone_id=z.id AND t.assigned_to IN ({smarks}) AND DATE(t.scheduled_at)>=DATE('now',?)
+        WHERE l.team_id IN ({marks}) AND l.organization_id=?
+        GROUP BY z.id,z.name,z.floor,l.name
+        ORDER BY missed_count DESC,z.name COLLATE NOCASE
+    """,tuple(staff_ids)+(offset,)+tuple(team_ids)+(supervisor["organization_id"],)).fetchall())
+    conn.close()
+    return jsonify(teams=team_names,summary=summary,trend=trend,staff=staff,zones=zones,days=days)
+
 # ─── analytics ────────────────────────────────────────────────────────────────
 @app.route("/api/analytics/dashboard")
 @jwt_required()
