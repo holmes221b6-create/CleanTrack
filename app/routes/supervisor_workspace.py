@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from app.extensions import db
 from app.models.operation import Operation
@@ -195,7 +195,6 @@ def supervisor_workspace():
 @roles_required("Supervisor")
 def supervisor_insights():
     """Return verified, organisation- and team-scoped insight aggregates."""
-    from datetime import date
     from app.models.location import Location
     from app.models.zone import Zone
     from app.models.operation_execution import OperationExecution
@@ -215,7 +214,7 @@ def supervisor_insights():
         return jsonify({"error": "Your assigned team is unavailable."}), 404
 
     try:
-        days = int(__import__("flask").request.args.get("days", "30"))
+        days = int(request.args.get("days", "30"))
     except (TypeError, ValueError):
         return jsonify({"error": "The days parameter must be 7, 30 or 90."}), 400
     if days not in (7, 30, 90):
@@ -253,24 +252,42 @@ def supervisor_insights():
         .all()
     )
     staff_members = [row.user for row in memberships]
-    staff_by_id = {person.id: person for person in staff_members}
 
-    # Reuse the established supervisor permission scope, then resolve legacy
-    # operations through their team, location, or zone assignment.
+    # Reuse the established permission scope, then resolve legacy records
+    # through their team, location, or zone assignment.
     scoped_operations = _scoped_operation_query(user).all()
+
+    def as_utc(value):
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    def insight_timestamp(operation):
+        # Count completed work when it was actually submitted/reviewed, even
+        # when its operation was originally created before this reporting window.
+        if str(operation.status or "").strip().lower() in {
+            "completed", "complete", "approved", "verified", "done", "closed"
+        }:
+            return as_utc(
+                operation.reviewed_at or operation.submitted_at
+                or operation.updated_at or operation.created_at
+            )
+        return as_utc(operation.created_at)
+
+    zone_by_id = {zone.id: zone for zone in team_zones}
     operations = []
     for operation in scoped_operations:
         resolved_team_id = operation.team_id
-        if resolved_team_id is None and operation.zone_id in zone_ids:
-            zone = next((item for item in team_zones if item.id == operation.zone_id), None)
-            resolved_team_id = (zone.team_id or (zone.location.team_id if zone and zone.location else None)) if zone else None
-            if resolved_team_id is None and zone and zone.location_id in location_ids:
+        if resolved_team_id is None and operation.zone_id in zone_by_id:
+            zone = zone_by_id[operation.zone_id]
+            resolved_team_id = zone.team_id
+            if resolved_team_id is None and zone.location_id in location_ids:
                 resolved_team_id = team_id
         if resolved_team_id is None and operation.location_id in location_ids:
             resolved_team_id = team_id
-        if resolved_team_id == team_id and operation.created_at and start_at <= (
-            operation.created_at if operation.created_at.tzinfo else operation.created_at.replace(tzinfo=timezone.utc)
-        ) < end_at:
+
+        activity_at = insight_timestamp(operation)
+        if resolved_team_id == team_id and activity_at and start_at <= activity_at < end_at:
             operations.append(operation)
 
     done_statuses = {"completed", "complete", "approved", "verified", "done", "closed"}
@@ -295,10 +312,10 @@ def supervisor_insights():
         day = start_day + timedelta(days=offset)
         daily[day.isoformat()] = {"period": day.isoformat(), "total": 0, "completed": 0, "missed": 0}
     for operation in operations:
-        created = operation.created_at
-        if created and created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        key = created.date().isoformat()
+        activity_at = insight_timestamp(operation)
+        if activity_at is None:
+            continue
+        key = activity_at.date().isoformat()
         if key in daily:
             daily[key]["total"] += 1
             daily[key]["completed"] += int(is_done(operation))
@@ -379,7 +396,7 @@ def supervisor_insights():
         "teams": [team.name],
         "period": {"start_date": start_day.isoformat(), "end_date": today.isoformat(), "days": days},
         "methodology": {
-            "period_basis": "Operations created during the selected calendar-day period.",
+            "period_basis": "Open operations are counted by creation date; completed operations are counted by their submission/review date when available, so older work completed in this period is included.",
             "compliance": "Completed operations divided by all recorded operations in the selected period.",
             "average_duration": "Mean elapsed minutes from execution start to submission, using completed executions with timestamps. Null when no such records exist.",
             "missed": "Operations explicitly marked missed/failed or currently marked overdue while not closed.",
