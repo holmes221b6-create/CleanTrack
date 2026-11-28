@@ -189,3 +189,199 @@ def supervisor_workspace():
         "activity": activity_rows,
         "metrics": metrics,
     }), 200
+
+
+@supervisor_workspace_bp.get("/insights")
+@roles_required("Supervisor")
+def supervisor_insights():
+    """Return verified, organisation- and team-scoped insight aggregates."""
+    from datetime import date
+    from app.models.location import Location
+    from app.models.zone import Zone
+    from app.models.operation_execution import OperationExecution
+
+    user = get_current_user()
+    team_ids = _team_ids(user)
+    if len(team_ids) != 1:
+        return jsonify({
+            "error": "Your account must belong to exactly one active team before team insights can load."
+        }), 409
+
+    team_id = next(iter(team_ids))
+    team = Team.query.filter_by(
+        id=team_id, organization_id=user.organization_id, status="active"
+    ).first()
+    if team is None:
+        return jsonify({"error": "Your assigned team is unavailable."}), 404
+
+    try:
+        days = int(__import__("flask").request.args.get("days", "30"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "The days parameter must be 7, 30 or 90."}), 400
+    if days not in (7, 30, 90):
+        return jsonify({"error": "The days parameter must be 7, 30 or 90."}), 400
+
+    today = datetime.now(timezone.utc).date()
+    start_day = today - timedelta(days=days - 1)
+    start_at = datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
+    end_at = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+
+    locations = Location.query.filter_by(
+        organization_id=user.organization_id, team_id=team_id
+    ).all()
+    location_ids = {row.id for row in locations}
+    zones = Zone.query.filter(
+        Zone.organization_id == user.organization_id,
+        Zone.status == "active",
+    ).all()
+    team_zones = [
+        row for row in zones
+        if row.team_id == team_id or row.location_id in location_ids
+    ]
+    zone_ids = {row.id for row in team_zones}
+    location_names = {row.id: row.name for row in locations}
+
+    memberships = (
+        TeamMember.query.join(User, User.id == TeamMember.user_id)
+        .filter(
+            TeamMember.team_id == team_id,
+            User.organization_id == user.organization_id,
+            User.role == "Staff",
+            User.account_status == "active",
+        )
+        .order_by(User.full_name.asc())
+        .all()
+    )
+    staff_members = [row.user for row in memberships]
+    staff_by_id = {person.id: person for person in staff_members}
+
+    # Reuse the established supervisor permission scope, then resolve legacy
+    # operations through their team, location, or zone assignment.
+    scoped_operations = _scoped_operation_query(user).all()
+    operations = []
+    for operation in scoped_operations:
+        resolved_team_id = operation.team_id
+        if resolved_team_id is None and operation.zone_id in zone_ids:
+            zone = next((item for item in team_zones if item.id == operation.zone_id), None)
+            resolved_team_id = (zone.team_id or (zone.location.team_id if zone and zone.location else None)) if zone else None
+            if resolved_team_id is None and zone and zone.location_id in location_ids:
+                resolved_team_id = team_id
+        if resolved_team_id is None and operation.location_id in location_ids:
+            resolved_team_id = team_id
+        if resolved_team_id == team_id and operation.created_at and start_at <= (
+            operation.created_at if operation.created_at.tzinfo else operation.created_at.replace(tzinfo=timezone.utc)
+        ) < end_at:
+            operations.append(operation)
+
+    done_statuses = {"completed", "complete", "approved", "verified", "done", "closed"}
+    closed_statuses = done_statuses | {"cancelled", "canceled", "archived"}
+    missed_statuses = {"missed", "failed"}
+    def is_done(operation):
+        return str(operation.status or "").strip().lower() in done_statuses
+
+    def is_missed(operation):
+        status = str(operation.status or "").strip().lower()
+        return status in missed_statuses or (
+            bool(operation.overdue) and status not in closed_statuses
+        )
+
+    total = len(operations)
+    completed = sum(1 for item in operations if is_done(item))
+    missed = sum(1 for item in operations if is_missed(item))
+    compliance = round(completed * 100 / total, 1) if total else None
+
+    daily = {}
+    for offset in range(days):
+        day = start_day + timedelta(days=offset)
+        daily[day.isoformat()] = {"period": day.isoformat(), "total": 0, "completed": 0, "missed": 0}
+    for operation in operations:
+        created = operation.created_at
+        if created and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        key = created.date().isoformat()
+        if key in daily:
+            daily[key]["total"] += 1
+            daily[key]["completed"] += int(is_done(operation))
+            daily[key]["missed"] += int(is_missed(operation))
+    trend = []
+    for row in daily.values():
+        row["compliance_pct"] = round(row["completed"] * 100 / row["total"], 1) if row["total"] else None
+        trend.append(row)
+
+    staff_totals = {
+        person.id: {"id": person.id, "name": person.full_name, "total_tasks": 0, "completed": 0}
+        for person in staff_members
+    }
+    for operation in operations:
+        person_id = operation.assigned_to_id
+        if person_id in staff_totals:
+            staff_totals[person_id]["total_tasks"] += 1
+            staff_totals[person_id]["completed"] += int(is_done(operation))
+    staff_rows = []
+    for row in staff_totals.values():
+        row["compliance_pct"] = (
+            round(row["completed"] * 100 / row["total_tasks"], 1)
+            if row["total_tasks"] else None
+        )
+        staff_rows.append(row)
+    staff_rows.sort(key=lambda row: (
+        row["compliance_pct"] is None,
+        -(row["compliance_pct"] or 0),
+        -row["completed"],
+        row["name"].casefold(),
+    ))
+
+    durations = []
+    operation_ids = [item.id for item in operations if is_done(item)]
+    if operation_ids:
+        executions = OperationExecution.query.filter(
+            OperationExecution.operation_id.in_(operation_ids),
+            OperationExecution.submitted_at.isnot(None),
+        ).all()
+        for execution in executions:
+            started = execution.started_at
+            submitted = execution.submitted_at
+            if not started or not submitted:
+                continue
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if submitted.tzinfo is None:
+                submitted = submitted.replace(tzinfo=timezone.utc)
+            minutes = (submitted - started).total_seconds() / 60
+            if 0 <= minutes <= 60 * 24 * 30:
+                durations.append(minutes)
+    avg_duration = round(sum(durations) / len(durations)) if durations else None
+
+    zone_misses = {zone.id: 0 for zone in team_zones}
+    for operation in operations:
+        if is_missed(operation) and operation.zone_id in zone_misses:
+            zone_misses[operation.zone_id] += 1
+    zone_rows = [{
+        "id": zone.id,
+        "name": zone.name,
+        "location_name": location_names.get(zone.location_id) or (zone.location.name if zone.location else "Location"),
+        "missed_count": zone_misses.get(zone.id, 0),
+    } for zone in team_zones]
+    zone_rows.sort(key=lambda row: (-row["missed_count"], row["name"].casefold()))
+
+    return jsonify({
+        "summary": {
+            "staff_count": len(staff_members),
+            "total_tasks": total,
+            "completed": completed,
+            "missed": missed,
+            "compliance_pct": compliance,
+            "avg_duration": avg_duration,
+        },
+        "trend": trend,
+        "staff": staff_rows,
+        "zones": zone_rows,
+        "teams": [team.name],
+        "period": {"start_date": start_day.isoformat(), "end_date": today.isoformat(), "days": days},
+        "methodology": {
+            "period_basis": "Operations created during the selected calendar-day period.",
+            "compliance": "Completed operations divided by all recorded operations in the selected period.",
+            "average_duration": "Mean elapsed minutes from execution start to submission, using completed executions with timestamps. Null when no such records exist.",
+            "missed": "Operations explicitly marked missed/failed or currently marked overdue while not closed.",
+        },
+    }), 200
